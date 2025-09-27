@@ -12,6 +12,9 @@ export const byok = {
   getPreference: () => api.get('/api/user/api-key-preference'),
 };
 
+
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3004';
+const PLATFORM_URL = import.meta.env.VITE_PLATFORM_URL || 'http://localhost:5173';
 import axios from 'axios';
 // CSRF token cache
 let csrfToken = null;
@@ -28,9 +31,6 @@ export async function fetchCsrfToken() {
   }
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3004';
-const PLATFORM_URL = import.meta.env.VITE_PLATFORM_URL || 'http://localhost:5173';
-
 const api = axios.create({
   baseURL: API_BASE_URL,
   timeout: 30000,
@@ -44,15 +44,20 @@ const api = axios.create({
   api.interceptors.request.use(async (config) => {
     const method = config.method && config.method.toUpperCase();
     if (["POST", "PUT", "DELETE", "PATCH"].includes(method)) {
-      if (!csrfToken) {
-        await fetchCsrfToken();
-      }
+      // Always fetch a fresh CSRF token for every state-changing request
+      csrfToken = await fetchCsrfToken();
       if (csrfToken) {
         config.headers['X-CSRF-Token'] = csrfToken;
       }
     }
     return config;
-  }, (error) => Promise.reject(error));
+  }, (error) => {
+    // If CSRF error, reset token cache
+    if (error?.response?.status === 403 && error?.response?.data?.code === 'EBADCSRFTOKEN') {
+      csrfToken = null;
+    }
+    return Promise.reject(error);
+  });
 
 let isRefreshing = false;
 let failedQueue = [];
