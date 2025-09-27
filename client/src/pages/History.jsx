@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { History as HistoryIcon, MessageCircle, Heart, Share2, Calendar, Filter, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
-import api from '../utils/api';
+import { posts, scheduling } from '../utils/api';
 import LoadingSpinner from '../components/LoadingSpinner';
 
 const History = () => {
@@ -11,20 +11,23 @@ const History = () => {
   const [sortBy, setSortBy] = useState('newest');
   const [deletingId, setDeletingId] = useState(null);
   const handleDelete = async (postId, isScheduled) => {
-    if (!window.confirm('Are you sure you want to delete this post? This cannot be undone.')) return;
-    setDeletingId(postId);
-    try {
-      if (isScheduled) {
-        await api.scheduling.cancel(postId);
-      } else {
-        await api.posts.delete(postId);
+      if (!window.confirm('Are you sure you want to delete this post? This cannot be undone.')) return;
+      console.log('[DELETE] Attempting to delete post:', { postId, isScheduled });
+      setDeletingId(postId);
+      try {
+        if (isScheduled) {
+          await scheduling.cancel(postId);
+        } else {
+          console.log('Before axios delete', postId);
+          await posts.delete(postId);
+        }
+        setPostedPosts((prev) => prev.filter((p) => p.id !== postId && p.linkedin_post_id !== postId));
+      } catch (err) {
+        window.alert('Failed to delete post.');
+        console.error('Delete error:', err);
+      } finally {
+        setDeletingId(null);
       }
-      setPostedPosts((prev) => prev.filter((p) => p.id !== postId));
-    } catch (err) {
-      window.alert('Failed to delete post.');
-    } finally {
-      setDeletingId(null);
-    }
   };
 
   useEffect(() => {
@@ -123,28 +126,33 @@ const History = () => {
             </thead>
             <tbody>
               {(postedPosts || []).map(post => {
-                // Heuristic: scheduled posts have 'scheduled_time' or status 'completed', normal posts do not
-                const isScheduled = !!post.scheduled_time || post.status === 'completed';
-                return (
-                  <tr key={post.linkedin_post_id} className="hover:bg-gray-50">
-                    <td className="px-4 py-2 max-w-xs truncate" title={post.post_content}>{post.post_content}</td>
-                    <td className="px-4 py-2">{post.views}</td>
-                    <td className="px-4 py-2">{post.likes}</td>
-                    <td className="px-4 py-2">{post.shares}</td>
-                    <td className="px-4 py-2">{new Date(post.created_at).toLocaleDateString()}</td>
-                    <td className="px-4 py-2">
-                      <button
-                        className={`btn btn-sm btn-danger flex items-center gap-1 ${deletingId === post.id ? 'opacity-50 cursor-not-allowed' : ''}`}
-                        onClick={() => handleDelete(post.id, isScheduled)}
-                        disabled={deletingId === post.id}
-                        title="Delete post"
-                      >
-                        <Trash2 size={16} />
-                        {deletingId === post.id ? 'Deleting...' : 'Delete'}
-                      </button>
-                    </td>
-                  </tr>
-                );
+                  // Heuristic: scheduled posts have 'scheduled_time' or status 'completed', normal posts do not
+                  const isScheduled = !!post.scheduled_time || post.status === 'completed';
+                  // Use post.id if available, else linkedin_post_id
+                  const deleteId = post.id || post.linkedin_post_id;
+                  return (
+                    <tr key={deleteId} className="hover:bg-gray-50">
+                      <td className="px-4 py-2 max-w-xs truncate" title={post.post_content}>{post.post_content}</td>
+                      <td className="px-4 py-2">{post.views}</td>
+                      <td className="px-4 py-2">{post.likes}</td>
+                      <td className="px-4 py-2">{post.shares}</td>
+                      <td className="px-4 py-2">{new Date(post.created_at).toLocaleDateString()}</td>
+                      <td className="px-4 py-2">
+                        <button
+                          className={`btn btn-sm btn-danger flex items-center gap-1 ${deletingId === deleteId ? 'opacity-50 cursor-not-allowed' : ''}`}
+                          onClick={() => {
+                            console.log('[DELETE BUTTON] post.id:', post.id, 'linkedin_post_id:', post.linkedin_post_id, 'isScheduled:', isScheduled);
+                            handleDelete(deleteId, isScheduled);
+                          }}
+                          disabled={deletingId === deleteId}
+                          title="Delete post"
+                        >
+                          <Trash2 size={16} />
+                          {deletingId === deleteId ? 'Deleting...' : 'Delete'}
+                        </button>
+                      </td>
+                    </tr>
+                  );
               })}
             </tbody>
           </table>

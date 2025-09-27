@@ -113,7 +113,10 @@ export async function createLinkedInPost(accessToken, authorUrn, post_content, m
 
 // Delete a LinkedIn post
 export async function deleteLinkedInPost(accessToken, postUrn) {
-  const url = `https://api.linkedin.com/v2/ugcPosts/${postUrn}`;
+  // Extract numeric ID from URN (e.g., urn:li:share:7377769581513277440 => 7377769581513277440)
+  const match = postUrn.match(/([0-9]+)$/);
+  const shareId = match ? match[1] : postUrn;
+  const url = `https://api.linkedin.com/v2/shares/${shareId}`;
   const response = await axios.delete(url, {
     headers: {
       'Authorization': `Bearer ${accessToken}`,

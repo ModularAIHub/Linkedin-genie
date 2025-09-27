@@ -48,7 +48,10 @@ const api = axios.create({
       csrfToken = await fetchCsrfToken();
       if (csrfToken) {
         config.headers['X-CSRF-Token'] = csrfToken;
+      } else {
+        console.warn('No CSRF token fetched for', method, config.url);
       }
+      config.withCredentials = true; // Ensure cookies are sent
     }
     return config;
   }, (error) => {
@@ -99,10 +102,15 @@ api.interceptors.response.use(
         const currentPath = window.location.pathname;
         if (!currentPath.includes('/auth/callback') && !currentPath.includes('/login')) {
           const currentUrl = encodeURIComponent(window.location.href);
+          // Use PLATFORM_URL from .env for login redirect
           window.location.href = `${PLATFORM_URL}/login?redirect=${currentUrl}`;
         }
         return Promise.reject(refreshError);
       }
+    }
+    // Debug log for CSRF errors
+    if (error?.response?.status === 403 && error?.response?.data?.code === 'EBADCSRFTOKEN') {
+      console.warn('CSRF token error:', error?.response?.data);
     }
     return Promise.reject(error);
   }
