@@ -10,12 +10,16 @@ const History = () => {
   const [statusFilter, setStatusFilter] = useState('all');
   const [sortBy, setSortBy] = useState('newest');
   const [deletingId, setDeletingId] = useState(null);
-  const handleDelete = async (postId) => {
+  const handleDelete = async (postId, isScheduled) => {
     if (!window.confirm('Are you sure you want to delete this post? This cannot be undone.')) return;
     setDeletingId(postId);
     try {
-      await api.posts.delete(postId);
-      setPostedPosts((prev) => prev.filter((p) => p.linkedin_post_id !== postId));
+      if (isScheduled) {
+        await api.scheduling.cancel(postId);
+      } else {
+        await api.posts.delete(postId);
+      }
+      setPostedPosts((prev) => prev.filter((p) => p.id !== postId));
     } catch (err) {
       window.alert('Failed to delete post.');
     } finally {
@@ -118,26 +122,30 @@ const History = () => {
               </tr>
             </thead>
             <tbody>
-              {(postedPosts || []).map(post => (
-                <tr key={post.linkedin_post_id} className="hover:bg-gray-50">
-                  <td className="px-4 py-2 max-w-xs truncate" title={post.post_content}>{post.post_content}</td>
-                  <td className="px-4 py-2">{post.views}</td>
-                  <td className="px-4 py-2">{post.likes}</td>
-                  <td className="px-4 py-2">{post.shares}</td>
-                  <td className="px-4 py-2">{new Date(post.created_at).toLocaleDateString()}</td>
-                  <td className="px-4 py-2">
-                    <button
-                      className={`btn btn-sm btn-danger flex items-center gap-1 ${deletingId === post.linkedin_post_id ? 'opacity-50 cursor-not-allowed' : ''}`}
-                      onClick={() => handleDelete(post.linkedin_post_id)}
-                      disabled={deletingId === post.linkedin_post_id}
-                      title="Delete post"
-                    >
-                      <Trash2 size={16} />
-                      {deletingId === post.linkedin_post_id ? 'Deleting...' : 'Delete'}
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {(postedPosts || []).map(post => {
+                // Heuristic: scheduled posts have 'scheduled_time' or status 'completed', normal posts do not
+                const isScheduled = !!post.scheduled_time || post.status === 'completed';
+                return (
+                  <tr key={post.linkedin_post_id} className="hover:bg-gray-50">
+                    <td className="px-4 py-2 max-w-xs truncate" title={post.post_content}>{post.post_content}</td>
+                    <td className="px-4 py-2">{post.views}</td>
+                    <td className="px-4 py-2">{post.likes}</td>
+                    <td className="px-4 py-2">{post.shares}</td>
+                    <td className="px-4 py-2">{new Date(post.created_at).toLocaleDateString()}</td>
+                    <td className="px-4 py-2">
+                      <button
+                        className={`btn btn-sm btn-danger flex items-center gap-1 ${deletingId === post.id ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        onClick={() => handleDelete(post.id, isScheduled)}
+                        disabled={deletingId === post.id}
+                        title="Delete post"
+                      >
+                        <Trash2 size={16} />
+                        {deletingId === post.id ? 'Deleting...' : 'Delete'}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

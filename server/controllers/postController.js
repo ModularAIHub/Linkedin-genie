@@ -78,9 +78,14 @@ export async function deletePost(req, res) {
       return res.status(404).json({ error: 'Post not found' });
     }
     const post = rows[0];
+    // Ensure linkedin_post_id is a full URN
+    let postUrn = post.linkedin_post_id;
+    if (postUrn && !postUrn.startsWith('urn:li:share:')) {
+      postUrn = `urn:li:share:${postUrn}`;
+    }
     // Delete from LinkedIn
     try {
-      await linkedinService.deleteLinkedInPost(req.user.linkedinAccessToken, post.linkedin_post_id);
+      await linkedinService.deleteLinkedInPost(req.user.linkedinAccessToken, postUrn);
       // Update status in DB
       await pool.query(
         'UPDATE linkedin_posts SET status = $1, updated_at = NOW() WHERE id = $2',
