@@ -1,4 +1,5 @@
 import express from 'express';
+import csrf from 'csurf';
 import authRoutes from './auth.js';
 import postsRoutes from './posts.js';
 import scheduleRoutes from './schedule.js';
@@ -13,6 +14,13 @@ import imageGenerationRoutes from './imageGeneration.js';
 import creditsRoutes from './credits.js';
 
 const router = express.Router();
+// CSRF protection middleware (cookie-based)
+const csrfProtection = csrf({ cookie: true });
+
+// CSRF token endpoint for frontend
+router.get('/csrf-token', csrfProtection, (req, res) => {
+	res.json({ csrfToken: req.csrfToken() });
+});
 router.use('/auth', authRoutes);
 router.use('/posts', postsRoutes);
 router.use('/schedule', scheduleRoutes);

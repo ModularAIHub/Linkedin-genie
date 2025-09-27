@@ -11,6 +11,7 @@ console.log('DEBUG process.env.LINKEDIN_REDIRECT_URI:', process.env.LINKEDIN_RED
 
 
 import express from 'express';
+import csrf from 'csurf';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import oauthRoutes from './routes/oauth.js';
@@ -22,6 +23,42 @@ import errorHandler from './middleware/errorHandler.js';
 
 const app = express();
 app.use(helmet());
+app.use(express.json({ limit: '10mb' }));
+app.use(cookieParser());
+
+// CSRF protection middleware (cookie-based)
+const csrfProtection = csrf({ cookie: true });
+
+// Expose CSRF token route after cookieParser and express.json
+app.get('/api/csrf-token', (req, res, next) => {
+  // Set CORS headers for CSRF token route
+  const origin = req.headers.origin;
+  const allowedOrigins = [
+    'https://suitegenie.in',
+    'https://api.suitegenie.in',
+    'https://tweet.suitegenie.in',
+    'https://tweetapi.suitegenie.in',
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'http://localhost:5175',
+    'http://localhost:3000',
+    'http://localhost:3004'
+  ];
+  if (!origin || allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin || '*');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,Cookie,x-csrf-token,X-CSRF-Token,X-Csrf-Token,X-CSRF-token');
+    res.header('Access-Control-Expose-Headers', 'Set-Cookie');
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
+    return next();
+  } else {
+    console.log('CORS blocked origin (csrf-token):', origin);
+    return res.status(403).send('CORS blocked');
+  }
+}, csrfProtection, (req, res) => {
+  res.json({ csrfToken: req.csrfToken() });
+});
 
 // CORS configuration with both production and development origins (matches Tweet Genie)
 const allowedOrigins = [
@@ -45,7 +82,7 @@ app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', origin || '*');
     res.header('Access-Control-Allow-Credentials', 'true');
     res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,Cookie');
+    res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,Cookie,x-csrf-token,X-CSRF-Token,X-Csrf-Token,X-CSRF-token');
     res.header('Access-Control-Expose-Headers', 'Set-Cookie');
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     return next();
@@ -54,6 +91,8 @@ app.use((req, res, next) => {
     return res.status(403).send('CORS blocked');
   }
 });
+
+// Explicit OPTIONS handler for all /api/* routes
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '10mb' }));
 app.use(cookieParser());
