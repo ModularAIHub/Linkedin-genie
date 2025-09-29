@@ -57,15 +57,61 @@ export async function handleOAuthCallback(req, res) {
       throw tokenErr;
     }
     const accessToken = tokenRes.data.access_token;
-    // Fetch user info from OIDC userinfo endpoint
+    // Fetch user info using LinkedIn profile and email endpoints.
+    // LinkedIn does not provide a /v2/userinfo endpoint; calling it returns 404 (NOT_FOUND).
+    // Use /v2/me for profile and /v2/emailAddress for email.
     let userInfo = null;
     try {
-      const userInfoRes = await axios.get('https://api.linkedin.com/v2/userinfo', {
+      const profileRes = await axios.get('https://api.linkedin.com/v2/me', {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
-      userInfo = userInfoRes.data;
+      // Email requires a separate call
+      const emailRes = await axios.get('https://api.linkedin.com/v2/emailAddress', {
+        params: { q: 'members', projection: '(elements*(handle~))' },
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+
+      const profile = profileRes.data || {};
+      const emailElements = emailRes.data?.elements || [];
+      const primaryEmail = (emailElements[0] && emailElements[0]['handle~'] && emailElements[0]['handle~'].emailAddress) || null;
+
+      // Attempt to extract a display name and profile image (best-effort)
+      const firstName = (profile.localizedFirstName || '') ;
+      const lastName = (profile.localizedLastName || '') ;
+      let displayName = `${firstName}`.trim();
+      if (lastName) displayName = `${displayName} ${lastName}`.trim();
+
+      // profile picture extraction (may be nested under profile.profilePicture['displayImage~'])
+      let profileImageUrl = null;
+      try {
+        const picture = profile.profilePicture;
+        const displayImage = picture?.['displayImage~'];
+        const elements = displayImage?.elements || [];
+        // pick the last element with identifiers array
+        for (let i = elements.length - 1; i >= 0; i--) {
+          const ids = elements[i]?.identifiers || [];
+          if (ids.length) { profileImageUrl = ids[0].identifier; break; }
+        }
+      } catch (picErr) {
+        // ignore, best-effort
+      }
+
+      userInfo = {
+        id: profile.id,
+        email: primaryEmail,
+        name: displayName || null,
+        picture: profileImageUrl || null,
+        // keep some OIDC-like aliases used by existing code
+        sub: profile.id,
+        preferred_username: profile.vanityName || null,
+        given_name: firstName || null,
+        family_name: lastName || null,
+        headline: null
+      };
+      console.log('[DEBUG] LinkedIn profile fetched:', { id: userInfo.id, email: userInfo.email, name: userInfo.name });
     } catch (userInfoErr) {
-      console.error('Failed to fetch LinkedIn OIDC userinfo:', userInfoErr?.response?.data || userInfoErr.message, userInfoErr.stack);
+      // This prevents throwing on 404 from an incorrect endpoint and surfaces a helpful debug message
+      console.error('Failed to fetch LinkedIn profile/email:', userInfoErr?.response?.data || userInfoErr.message, userInfoErr.stack);
     }
 
     // Persist LinkedIn OAuth tokens and profile in linkedin_auth table (parity with twitter_auth)
