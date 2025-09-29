@@ -18,10 +18,18 @@ export const AuthProvider = ({ children }) => {
   const [isLoading, setIsLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
 
+  // Track failed auth attempts to prevent infinite loop
+  const [authFailCount, setAuthFailCount] = useState(0);
+
   // Check authentication status on mount
   useEffect(() => {
     checkAuthStatus();
   }, []);
+
+  // Reset fail count on successful login
+  useEffect(() => {
+    if (isAuthenticated) setAuthFailCount(0);
+  }, [isAuthenticated]);
 
   // Set up periodic auth checks to handle token refresh
   useEffect(() => {
@@ -53,14 +61,17 @@ export const AuthProvider = ({ children }) => {
       if (response.data.success) {
         setUser(response.data.user);
         setIsAuthenticated(true);
+        setAuthFailCount(0);
       } else {
         setIsAuthenticated(false);
         setUser(null);
+        setAuthFailCount((c) => c + 1);
       }
     } catch (error) {
       if (error.response?.status === 401) {
         setIsAuthenticated(false);
         setUser(null);
+        setAuthFailCount((c) => c + 1);
         // Do not redirect here, let ProtectedRoute handle it
       } else if (error.response?.status === 429) {
         setIsAuthenticated(false);
@@ -71,6 +82,7 @@ export const AuthProvider = ({ children }) => {
       } else {
         setIsAuthenticated(false);
         setUser(null);
+        setAuthFailCount((c) => c + 1);
       }
     } finally {
       setIsLoading(false);
@@ -117,6 +129,7 @@ export const AuthProvider = ({ children }) => {
     logout,
     checkAuthStatus,
     redirectToLogin,
+    authFailCount,
   };
 
   return (
