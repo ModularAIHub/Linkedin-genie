@@ -6,6 +6,13 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 export async function requirePlatformLogin(req, res, next) {
+  // Helper: detect API/XHR request
+  function isApiRequest(req) {
+    const accept = req.headers['accept'] || '';
+    const xrw = req.headers['x-requested-with'] || '';
+    return accept.includes('application/json') || xrw === 'XMLHttpRequest' || req.originalUrl.startsWith('/api/') || req.originalUrl.startsWith('/auth/');
+  }
+
   try {
     console.log('[requirePlatformLogin] Incoming cookies:', req.cookies);
     // 1. Get token from cookie or header
@@ -43,18 +50,26 @@ export async function requirePlatformLogin(req, res, next) {
           }
         }
       } catch (refreshError) {
-        // If refresh fails, redirect to platform login
+        // If refresh fails, return 401 for API, redirect for browser
+        if (isApiRequest(req)) {
+          return res.status(401).json({ error: 'Unauthorized: refresh failed' });
+        } else {
+          const currentUrl = `${process.env.CLIENT_URL || 'http://localhost:5175'}${req.originalUrl}`;
+          const platformLoginUrl = `${process.env.PLATFORM_URL || 'http://localhost:3000'}/login?redirect=${encodeURIComponent(currentUrl)}`;
+          return res.redirect(platformLoginUrl);
+        }
+      }
+    }
+
+    // 3. If still no token, return 401 for API, redirect for browser
+    if (!token) {
+      if (isApiRequest(req)) {
+        return res.status(401).json({ error: 'Unauthorized: no token' });
+      } else {
         const currentUrl = `${process.env.CLIENT_URL || 'http://localhost:5175'}${req.originalUrl}`;
         const platformLoginUrl = `${process.env.PLATFORM_URL || 'http://localhost:3000'}/login?redirect=${encodeURIComponent(currentUrl)}`;
         return res.redirect(platformLoginUrl);
       }
-    }
-
-    // 3. If still no token, redirect to login
-    if (!token) {
-      const currentUrl = `${process.env.CLIENT_URL || 'http://localhost:5175'}${req.originalUrl}`;
-      const platformLoginUrl = `${process.env.PLATFORM_URL || 'http://localhost:3000'}/login?redirect=${encodeURIComponent(currentUrl)}`;
-      return res.redirect(platformLoginUrl);
     }
 
     // 4. Verify JWT
@@ -91,15 +106,23 @@ export async function requirePlatformLogin(req, res, next) {
             }
           }
         } catch (refreshError) {
+          if (isApiRequest(req)) {
+            return res.status(401).json({ error: 'Unauthorized: refresh failed' });
+          } else {
+            const currentUrl = `${process.env.CLIENT_URL || 'http://localhost:5175'}${req.originalUrl}`;
+            const platformLoginUrl = `${process.env.PLATFORM_URL || 'http://localhost:3000'}/login?redirect=${encodeURIComponent(currentUrl)}`;
+            return res.redirect(platformLoginUrl);
+          }
+        }
+      } else {
+        // Invalid token, return 401 for API, redirect for browser
+        if (isApiRequest(req)) {
+          return res.status(401).json({ error: 'Unauthorized: invalid token' });
+        } else {
           const currentUrl = `${process.env.CLIENT_URL || 'http://localhost:5175'}${req.originalUrl}`;
           const platformLoginUrl = `${process.env.PLATFORM_URL || 'http://localhost:3000'}/login?redirect=${encodeURIComponent(currentUrl)}`;
           return res.redirect(platformLoginUrl);
         }
-      } else {
-        // Invalid token, redirect to login
-        const currentUrl = `${process.env.CLIENT_URL || 'http://localhost:5175'}${req.originalUrl}`;
-        const platformLoginUrl = `${process.env.PLATFORM_URL || 'http://localhost:3000'}/login?redirect=${encodeURIComponent(currentUrl)}`;
-        return res.redirect(platformLoginUrl);
       }
     }
 
@@ -139,8 +162,12 @@ export async function requirePlatformLogin(req, res, next) {
     }
     next();
   } catch (error) {
-    const currentUrl = `${process.env.CLIENT_URL || 'http://localhost:5175'}${req.originalUrl}`;
-    const platformLoginUrl = `${process.env.PLATFORM_URL || 'http://localhost:3000'}/login?redirect=${encodeURIComponent(currentUrl)}`;
-    return res.redirect(platformLoginUrl);
+    if (isApiRequest(req)) {
+      return res.status(401).json({ error: 'Unauthorized: exception' });
+    } else {
+      const currentUrl = `${process.env.CLIENT_URL || 'http://localhost:5175'}${req.originalUrl}`;
+      const platformLoginUrl = `${process.env.PLATFORM_URL || 'http://localhost:3000'}/login?redirect=${encodeURIComponent(currentUrl)}`;
+      return res.redirect(platformLoginUrl);
+    }
   }
 }
