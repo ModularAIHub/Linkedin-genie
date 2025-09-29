@@ -38,19 +38,24 @@ export async function schedulePost(req, res) {
       scheduled_time: scheduledTimeUtc,
       status: 'scheduled'
     });
-    // Enqueue job
-    await scheduleQueue.add('publish', {
-      userId,
+    // Enqueue job with LinkedIn credentials and post data
+    const job = await scheduleQueue.add('publish', {
+      scheduledPostId: scheduledPost.id,
+      linkedinAccessToken: req.user?.linkedinAccessToken,
+      authorUrn: req.user?.linkedinUrn,
       postContent: post_content,
       mediaUrls: media_urls,
       postType: post_type,
-      companyId: company_id,
-      scheduledPostId: scheduledPost.id,
-      linkedinAccessToken: req.user.linkedinAccessToken,
-      authorUrn: req.user.linkedinUrn
+      companyId: company_id
     }, {
       delay: Math.max(0, DateTime.fromISO(scheduledTimeUtc).toMillis() - Date.now()),
       attempts: 3
+    });
+    console.log('[ScheduleController] Scheduled job created:', {
+      jobId: job.id,
+      scheduledPostId: scheduledPost.id,
+      scheduledTimeUtc,
+      queue: 'linkedin-schedule'
     });
     res.json({ success: true, scheduledPost });
   } catch (error) {
