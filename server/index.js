@@ -1,12 +1,8 @@
 
-
-// Load environment variables from .env before anything else
+import express from 'express';
 
 import dotenv from 'dotenv';
 dotenv.config();
-
-
-import express from 'express';
 import csrf from 'csurf';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
