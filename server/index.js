@@ -90,9 +90,19 @@ app.get('/', (req, res) => {
   res.send('LinkedIn Genie backend is running.');
 });
 
-// Catch-all route for SPA client-side routing
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../client/dist/index.html'));
+// Catch-all route for SPA client-side routing (use app.use, not app.get('*'))
+app.use((req, res, next) => {
+  // Only serve index.html for non-API, non-static requests
+  if (
+    req.method === 'GET' &&
+    !req.originalUrl.startsWith('/api/') &&
+    !req.originalUrl.startsWith('/auth/') &&
+    !req.originalUrl.includes('.') // skip static files
+  ) {
+    res.sendFile(path.join(__dirname, '../client/dist/index.html'));
+  } else {
+    next();
+  }
 });
 
 // Error handler middleware
