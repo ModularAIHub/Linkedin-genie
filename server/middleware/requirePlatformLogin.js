@@ -35,6 +35,16 @@ export async function requirePlatformLogin(req, res, next) {
             withCredentials: true
           }
         );
+        if (refreshResponse.status !== 200) {
+          console.error('[requirePlatformLogin] Refresh failed, status:', refreshResponse.status, refreshResponse.data);
+          if (isApiRequest(req)) {
+            return res.status(401).json({ error: 'Unauthorized: refresh failed', details: refreshResponse.data });
+          } else {
+            const currentUrl = `${process.env.CLIENT_URL || 'http://localhost:5175'}${req.originalUrl}`;
+            const platformLoginUrl = `${process.env.PLATFORM_URL || 'http://localhost:3000'}/login?redirect=${encodeURIComponent(currentUrl)}`;
+            return res.redirect(platformLoginUrl);
+          }
+        }
         const setCookieHeader = refreshResponse.headers['set-cookie'];
         if (setCookieHeader) {
           const accessTokenCookie = setCookieHeader.find(cookie => cookie.startsWith('accessToken='));
@@ -47,12 +57,30 @@ export async function requirePlatformLogin(req, res, next) {
               maxAge: 15 * 60 * 1000
             });
             token = newToken;
+          } else {
+            console.error('[requirePlatformLogin] No accessToken in set-cookie after refresh:', setCookieHeader);
+            if (isApiRequest(req)) {
+              return res.status(401).json({ error: 'Unauthorized: no access token after refresh', details: setCookieHeader });
+            } else {
+              const currentUrl = `${process.env.CLIENT_URL || 'http://localhost:5175'}${req.originalUrl}`;
+              const platformLoginUrl = `${process.env.PLATFORM_URL || 'http://localhost:3000'}/login?redirect=${encodeURIComponent(currentUrl)}`;
+              return res.redirect(platformLoginUrl);
+            }
+          }
+        } else {
+          console.error('[requirePlatformLogin] No set-cookie header after refresh:', refreshResponse.headers);
+          if (isApiRequest(req)) {
+            return res.status(401).json({ error: 'Unauthorized: no set-cookie after refresh', details: refreshResponse.headers });
+          } else {
+            const currentUrl = `${process.env.CLIENT_URL || 'http://localhost:5175'}${req.originalUrl}`;
+            const platformLoginUrl = `${process.env.PLATFORM_URL || 'http://localhost:3000'}/login?redirect=${encodeURIComponent(currentUrl)}`;
+            return res.redirect(platformLoginUrl);
           }
         }
       } catch (refreshError) {
-        // If refresh fails, return 401 for API, redirect for browser
+        console.error('[requirePlatformLogin] Exception during refresh:', refreshError?.response?.data || refreshError.message, refreshError.stack);
         if (isApiRequest(req)) {
-          return res.status(401).json({ error: 'Unauthorized: refresh failed' });
+          return res.status(401).json({ error: 'Unauthorized: refresh exception', details: refreshError?.response?.data || refreshError.message });
         } else {
           const currentUrl = `${process.env.CLIENT_URL || 'http://localhost:5175'}${req.originalUrl}`;
           const platformLoginUrl = `${process.env.PLATFORM_URL || 'http://localhost:3000'}/login?redirect=${encodeURIComponent(currentUrl)}`;
