@@ -33,8 +33,9 @@ app.get('/api/csrf-token', (req, res, next) => {
   next();
 });
 
+const suitegenieRegex = /^https?:\/\/(?:[a-zA-Z0-9-]+\.)*suitegenie\.in$/;
 const allowedOrigins = [
-  'https://linkedin.suitegenie.in',
+  suitegenieRegex,
 ];
 if (process.env.NODE_ENV === 'development' || !process.env.NODE_ENV) {
   allowedOrigins.push(
@@ -47,7 +48,9 @@ if (process.env.NODE_ENV === 'development' || !process.env.NODE_ENV) {
 }
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin) {
+      callback(null, true);
+    } else if (allowedOrigins.some(o => typeof o === 'string' ? o === origin : o.test(origin))) {
       callback(null, true);
     } else {
       console.log('CORS blocked origin:', origin);
@@ -60,7 +63,12 @@ app.use(cors({
 // Explicit OPTIONS handler for all /api/* routes
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '10mb' }));
+// Set cookie domain for cross-subdomain auth
 app.use(cookieParser());
+app.use((req, res, next) => {
+  res.setHeader('Set-Cookie', `domain=.suitegenie.in; Path=/; SameSite=None; Secure`);
+  next();
+});
 
 // OAuth routes (unprotected for login)
 app.use('/api/oauth', oauthRoutes);
