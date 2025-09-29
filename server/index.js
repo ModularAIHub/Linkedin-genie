@@ -76,8 +76,23 @@ app.use('/auth', authRoutes);
 app.use(requirePlatformLogin);
 app.use('/api', apiRoutes);
 
+
+import path from 'path';
+import { fileURLToPath } from 'url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Serve static files from client build (if deployed)
+app.use(express.static(path.join(__dirname, '../client/dist')));
+
+// Health check route
 app.get('/', (req, res) => {
   res.send('LinkedIn Genie backend is running.');
+});
+
+// Catch-all route for SPA client-side routing
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../client/dist/index.html'));
 });
 
 // Error handler middleware
