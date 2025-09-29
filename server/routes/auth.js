@@ -43,6 +43,10 @@ router.get('/callback', async (req, res) => {
 
 // Validate authentication and attempt refresh if needed
 router.get('/validate', requirePlatformLogin, (req, res) => {
+  if (!req.user || !req.user.id) {
+    console.error('[auth/validate] Missing or invalid user object:', req.user);
+    return res.status(401).json({ success: false, error: 'User not authenticated', user: null });
+  }
   res.json({
     success: true,
     user: req.user
