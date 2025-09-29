@@ -118,9 +118,9 @@ api.interceptors.response.use(
 
 // Auth endpoints
 export const auth = {
-  validate: () => api.get('/api/auth/validate'),
-  refresh: () => api.post('/api/auth/refresh'),
-  logout: () => api.post('/api/auth/logout'),
+  validate: () => api.get('/auth/validate'),
+  refresh: () => api.post('/auth/refresh'),
+  logout: () => api.post('/auth/logout'),
 };
 
 // Post endpoints
