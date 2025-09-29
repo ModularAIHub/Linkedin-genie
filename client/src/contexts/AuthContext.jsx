@@ -62,6 +62,12 @@ export const AuthProvider = ({ children }) => {
         setIsAuthenticated(false);
         setUser(null);
         // Do not redirect here, let ProtectedRoute handle it
+      } else if (error.response?.status === 429) {
+        setIsAuthenticated(false);
+        setUser(null);
+        toast.error('You are being rate limited. Please wait and try again.');
+        // Do NOT redirect to login!
+        return;
       } else {
         setIsAuthenticated(false);
         setUser(null);

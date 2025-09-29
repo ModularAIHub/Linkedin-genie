@@ -66,7 +66,8 @@ app.use(express.json({ limit: '10mb' }));
 // Set cookie domain for cross-subdomain auth
 app.use(cookieParser());
 app.use((req, res, next) => {
-  res.setHeader('Set-Cookie', `domain=.suitegenie.in; Path=/; SameSite=None; Secure`);
+  const cookieDomain = process.env.COOKIE_DOMAIN || '.suitegenie.in';
+  res.setHeader('Set-Cookie', `domain=${cookieDomain}; Path=/; SameSite=None; Secure`);
   next();
 });
 
