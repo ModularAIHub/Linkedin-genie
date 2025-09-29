@@ -15,6 +15,15 @@ export const ProtectedRoute = ({ children }) => {
     }
   }, [isAuthenticated, isLoading, location.pathname, navigate]);
 
+  // Prevent redirect loop: do not redirect if already on /login or /auth/callback
+  useEffect(() => {
+    if (!isAuthenticated && !isLoading) {
+      if (location.pathname !== '/login' && location.pathname !== '/auth/callback') {
+        redirectToLogin();
+      }
+    }
+  }, [isAuthenticated, isLoading, location.pathname, redirectToLogin]);
+
   if (isLoading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -26,8 +35,7 @@ export const ProtectedRoute = ({ children }) => {
     );
   }
 
-  if (!isAuthenticated) {
-    redirectToLogin();
+  if (!isAuthenticated && location.pathname !== '/login' && location.pathname !== '/auth/callback') {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
