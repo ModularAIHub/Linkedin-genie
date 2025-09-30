@@ -37,6 +37,13 @@ export async function requirePlatformLogin(req, res, next) {
         );
         if (refreshResponse.status !== 200) {
           console.error('[requirePlatformLogin] Refresh failed, status:', refreshResponse.status, refreshResponse.data);
+          // Clear refreshToken cookie to prevent infinite loop
+          res.clearCookie('refreshToken', {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'none',
+            domain: process.env.COOKIE_DOMAIN || '.suitegenie.in'
+          });
           if (isApiRequest(req)) {
             return res.status(401).json({ error: 'Unauthorized: refresh failed', details: refreshResponse.data });
           } else {
@@ -80,6 +87,13 @@ export async function requirePlatformLogin(req, res, next) {
         }
       } catch (refreshError) {
         console.error('[requirePlatformLogin] Exception during refresh:', refreshError?.response?.data || refreshError.message, refreshError.stack);
+        // Clear refreshToken cookie to prevent infinite loop
+        res.clearCookie('refreshToken', {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'none',
+          domain: process.env.COOKIE_DOMAIN || '.suitegenie.in'
+        });
         if (isApiRequest(req)) {
           return res.status(401).json({ error: 'Unauthorized: refresh exception', details: refreshError?.response?.data || refreshError.message });
         } else {
@@ -135,6 +149,13 @@ export async function requirePlatformLogin(req, res, next) {
             }
           }
         } catch (refreshError) {
+          // Clear refreshToken cookie to prevent infinite loop
+          res.clearCookie('refreshToken', {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'none',
+            domain: process.env.COOKIE_DOMAIN || '.suitegenie.in'
+          });
           if (isApiRequest(req)) {
             return res.status(401).json({ error: 'Unauthorized: refresh failed' });
           } else {
