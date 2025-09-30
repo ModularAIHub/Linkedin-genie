@@ -84,7 +84,7 @@ const Layout = ({ children }) => {
       >
         <div className="flex items-center justify-between h-16 px-6 border-b border-blue-200">
           <div className="flex items-center space-x-2">
-            <Edit3 className="h-8 w-8 text-[#0077B5]" />
+            <img src="/logo[1].png" alt="SuiteGenie Logo" className="h-8 w-8 mr-2 rounded-lg shadow" />
             <span className="text-xl font-bold gradient-text">LinkedIn Genie</span>
           </div>
           <button
@@ -153,9 +153,7 @@ const Layout = ({ children }) => {
                   className="flex items-center space-x-2 px-3 py-2 rounded-lg text-sm font-medium text-blue-700 hover:bg-blue-50"
                 >
                   <div className="h-8 w-8 bg-[#0077B5] rounded-full flex items-center justify-center">
-                    <span className="text-white text-sm font-medium">
-                      {user?.email?.charAt(0).toUpperCase() || 'U'}
-                    </span>
+                    <img src="/logo[1].png" alt="SuiteGenie Logo" className="h-8 w-8 rounded-full" />
                   </div>
                   <span className="hidden sm:block">{user?.email || 'User'}</span>
                   <ChevronDown className="h-4 w-4" />
