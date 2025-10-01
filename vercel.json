@@ -1,18 +1,18 @@
 {
-  "buildCommand": "cd client && npm ci && npm run build",
-  "outputDirectory": "client/dist",
-  "installCommand": "npm ci && cd server && npm ci",
-  "devCommand": "cd client && npm run dev",
+  "buildCommand": "npm ci && npm run build",
+  "outputDirectory": "dist",
+  "installCommand": "npm ci && cd ../server && npm ci",
+  "devCommand": "npm run dev",
   "framework": null,
   "functions": {
-    "server/index.js": {
+    "../server/index.js": {
       "runtime": "nodejs18.x"
     }
   },
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "/server/index.js"
+      "destination": "/../server/index.js"
     },
     {
       "source": "/(.*)",
