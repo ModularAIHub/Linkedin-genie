@@ -2,5 +2,11 @@
   "buildCommand": "npm install && npm run build",
   "outputDirectory": "dist",
   "devCommand": "npm run dev",
-  "framework": null
+  "framework": null,
+  "rewrites": [
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
+  ]
 }
