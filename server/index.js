@@ -1,35 +1,34 @@
 
 import express from 'express';
-
-import dotenv from 'dotenv';
-dotenv.config();
-import csrf from 'csurf';
+import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
+import dotenv from 'dotenv';
+
+// Route imports
 import oauthRoutes from './routes/oauth.js';
 import authRoutes from './routes/auth.js';
 import apiRoutes from './routes/index.js';
+
+// Middleware imports
 import { requirePlatformLogin } from './middleware/requirePlatformLogin.js';
 import errorHandler from './middleware/errorHandler.js';
-import cors from 'cors';
+
+dotenv.config();
 
 const app = express();
+const PORT = process.env.PORT || 3004;
+
+// Basic middleware
 app.use(helmet());
-// Only call these once at the top
 
-// CSRF protection middleware (cookie-based)
-const csrfProtection = csrf({ cookie: true });
-
-// Expose CSRF token route after cookieParser and express.json
-app.get('/api/csrf-token', (req, res) => {
-  // Generate CSRF token
-  const token = req.csrfToken ? req.csrfToken() : 'csrf-token-placeholder';
-  res.json({ csrfToken: token });
-});
-
-const suitegenieRegex = /^https?:\/\/(?:[a-zA-Z0-9-]+\.)*suitegenie\.in$/;
+// CORS configuration with both production and development origins
 const allowedOrigins = [
-  suitegenieRegex,
+  'https://suitegenie.in',
+  'https://platform.suitegenie.in',
+  'https://linkedin.suitegenie.in',
+  'https://apilinkedin.suitegenie.in',
+  'https://api.suitegenie.in'
 ];
 if (process.env.NODE_ENV === 'development' || !process.env.NODE_ENV) {
   allowedOrigins.push(
@@ -42,27 +41,38 @@ if (process.env.NODE_ENV === 'development' || !process.env.NODE_ENV) {
 }
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin) {
-      callback(null, true);
-    } else if (allowedOrigins.some(o => typeof o === 'string' ? o === origin : o.test(origin))) {
-      callback(null, true);
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      return callback(null, true);
     } else {
       console.log('CORS blocked origin:', origin);
-      callback(new Error('Not allowed by CORS'));
+      return callback(new Error('Not allowed by CORS'));
     }
   },
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
+  exposedHeaders: ['Set-Cookie']
 }));
 
-// Explicit OPTIONS handler for all /api/* routes
 app.set('trust proxy', 1);
-app.use(express.json({ limit: '10mb' }));
-// Set cookie domain for cross-subdomain auth
 app.use(cookieParser());
-app.use((req, res, next) => {
-  const cookieDomain = process.env.COOKIE_DOMAIN || '.suitegenie.in';
-  res.setHeader('Set-Cookie', `domain=${cookieDomain}; Path=/; SameSite=None; Secure`);
-  next();
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Health check
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'OK', service: 'LinkedIn Genie' });
+});
+
+// CSRF token endpoint (simplified like Tweet Genie)
+app.get('/api/csrf-token', (req, res) => {
+  res.json({ 
+    csrfToken: 'dummy-csrf-token',
+    message: 'CSRF protection simplified for serverless deployment' 
+  });
 });
 
 // OAuth routes (unprotected for login)
@@ -84,19 +94,27 @@ app.get('/', (req, res) => {
   });
 });
 
-// Error handler middleware
-app.use(errorHandler);
+// Error handling with CORS headers like Tweet Genie
+app.use((err, req, res, next) => {
+  // Add CORS headers even on errors
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
+  // Delegate to the original error handler
+  errorHandler(err, req, res, next);
+});
 
 // Export for Vercel serverless function
 export default app;
 
 // Only start server if not in serverless environment
 if (!process.env.VERCEL) {
-  const PORT = process.env.PORT || 3004;
   app.listen(PORT, () => {
     console.log(`LinkedIn Genie backend listening on port ${PORT}`);
   });
-
-  // Start BullMQ worker for scheduled LinkedIn posts (only in regular server mode)
-  import('./workers/linkedinScheduler.js').catch(console.error);
 }
+
+// Start BullMQ worker for scheduled LinkedIn posts
+import './workers/linkedinScheduler.js';
