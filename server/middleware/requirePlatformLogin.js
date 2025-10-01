@@ -26,7 +26,7 @@ export async function requirePlatformLogin(req, res, next) {
     if (!token && req.cookies?.refreshToken) {
       try {
         const refreshResponse = await axios.post(
-          `${process.env.PLATFORM_URL || 'http://localhost:3000'}/api/auth/refresh`,
+          `${process.env.NEW_PLATFORM_API_URL || 'http://localhost:3000/api'}/auth/refresh`,
           {},
           {
             headers: {
@@ -124,7 +124,7 @@ export async function requirePlatformLogin(req, res, next) {
       if (jwtError.name === 'TokenExpiredError' && req.cookies?.refreshToken) {
         try {
           const refreshResponse = await axios.post(
-            `${process.env.PLATFORM_URL || 'http://localhost:3000'}/api/auth/refresh`,
+            `${process.env.NEW_PLATFORM_API_URL || 'http://localhost:3000/api'}/auth/refresh`,
             {},
             {
               headers: {
@@ -141,7 +141,8 @@ export async function requirePlatformLogin(req, res, next) {
               res.cookie('accessToken', newToken, {
                 httpOnly: true,
                 secure: process.env.NODE_ENV === 'production',
-                sameSite: 'lax',
+                sameSite: 'none',
+                domain: process.env.COOKIE_DOMAIN || '.suitegenie.in',
                 maxAge: 15 * 60 * 1000
               });
               decoded = jwt.verify(newToken, process.env.JWT_SECRET);
@@ -178,7 +179,7 @@ export async function requirePlatformLogin(req, res, next) {
 
     // 5. Get user info from platform
     try {
-      const response = await axios.get(`${process.env.PLATFORM_URL || 'http://localhost:3000'}/api/auth/me`, {
+      const response = await axios.get(`${process.env.NEW_PLATFORM_API_URL || 'http://localhost:3000/api'}/auth/me`, {
         headers: {
           'Authorization': `Bearer ${token}`
         }
