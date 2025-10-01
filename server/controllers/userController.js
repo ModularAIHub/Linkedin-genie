@@ -1,24 +1,29 @@
 import { pool } from '../config/database.js';
 
-// Fetch BYOK/platform mode and lock status for the current user
+// Fetch BYOK/platform mode and lock status from centralized new-platform API
 export async function getApiKeyPreference(req, res) {
   if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
   try {
-    const { id } = req.user;
-    const result = await pool.query(
-      'SELECT api_key_preference, byok_locked_until, byok_activated_at FROM users WHERE id = $1',
-      [id]
-    );
-    if (!result.rows.length) {
-      return res.status(404).json({ error: 'User not found' });
+    let token = req.cookies?.accessToken;
+    if (!token) {
+      const authHeader = req.headers['authorization'];
+      token = authHeader && authHeader.split(' ')[1];
     }
-    const pref = result.rows[0];
-    res.json({
-      api_key_preference: pref.api_key_preference,
-      byok_locked_until: pref.byok_locked_until,
-      byok_activated_at: pref.byok_activated_at
+    
+    if (!token) {
+      return res.status(401).json({ error: 'No access token found' });
+    }
+    
+    // Fetch from centralized new-platform API instead of local database
+    const baseUrl = process.env.NEW_PLATFORM_API_URL || 'http://localhost:3000/api';
+    const axios = await import('axios');
+    const response = await axios.default.get(`${baseUrl}/byok/preference`, {
+      headers: { Authorization: `Bearer ${token}` }
     });
+    
+    res.json(response.data);
   } catch (error) {
+    console.error('Failed to fetch API key preference from new-platform:', error.message);
     res.status(500).json({ error: 'Failed to fetch API key preference' });
   }
 }
