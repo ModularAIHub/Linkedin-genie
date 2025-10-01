@@ -92,7 +92,7 @@ api.interceptors.response.use(
       isRefreshing = true;
 
       try {
-        await axios.post(`${API_BASE_URL}/api/auth/refresh`, {}, { withCredentials: true });
+        await axios.post(`${PLATFORM_URL}/api/auth/refresh`, {}, { withCredentials: true });
         isRefreshing = false;
         processQueue(null);
         return api(originalRequest);
