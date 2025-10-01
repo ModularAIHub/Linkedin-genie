@@ -184,14 +184,28 @@ const Dashboard = () => {
                   Credits available for posting and AI generation
                 </p>
                 {apiKeyPreference?.api_key_preference && (
-                  <div className="mt-3">
-                    <span className="text-neutral-600">Current mode: </span>
-                    <span className={`font-semibold ${apiKeyPreference.api_key_preference === 'byok' ? 'text-green-700' : 'text-blue-700'}`}> 
-                      {apiKeyPreference.api_key_preference === 'byok' ? 'BYOK (Your Own Keys)' : 'Platform Keys'}
-                    </span>
+                  <div className="mt-3 p-3 bg-gray-50 rounded-lg">
+                    <div className="flex items-center space-x-2 mb-1">
+                      <span className="text-neutral-600">Current mode:</span>
+                      <span className={`font-semibold px-2 py-1 rounded-md text-sm ${
+                        apiKeyPreference.api_key_preference === 'byok' 
+                          ? 'bg-green-100 text-green-700' 
+                          : 'bg-blue-100 text-blue-700'
+                      }`}>
+                        {apiKeyPreference.api_key_preference === 'byok' ? '🔑 BYOK' : '🏢 Platform'}
+                      </span>
+                    </div>
                     {apiKeyPreference.api_key_preference === 'byok' && apiKeyPreference.byok_locked_until && (
-                      <span className="ml-2 text-xs text-yellow-700">(Locked until {new Date(apiKeyPreference.byok_locked_until).toLocaleString()})</span>
+                      <div className="text-xs text-yellow-600 bg-yellow-50 px-2 py-1 rounded-md inline-block">
+                        🔒 Locked until {new Date(apiKeyPreference.byok_locked_until).toLocaleDateString()}
+                      </div>
                     )}
+                    <div className="text-xs text-gray-500 mt-2">
+                      {apiKeyPreference.api_key_preference === 'byok' 
+                        ? 'Using your own API keys for AI content generation'
+                        : 'Using platform-provided API keys'
+                      }
+                    </div>
                   </div>
                 )}
               </div>

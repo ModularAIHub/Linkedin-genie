@@ -48,29 +48,46 @@ class AIService {
         const prefResult = await getUserPreferenceAndKeys(userToken);
         preference = prefResult.preference;
         userKeys = prefResult.userKeys;
-        console.log('[BYOK DEBUG] userKeys from new-platform:', JSON.stringify(userKeys, null, 2));
+        console.log('[AI Service] User preference:', preference);
+        console.log('[AI Service] User keys:', userKeys.map(k => ({ provider: k.provider, keyName: k.keyName, hasKey: !!k.apiKey })));
       } catch (err) {
         console.error('Failed to fetch user BYOK preference/keys:', err.message);
       }
     }
 
     const providers = [];
+    console.log('[AI Service] Setting up providers for preference:', preference);
+    
     // Only support single LinkedIn post, not thread or carousel
     let perplexityKey = preference === 'byok' ? (userKeys.find(k => k.provider === 'perplexity')?.apiKey) : this.perplexityApiKey;
     if (perplexityKey) {
+      console.log('[AI Service] Perplexity key available:', preference === 'byok' ? 'BYOK' : 'Platform');
       providers.push({ name: 'perplexity', keyType: preference === 'byok' ? 'BYOK' : 'platform', method: (p, s) => this.generateWithPerplexity(p, s, perplexityKey) });
+    } else {
+      console.log('[AI Service] Perplexity key NOT available for mode:', preference);
     }
+    
     let googleKey = preference === 'byok' ? (userKeys.find(k => k.provider === 'gemini')?.apiKey) : this.googleApiKey;
     if (googleKey) {
+      console.log('[AI Service] Google/Gemini key available:', preference === 'byok' ? 'BYOK' : 'Platform');
       providers.push({ name: 'google', keyType: preference === 'byok' ? 'BYOK' : 'platform', method: (p, s) => this.generateWithGoogle(p, s, googleKey) });
+    } else {
+      console.log('[AI Service] Google/Gemini key NOT available for mode:', preference);
     }
+    
     let openaiKey = preference === 'byok' ? (userKeys.find(k => k.provider === 'openai')?.apiKey) : process.env.OPENAI_API_KEY;
     if (openaiKey) {
+      console.log('[AI Service] OpenAI key available:', preference === 'byok' ? 'BYOK' : 'Platform');
       providers.push({ name: 'openai', keyType: preference === 'byok' ? 'BYOK' : 'platform', method: (p, s) => this.generateWithOpenAI(p, s, openaiKey) });
+    } else {
+      console.log('[AI Service] OpenAI key NOT available for mode:', preference);
     }
 
     if (providers.length === 0) {
-      throw new Error('No AI providers configured. Please set at least one API key (PERPLEXITY_API_KEY, GOOGLE_AI_API_KEY, or OPENAI_API_KEY)');
+      const errorMsg = preference === 'byok' 
+        ? 'No AI providers available. Please add your API keys in the platform settings or switch to Platform mode.'
+        : 'No platform AI providers configured. Please contact support or try BYOK mode with your own API keys.';
+      throw new Error(errorMsg);
     }
 
     console.log(`Available AI providers: ${providers.map(p => p.name).join(', ')}`);
