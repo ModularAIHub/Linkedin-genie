@@ -21,12 +21,10 @@ app.use(helmet());
 const csrfProtection = csrf({ cookie: true });
 
 // Expose CSRF token route after cookieParser and express.json
-app.get('/api/csrf-token', (req, res, next) => {
-  // Removed duplicate import of cors
-  const origin = req.headers.origin;
-  // ...existing code for CSRF token route...
-  // You may want to add your CSRF logic here
-  next();
+app.get('/api/csrf-token', (req, res) => {
+  // Generate CSRF token
+  const token = req.csrfToken ? req.csrfToken() : 'csrf-token-placeholder';
+  res.json({ csrfToken: token });
 });
 
 const suitegenieRegex = /^https?:\/\/(?:[a-zA-Z0-9-]+\.)*suitegenie\.in$/;
@@ -77,41 +75,28 @@ app.use(requirePlatformLogin);
 app.use('/api', apiRoutes);
 
 
-import path from 'path';
-import { fileURLToPath } from 'url';
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Serve static files from client build (if deployed)
-app.use(express.static(path.join(__dirname, '../client/dist')));
-
 // Health check route
 app.get('/', (req, res) => {
-  res.send('LinkedIn Genie backend is running.');
-});
-
-// Catch-all route for SPA client-side routing (use app.use, not app.get('*'))
-app.use((req, res, next) => {
-  // Only serve index.html for non-API, non-static requests
-  if (
-    req.method === 'GET' &&
-    !req.originalUrl.startsWith('/api/') &&
-    !req.originalUrl.startsWith('/auth/') &&
-    !req.originalUrl.includes('.') // skip static files
-  ) {
-    res.sendFile(path.join(__dirname, '../client/dist/index.html'));
-  } else {
-    next();
-  }
+  res.json({ 
+    message: 'LinkedIn Genie backend is running.',
+    timestamp: new Date().toISOString(),
+    env: process.env.NODE_ENV || 'development'
+  });
 });
 
 // Error handler middleware
 app.use(errorHandler);
 
-const PORT = process.env.PORT || 3004;
-app.listen(PORT, () => {
-  console.log(`LinkedIn Genie backend listening on port ${PORT}`);
-});
+// Export for Vercel serverless function
+export default app;
 
-// Start BullMQ worker for scheduled LinkedIn posts (same process)
-await import('./workers/linkedinScheduler.js');
+// Only start server if not in serverless environment
+if (!process.env.VERCEL) {
+  const PORT = process.env.PORT || 3004;
+  app.listen(PORT, () => {
+    console.log(`LinkedIn Genie backend listening on port ${PORT}`);
+  });
+
+  // Start BullMQ worker for scheduled LinkedIn posts (only in regular server mode)
+  import('./workers/linkedinScheduler.js').catch(console.error);
+}
