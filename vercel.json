@@ -1,22 +1,6 @@
 {
-  "buildCommand": "cd client && npm install && npm run build",
-  "outputDirectory": "client/dist",
-  "installCommand": "cd client && npm install && cd ../server && npm install",
-  "devCommand": "cd client && npm run dev",
-  "framework": null,
-  "functions": {
-    "server/index.js": {
-      "runtime": "nodejs18.x"
-    }
-  },
-  "rewrites": [
-    {
-      "source": "/api/(.*)",
-      "destination": "/server/index.js"
-    },
-    {
-      "source": "/(.*)",
-      "destination": "/$1"
-    }
-  ]
+  "buildCommand": "npm install && npm run build",
+  "outputDirectory": "dist",
+  "devCommand": "npm run dev",
+  "framework": null
 }
