@@ -10,6 +10,7 @@ export const linkedin = {
 // BYOK/platform mode endpoints
 export const byok = {
   getPreference: () => api.get('/api/user/api-key-preference'),
+  getKeys: () => api.get('/api/user/byok-keys'), // For future use
 };
 
 

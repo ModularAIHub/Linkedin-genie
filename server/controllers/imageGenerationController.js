@@ -9,7 +9,16 @@ export async function generateImage(req, res) {
     if (prompt.trim().length > 1000) {
       return res.status(400).json({ error: 'Prompt too long (max 1000 characters)' });
     }
-    const result = await imageGenerationService.generateImage(prompt.trim(), style);
+
+    // Get user token and ID for BYOK/Platform mode detection
+    let token = req.cookies?.accessToken;
+    if (!token) {
+      const authHeader = req.headers['authorization'];
+      token = authHeader && authHeader.split(' ')[1];
+    }
+    const userId = req.user?.id;
+
+    const result = await imageGenerationService.generateImage(prompt.trim(), style, 'natural', token, userId);
     res.json({ success: true, ...result });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Failed to generate image' });

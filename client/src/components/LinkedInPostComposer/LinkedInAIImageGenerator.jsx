@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Wand2, ArrowRight } from 'lucide-react';
+import { byok } from '../../utils/api';
 
 const LinkedInAIImageGenerator = ({
   showImagePrompt,
@@ -11,6 +12,26 @@ const LinkedInAIImageGenerator = ({
   onGenerate,
   onCancel
 }) => {
+  const [apiKeyMode, setApiKeyMode] = useState('platform');
+
+  // Fetch BYOK/platform mode on mount
+  useEffect(() => {
+    let mounted = true;
+    const fetchPreference = async () => {
+      try {
+        const response = await byok.getPreference();
+        if (mounted) {
+          setApiKeyMode(response.data.api_key_preference || 'platform');
+        }
+      } catch (error) {
+        console.error('Failed to fetch API key preference:', error);
+        if (mounted) setApiKeyMode('platform');
+      }
+    };
+    fetchPreference();
+    return () => { mounted = false; };
+  }, []);
+
   if (!showImagePrompt) return null;
 
   return (
@@ -26,6 +47,14 @@ const LinkedInAIImageGenerator = ({
         >
           ×
         </button>
+      </div>
+      {/* BYOK/platform mode indicator */}
+      <div className="mb-3">
+        <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${
+          apiKeyMode === 'byok' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'
+        }`}>
+          {apiKeyMode === 'byok' ? '🔑 Using Your Own OpenAI Key (BYOK)' : '🏢 Using Platform OpenAI Key'}
+        </span>
       </div>
       <div className="space-y-3">
         <div>

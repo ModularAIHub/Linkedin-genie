@@ -15,8 +15,8 @@ export function startOAuth(req, res) {
     response_type: 'code',
     client_id: config.getLinkedInClientId(),
     redirect_uri: config.getLinkedInRedirectUri(),
-    // Only w_member_social for posting, remove r_member_social
-    scope: 'openid email profile w_member_social',
+    // Use OpenID Connect scopes for LinkedIn Sign In with LinkedIn
+    scope: 'openid profile email w_member_social',
     state
   });
   const url = `https://www.linkedin.com/oauth/v2/authorization?${params.toString()}`;
@@ -57,53 +57,31 @@ export async function handleOAuthCallback(req, res) {
       throw tokenErr;
     }
     const accessToken = tokenRes.data.access_token;
-    // Fetch user info using LinkedIn profile and email endpoints.
-    // LinkedIn does not provide a /v2/userinfo endpoint; calling it returns 404 (NOT_FOUND).
-    // Use /v2/me for profile and /v2/emailAddress for email.
+    // Fetch user info using LinkedIn OpenID Connect userinfo endpoint
     let userInfo = null;
     try {
-      const profileRes = await axios.get('https://api.linkedin.com/v2/me', {
-        headers: { Authorization: `Bearer ${accessToken}` }
-      });
-      // Email requires a separate call
-      const emailRes = await axios.get('https://api.linkedin.com/v2/emailAddress', {
-        params: { q: 'members', projection: '(elements*(handle~))' },
+      const userInfoRes = await axios.get('https://api.linkedin.com/v2/userinfo', {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
 
-      const profile = profileRes.data || {};
-      const emailElements = emailRes.data?.elements || [];
-      const primaryEmail = (emailElements[0] && emailElements[0]['handle~'] && emailElements[0]['handle~'].emailAddress) || null;
+      const profile = userInfoRes.data || {};
+      
+      // OpenID Connect format provides standardized fields
+      const firstName = profile.given_name || '';
+      const lastName = profile.family_name || '';
+      let displayName = profile.name || `${firstName} ${lastName}`.trim();
 
-      // Attempt to extract a display name and profile image (best-effort)
-      const firstName = (profile.localizedFirstName || '') ;
-      const lastName = (profile.localizedLastName || '') ;
-      let displayName = `${firstName}`.trim();
-      if (lastName) displayName = `${displayName} ${lastName}`.trim();
-
-      // profile picture extraction (may be nested under profile.profilePicture['displayImage~'])
-      let profileImageUrl = null;
-      try {
-        const picture = profile.profilePicture;
-        const displayImage = picture?.['displayImage~'];
-        const elements = displayImage?.elements || [];
-        // pick the last element with identifiers array
-        for (let i = elements.length - 1; i >= 0; i--) {
-          const ids = elements[i]?.identifiers || [];
-          if (ids.length) { profileImageUrl = ids[0].identifier; break; }
-        }
-      } catch (picErr) {
-        // ignore, best-effort
-      }
+      // Profile picture from OpenID response
+      const profileImageUrl = profile.picture || null;
 
       userInfo = {
-        id: profile.id,
-        email: primaryEmail,
+        id: profile.sub,
+        email: profile.email,
         name: displayName || null,
         picture: profileImageUrl || null,
         // keep some OIDC-like aliases used by existing code
-        sub: profile.id,
-        preferred_username: profile.vanityName || null,
+        sub: profile.sub,
+        preferred_username: profile.preferred_username || null,
         given_name: firstName || null,
         family_name: lastName || null,
         headline: null

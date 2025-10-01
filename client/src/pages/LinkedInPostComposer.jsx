@@ -11,17 +11,28 @@ import {
   SchedulingPanel
 } from '../components/LinkedInPostComposer';
 import { useLinkedInPostComposer } from '../hooks/useLinkedInPostComposer';
-import { fetchApiKeyPreference } from '../utils/byok-platform';
+import { byok } from '../utils/api';
 
 const LinkedInPostComposer = () => {
   const [imageModal, setImageModal] = useState({ open: false, src: null });
   const [apiKeyMode, setApiKeyMode] = useState('platform');
+  const [apiKeyPreference, setApiKeyPreference] = useState(null);
 
   useEffect(() => {
     let mounted = true;
-    fetchApiKeyPreference().then(mode => {
-      if (mounted) setApiKeyMode(mode);
-    });
+    const fetchPreference = async () => {
+      try {
+        const response = await byok.getPreference();
+        if (mounted) {
+          setApiKeyPreference(response.data);
+          setApiKeyMode(response.data.api_key_preference || 'platform');
+        }
+      } catch (error) {
+        console.error('Failed to fetch API key preference:', error);
+        if (mounted) setApiKeyMode('platform');
+      }
+    };
+    fetchPreference();
     return () => { mounted = false; };
   }, []);
   const {
@@ -98,9 +109,18 @@ const LinkedInPostComposer = () => {
     <div className="min-h-screen bg-gray-50">
       {/* BYOK/platform mode indicator - always visible at top */}
       <div className="w-full flex justify-center pt-4 pb-2">
-        <span className="inline-block px-4 py-2 rounded-full text-sm font-semibold bg-blue-100 text-[#0077B5] shadow">
-          {apiKeyMode === 'byok' ? 'Using Your Own API Key (BYOK)' : 'Using Platform API Key'}
-        </span>
+        <div className="flex flex-col items-center space-y-1">
+          <span className={`inline-block px-4 py-2 rounded-full text-sm font-semibold shadow ${
+            apiKeyMode === 'byok' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-[#0077B5]'
+          }`}>
+            {apiKeyMode === 'byok' ? '🔑 Using Your Own API Key (BYOK)' : '🏢 Using Platform API Key'}
+          </span>
+          {apiKeyPreference?.locked && apiKeyPreference?.byok_locked_until && (
+            <span className="text-xs text-yellow-600 bg-yellow-50 px-2 py-1 rounded">
+              🔒 Locked until {new Date(apiKeyPreference.byok_locked_until).toLocaleDateString()}
+            </span>
+          )}
+        </div>
       </div>
   <div className="max-w-4xl mx-auto px-2 sm:px-8 lg:px-16 py-8">
         {/* LinkedIn Account Info */}

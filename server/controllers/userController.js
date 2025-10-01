@@ -43,3 +43,31 @@ export function getUserStatus(req, res) {
   if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
   res.json({ user: req.user });
 }
+
+// Fetch BYOK keys from centralized new-platform API
+export async function getByokKeys(req, res) {
+  if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
+  try {
+    let token = req.cookies?.accessToken;
+    if (!token) {
+      const authHeader = req.headers['authorization'];
+      token = authHeader && authHeader.split(' ')[1];
+    }
+    
+    if (!token) {
+      return res.status(401).json({ error: 'No access token found' });
+    }
+    
+    // Fetch from centralized new-platform API
+    const baseUrl = process.env.NEW_PLATFORM_API_URL || 'http://localhost:3000/api';
+    const axios = await import('axios');
+    const response = await axios.default.get(`${baseUrl}/byok/keys`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    
+    res.json(response.data);
+  } catch (error) {
+    console.error('Failed to fetch BYOK keys from new-platform:', error.message);
+    res.status(500).json({ error: 'Failed to fetch BYOK keys' });
+  }
+}

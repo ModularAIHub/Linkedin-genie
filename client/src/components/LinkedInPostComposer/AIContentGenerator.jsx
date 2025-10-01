@@ -75,13 +75,13 @@ const AIContentGenerator = ({
       <div className="space-y-5">
         <div>
           <label className="block text-base font-semibold text-blue-900 mb-2">
-            What would you like to tweet about?
+            What would you like to post about?
           </label>
           <textarea
             value={localPrompt}
             onChange={handlePromptChange}
             onBlur={handlePromptBlur}
-            placeholder="e.g., Share tips about productivity, Write about latest tech trends..."
+            placeholder="e.g., Share professional insights, Write about industry trends, Discuss career advice..."
             className="w-full px-4 py-3 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 text-base bg-white/80 transition-all resize-none min-h-[60px]"
             rows={Math.max(3, localPrompt.split('\n').length)}
             style={{ minHeight: '60px', height: 'auto', overflow: 'hidden' }}
