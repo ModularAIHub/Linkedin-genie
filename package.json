@@ -1,8 +1,20 @@
 {
+  "name": "linkedin-genie",
+  "version": "1.0.0",
+  "description": "LinkedIn content automation tool",
+  "scripts": {
+    "build": "cd client && npm install && npm run build",
+    "start": "cd server && npm start",
+    "dev": "concurrently \"cd server && npm run dev\" \"cd client && npm run dev\"",
+    "install-all": "npm install && cd client && npm install && cd ../server && npm install"
+  },
   "devDependencies": {
-    "nodemon": "^3.1.10"
+    "nodemon": "^3.1.10",
+    "concurrently": "^9.1.0"
   },
   "dependencies": {
     "dotenv": "^17.2.2"
-  }
+  },
+  "author": "ModularAIHub",
+  "license": "MIT"
 }

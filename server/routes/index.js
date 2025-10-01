@@ -13,6 +13,7 @@ import aiBulkRoutes from './aiBulk.js';
 import imageGenerationRoutes from './imageGeneration.js';
 import creditsRoutes from './credits.js';
 import debugRoutes from './debug.js';
+import debugRoutes from './debug.js';
 
 const router = express.Router();
 // CSRF protection middleware (cookie-based)
