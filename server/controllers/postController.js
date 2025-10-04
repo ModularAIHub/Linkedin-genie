@@ -4,7 +4,7 @@ import * as linkedinService from '../services/linkedinService.js';
 
 // Create a LinkedIn post (with media, carousels, etc.)
 export async function createPost(req, res) {
-  console.log('DEBUG req.body:', req.body, 'headers:', req.headers['content-type']);
+  console.log('[CREATE POST] Route called, req.body:', req.body, 'headers:', req.headers['content-type']);
   try {
     const accessToken = req.user?.linkedinAccessToken || 'LINKEDIN_ACCESS_TOKEN';
     const authorUrn = req.user?.linkedinUrn || 'urn:li:person:xxxx';
@@ -14,6 +14,14 @@ export async function createPost(req, res) {
     // Call LinkedIn API to create post
     const result = await linkedinService.createLinkedInPost(accessToken, authorUrn, post_content, media_urls, post_type, company_id);
 
+    console.log('[CREATE POST] About to insert:', {
+      userId: req.user.id,
+      linkedin_post_id: result.id || result.urn,
+      post_content,
+      media_urls,
+      post_type,
+      company_id
+    });
     // Save to DB
     const { rows } = await pool.query(
       `INSERT INTO linkedin_posts (user_id, linkedin_post_id, post_content, media_urls, post_type, company_id, status, created_at, updated_at)
@@ -21,6 +29,7 @@ export async function createPost(req, res) {
        RETURNING *`,
       [req.user.id, result.id || result.urn, post_content, JSON.stringify(media_urls), post_type, company_id]
     );
+    console.log('[CREATE POST] Inserted into linkedin_posts:', rows[0]);
 
     res.json({ success: true, post: rows[0], linkedin: result });
   } catch (error) {
@@ -36,7 +45,7 @@ export async function getPosts(req, res) {
     const offset = (page - 1) * limit;
     let whereClause = 'WHERE user_id = $1';
     const params = [req.user.id];
-    if (status) {
+    if (status && status !== 'all') {
       whereClause += ' AND status = $2';
       params.push(status);
     }
@@ -44,6 +53,7 @@ export async function getPosts(req, res) {
     const sqlParams = [...params, limit, offset];
     console.log('DEBUG getPosts SQL:', sql, sqlParams);
     const { rows } = await pool.query(sql, sqlParams);
+    console.log('DEBUG getPosts returned rows:', rows);
     // Get total count
     const countResult = await pool.query(
       `SELECT COUNT(*) FROM linkedin_posts ${whereClause}`,
