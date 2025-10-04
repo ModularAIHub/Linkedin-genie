@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+console.log('[HISTORY] Page mounted');
 import { History as HistoryIcon, MessageCircle, Heart, Share2, Calendar, Filter, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
 import { posts, scheduling } from '../utils/api';
 import LoadingSpinner from '../components/LoadingSpinner';
@@ -74,12 +75,13 @@ const History = () => {
         shares: sp.shares || '',
         created_at: sp.posted_at || sp.created_at
       }));
-      // Merge and sort
-      posts = [...posts, ...scheduledPosts];
-      posts.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-      setPostedPosts(posts);
+  // Merge and sort
+  posts = [...posts, ...scheduledPosts];
+  posts.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  console.log('[HISTORY] Posts fetched:', posts);
+  setPostedPosts(posts);
     } catch (error) {
-      // Optionally handle error
+      console.error('[HISTORY] Fetch error:', error);
     } finally {
       setLoading(false);
     }
