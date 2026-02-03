@@ -98,3 +98,105 @@ export async function cancelScheduledPost(req, res) {
     res.status(500).json({ error: error.message });
   }
 }
+
+// Bulk schedule LinkedIn posts
+export async function bulkSchedulePosts(req, res) {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    
+    const { items, frequency, startDate, postsPerDay = 1, dailyTimes = ['09:00'], daysOfWeek, images, timezone = 'UTC' } = req.body;
+    
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'No items to schedule' });
+    }
+    
+    const scheduled = [];
+    let scheduledCount = 0;
+    let current = DateTime.fromISO(startDate, { zone: timezone });
+    
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      let content = item.text;
+      let media = images?.[i] || [];
+      
+      let scheduledForLocal;
+      
+      if (frequency === 'daily') {
+        const dayOffset = Math.floor(scheduledCount / postsPerDay);
+        const timeIndex = scheduledCount % postsPerDay;
+        const timeStr = dailyTimes[timeIndex] || dailyTimes[0] || '09:00';
+        const [hour, minute] = timeStr.split(':').map(Number);
+        
+        scheduledForLocal = current.plus({ days: dayOffset }).set({ hour, minute, second: 0, millisecond: 0 });
+      } else if (frequency === 'thrice_weekly' || frequency === 'four_times_weekly') {
+        const days = frequency === 'thrice_weekly' ? [1, 3, 5] : [0, 2, 4, 6];
+        const postsPerCycle = days.length * postsPerDay;
+        const cycleNum = Math.floor(scheduledCount / postsPerCycle);
+        const positionInCycle = scheduledCount % postsPerCycle;
+        const dayIndex = Math.floor(positionInCycle / postsPerDay);
+        const timeIndex = positionInCycle % postsPerDay;
+        const timeStr = dailyTimes[timeIndex] || dailyTimes[0] || '09:00';
+        const [hour, minute] = timeStr.split(':').map(Number);
+        
+        scheduledForLocal = current.plus({ weeks: cycleNum }).set({ weekday: days[dayIndex], hour, minute, second: 0, millisecond: 0 });
+      } else if (frequency === 'custom' && Array.isArray(daysOfWeek) && daysOfWeek.length > 0) {
+        const postsPerCycle = daysOfWeek.length * postsPerDay;
+        const cycleNum = Math.floor(scheduledCount / postsPerCycle);
+        const positionInCycle = scheduledCount % postsPerCycle;
+        const dayIndex = Math.floor(positionInCycle / postsPerDay);
+        const timeIndex = positionInCycle % postsPerDay;
+        const timeStr = dailyTimes[timeIndex] || dailyTimes[0] || '09:00';
+        const [hour, minute] = timeStr.split(':').map(Number);
+        
+        // daysOfWeek uses Sunday=0, Monday=1, etc.
+        // luxon uses Monday=1, Sunday=7, so we need to convert
+        const luxonWeekday = daysOfWeek[dayIndex] === 0 ? 7 : daysOfWeek[dayIndex];
+        scheduledForLocal = current.plus({ weeks: cycleNum }).set({ weekday: luxonWeekday, hour, minute, second: 0, millisecond: 0 });
+      } else {
+        // Fallback: daily with first time
+        const [hour, minute] = (dailyTimes[0] || '09:00').split(':').map(Number);
+        scheduledForLocal = current.plus({ days: scheduledCount }).set({ hour, minute, second: 0, millisecond: 0 });
+      }
+      
+      const scheduledForUTC = scheduledForLocal.toUTC().toISO();
+      
+      // Save to DB
+      const scheduledPost = await create({
+        user_id: userId,
+        post_content: content,
+        media_urls: media,
+        post_type: 'text',
+        scheduled_time: scheduledForUTC,
+        status: 'scheduled'
+      });
+      
+      // Enqueue job
+      const delay = Math.max(0, DateTime.fromISO(scheduledForUTC).toMillis() - Date.now());
+      await scheduleQueue.add('publish', {
+        scheduledPostId: scheduledPost.id,
+        linkedinAccessToken: req.user?.linkedinAccessToken,
+        authorUrn: req.user?.linkedinUrn,
+        postContent: content,
+        mediaUrls: media,
+        postType: 'text'
+      }, {
+        delay,
+        attempts: 3
+      });
+      
+      scheduled.push({
+        id: scheduledPost.id,
+        content: content.substring(0, 50) + '...',
+        scheduledFor: scheduledForLocal.toISO()
+      });
+      
+      scheduledCount++;
+    }
+    
+    res.json({ success: true, scheduled, count: scheduled.length });
+  } catch (error) {
+    console.error('[bulkSchedulePosts] Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+}

@@ -1,47 +1,99 @@
 import React, { useState, useEffect } from 'react';
-console.log('[HISTORY] Page mounted');
-import { History as HistoryIcon, MessageCircle, Heart, Share2, Calendar, Filter, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
-import { posts, scheduling } from '../utils/api';
+import { History as HistoryIcon, MessageCircle, Heart, Share2, Eye, Calendar, Filter, Trash2, ExternalLink, RefreshCw } from 'lucide-react';
+import api, { posts, scheduling } from '../utils/api';
 import LoadingSpinner from '../components/LoadingSpinner';
+import toast from 'react-hot-toast';
 
 const History = () => {
   const [postedPosts, setPostedPosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
+  const [sourceFilter, setSourceFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
   const [sortBy, setSortBy] = useState('newest');
-  const [deletingId, setDeletingId] = useState(null);
-  const handleDelete = async (postId, isScheduled) => {
-      if (!window.confirm('Are you sure you want to delete this post? This cannot be undone.')) return;
-      console.log('[DELETE] Attempting to delete post:', { postId, isScheduled });
-      setDeletingId(postId);
+  const [deletingPosts, setDeletingPosts] = useState(new Set());
+  const [syncing, setSyncing] = useState(false);
+
+  // Load saved filters from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem('historyFilters');
+    if (saved) {
       try {
-        if (isScheduled) {
-          await scheduling.cancel(postId);
-        } else {
-          console.log('Before axios delete', postId);
-          await posts.delete(postId);
-        }
-        setPostedPosts((prev) => prev.filter((p) => p.id !== postId && p.linkedin_post_id !== postId));
+        const parsed = JSON.parse(saved);
+        setFilter(parsed.filter || 'all');
+        setSourceFilter(parsed.sourceFilter || 'all');
+        setStatusFilter(parsed.statusFilter || 'all');
+        setSortBy(parsed.sortBy || 'newest');
       } catch (err) {
-        window.alert('Failed to delete post.');
-        console.error('Delete error:', err);
-      } finally {
-        setDeletingId(null);
+        console.error('Failed to parse saved history filters', err);
       }
+    }
+  }, []);
+
+  // Persist filters when they change
+  useEffect(() => {
+    const payload = { filter, sourceFilter, statusFilter, sortBy };
+    localStorage.setItem('historyFilters', JSON.stringify(payload));
+  }, [filter, sourceFilter, statusFilter, sortBy]);
+
+  const handleDeletePost = async (post) => {
+    const confirmed = window.confirm(
+      `Are you sure you want to delete this post?\n\n"${post.post_content?.substring(0, 100)}${post.post_content?.length > 100 ? '...' : ''}"\n\nThis will remove the post from your history.`
+    );
+    
+    if (!confirmed) return;
+
+    const postId = post.id || post.linkedin_post_id;
+    const isScheduled = !!post.scheduled_time || post.status === 'completed' || post.status === 'scheduled';
+
+    try {
+      setDeletingPosts(prev => new Set([...prev, postId]));
+      
+      if (isScheduled) {
+        await scheduling.cancel(postId);
+      } else {
+        await posts.delete(postId);
+      }
+      
+      setPostedPosts(prev => prev.filter(p => (p.id || p.linkedin_post_id) !== postId));
+      toast.success('Post deleted successfully');
+    } catch (err) {
+      console.error('Delete error:', err);
+      if (err.response?.status === 404) {
+        // Post not found, remove from UI anyway
+        setPostedPosts(prev => prev.filter(p => (p.id || p.linkedin_post_id) !== postId));
+        toast.success('Post removed from history');
+      } else {
+        toast.error('Failed to delete post: ' + (err.response?.data?.message || err.message));
+      }
+    } finally {
+      setDeletingPosts(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(postId);
+        return newSet;
+      });
+    }
   };
 
   useEffect(() => {
     fetchPostedPosts();
-  }, [filter, sortBy, statusFilter]);
+  }, [filter, sortBy, sourceFilter, statusFilter]);
 
   const fetchPostedPosts = async () => {
     try {
       setLoading(true);
-      const params = { limit: 50, sort: sortBy };
+      
+      const params = {
+        limit: 50,
+        sort: sortBy === 'newest' ? 'created_at_desc' : 
+              sortBy === 'oldest' ? 'created_at_asc' :
+              sortBy === 'most_likes' ? 'likes_desc' : 'shares_desc'
+      };
+
       if (filter !== 'all') {
         const now = new Date();
         let startDate;
+        
         switch (filter) {
           case 'today':
             startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -55,35 +107,109 @@ const History = () => {
           default:
             startDate = null;
         }
+        
         if (startDate) {
           params.start_date = startDate.toISOString();
         }
       }
-      if (statusFilter !== 'all') {
-        params.status = statusFilter;
-      }
-      // Fetch normal posts
+
       const response = await api.get('/api/posts', { params });
-      let posts = response.data.posts || [];
-      // Fetch completed scheduled posts
+      let fetchedPosts = response.data.posts || [];
+      
       const scheduledRes = await api.get('/api/schedule?status=completed');
       const scheduledPosts = (scheduledRes.data.posts || []).map(sp => ({
         ...sp,
         linkedin_post_id: sp.id,
-        views: sp.views || '',
-        likes: sp.likes || '',
-        shares: sp.shares || '',
-        created_at: sp.posted_at || sp.created_at
+        views: sp.views || 0,
+        likes: sp.likes || 0,
+        shares: sp.shares || 0,
+        comments: sp.comments || 0,
+        created_at: sp.posted_at || sp.created_at,
+        source: sp.source || 'platform',
+        status: sp.status || 'posted'
       }));
-  // Merge and sort
-  posts = [...posts, ...scheduledPosts];
-  posts.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-  console.log('[HISTORY] Posts fetched:', posts);
-  setPostedPosts(posts);
+      
+      fetchedPosts = [...fetchedPosts, ...scheduledPosts];
+      
+      // Apply source filter
+      if (sourceFilter !== 'all') {
+        fetchedPosts = fetchedPosts.filter(post => 
+          post.source === sourceFilter || 
+          (sourceFilter === 'platform' && !post.source)
+        );
+      }
+      
+      // Apply status filter
+      if (statusFilter !== 'all') {
+        fetchedPosts = fetchedPosts.filter(post => post.status === statusFilter);
+      }
+      
+      fetchedPosts.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      
+      setPostedPosts(fetchedPosts);
     } catch (error) {
       console.error('[HISTORY] Fetch error:', error);
+      toast.error('Failed to load post history');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const formatDate = (dateString) => {
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffInMinutes = Math.floor(diffMs / (1000 * 60));
+    const diffInHours = diffMs / (1000 * 60 * 60);
+    const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    
+    if (diffInMinutes < 1) {
+      return 'just now';
+    } else if (diffInHours < 1) {
+      return `${diffInMinutes}m ago`;
+    } else if (diffInHours < 24) {
+      return `${Math.floor(diffInHours)}h ago`;
+    } else {
+      return date.toLocaleString(undefined, {
+        hour: '2-digit',
+        minute: '2-digit',
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        timeZone: userTimezone
+      });
+    }
+  };
+
+  const getEngagementRate = (post) => {
+    const totalEngagement = (post.likes || 0) + (post.shares || 0) + (post.comments || 0);
+    const impressions = post.views || 1;
+    return ((totalEngagement / impressions) * 100).toFixed(1);
+  };
+
+  const getPostUrl = (post) => {
+    if (post.linkedin_post_id && post.post_url) {
+      return post.post_url;
+    }
+    return null;
+  };
+
+  const handleSyncAnalytics = async () => {
+    if (syncing) return;
+    
+    setSyncing(true);
+    const toastId = toast.loading('Syncing LinkedIn analytics...');
+    
+    try {
+      await api.post('/api/analytics/sync');
+      toast.success('Analytics synced successfully!', { id: toastId });
+      // Refresh the posts to show updated metrics
+      await fetchPostedPosts();
+    } catch (error) {
+      console.error('Sync error:', error);
+      toast.error('Failed to sync analytics: ' + (error.response?.data?.message || error.message), { id: toastId });
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -92,7 +218,7 @@ const History = () => {
       <div className="flex items-center justify-center min-h-96">
         <div className="text-center">
           <LoadingSpinner size="lg" />
-          <p className="mt-4 text-gray-600">Loading post history.....</p>
+          <p className="mt-4 text-gray-600">Loading post history...</p>
         </div>
       </div>
     );
@@ -100,65 +226,332 @@ const History = () => {
 
   return (
     <div className="space-y-6">
+      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Post History</h1>
-          <p className="mt-2 text-gray-600">View your posted LinkedIn content</p>
+          <h1 className="text-3xl font-bold text-gray-900 flex items-center">
+            <HistoryIcon className="h-8 w-8 mr-3 text-blue-600" />
+            LinkedIn Post History
+          </h1>
+          <p className="mt-2 text-gray-600">
+            View and analyze your posted LinkedIn content
+          </p>
+        </div>
+        
+        {/* Sync Button */}
+        <button
+          onClick={handleSyncAnalytics}
+          disabled={syncing}
+          className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          title="Sync latest engagement metrics from LinkedIn"
+        >
+          <RefreshCw className={`h-4 w-4 ${syncing ? 'animate-spin' : ''}`} />
+          {syncing ? 'Syncing...' : 'Sync Analytics'}
+        </button>
+      </div>
+
+      {/* Filters and Controls */}
+      <div className="card">
+        <div className="space-y-6">
+          {/* First Row: Time Filter and Sort */}
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between space-y-4 lg:space-y-0">
+            {/* Time Filter */}
+            <div className="flex flex-col sm:flex-row sm:items-center space-y-2 sm:space-y-0 sm:space-x-4">
+              <div className="flex items-center space-x-2">
+                <Filter className="h-4 w-4 text-gray-500" />
+                <span className="text-sm font-medium text-gray-700">Time:</span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { value: 'all', label: 'All Time' },
+                  { value: 'today', label: 'Today' },
+                  { value: 'week', label: 'This Week' },
+                  { value: 'month', label: 'This Month' }
+                ].map((option) => (
+                  <button
+                    key={option.value}
+                    onClick={() => setFilter(option.value)}
+                    className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                      filter === option.value
+                        ? 'bg-blue-100 text-blue-700 border border-blue-200'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-transparent'
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Sort Options */}
+            <div className="flex items-center space-x-3">
+              <span className="text-sm font-medium text-gray-700">Sort:</span>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value)}
+                className="px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              >
+                <option value="newest">Newest First</option>
+                <option value="oldest">Oldest First</option>
+                <option value="most_likes">Most Likes</option>
+                <option value="most_shares">Most Shares</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Second Row: Source and Status Filters */}
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between space-y-4 lg:space-y-0">
+            {/* Source Filter */}
+            <div className="flex flex-col sm:flex-row sm:items-center space-y-2 sm:space-y-0 sm:space-x-4">
+              <div className="flex items-center space-x-2">
+                <ExternalLink className="h-4 w-4 text-gray-500" />
+                <span className="text-sm font-medium text-gray-700">Source:</span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { value: 'all', label: 'All Posts' },
+                  { value: 'platform', label: 'Platform' },
+                  { value: 'external', label: 'LinkedIn' }
+                ].map((option) => (
+                  <button
+                    key={option.value}
+                    onClick={() => setSourceFilter(option.value)}
+                    className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                      sourceFilter === option.value
+                        ? 'bg-green-100 text-green-700 border border-green-200'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-transparent'
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Status Filter */}
+            <div className="flex flex-col sm:flex-row sm:items-center space-y-2 sm:space-y-0 sm:space-x-4">
+              <div className="flex items-center space-x-2">
+                <Calendar className="h-4 w-4 text-gray-500" />
+                <span className="text-sm font-medium text-gray-700">Status:</span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { value: 'all', label: 'All Status' },
+                  { value: 'posted', label: 'Live' },
+                  { value: 'deleted', label: 'Deleted' }
+                ].map((option) => (
+                  <button
+                    key={option.value}
+                    onClick={() => setStatusFilter(option.value)}
+                    className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                      statusFilter === option.value
+                        ? 'bg-purple-100 text-purple-700 border border-purple-200'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-transparent'
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
-      <div className="flex gap-2 mb-4">
-        <button className={`btn ${filter === 'all' ? 'btn-primary' : 'btn-outline'}`} onClick={() => setFilter('all')}>All</button>
-        <button className={`btn ${filter === 'today' ? 'btn-primary' : 'btn-outline'}`} onClick={() => setFilter('today')}>Today</button>
-        <button className={`btn ${filter === 'week' ? 'btn-primary' : 'btn-outline'}`} onClick={() => setFilter('week')}>This Week</button>
-        <button className={`btn ${filter === 'month' ? 'btn-primary' : 'btn-outline'}`} onClick={() => setFilter('month')}>This Month</button>
-      </div>
-      <div className="bg-white rounded-lg shadow p-6">
-        <h2 className="text-xl font-semibold mb-4">Posted Content</h2>
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead>
-              <tr>
-                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Content</th>
-                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Views</th>
-                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Likes</th>
-                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Shares</th>
-                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
-                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Delete</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(postedPosts || []).map(post => {
-                  // Heuristic: scheduled posts have 'scheduled_time' or status 'completed', normal posts do not
-                  const isScheduled = !!post.scheduled_time || post.status === 'completed';
-                  // Use post.id if available, else linkedin_post_id
-                  const deleteId = post.id || post.linkedin_post_id;
-                  return (
-                    <tr key={deleteId} className="hover:bg-gray-50">
-                      <td className="px-4 py-2 max-w-xs truncate" title={post.post_content}>{post.post_content}</td>
-                      <td className="px-4 py-2">{post.views}</td>
-                      <td className="px-4 py-2">{post.likes}</td>
-                      <td className="px-4 py-2">{post.shares}</td>
-                      <td className="px-4 py-2">{new Date(post.created_at).toLocaleDateString()}</td>
-                      <td className="px-4 py-2">
-                        <button
-                          className={`btn btn-sm btn-danger flex items-center gap-1 ${deletingId === deleteId ? 'opacity-50 cursor-not-allowed' : ''}`}
-                          onClick={() => {
-                            console.log('[DELETE BUTTON] post.id:', post.id, 'linkedin_post_id:', post.linkedin_post_id, 'isScheduled:', isScheduled);
-                            handleDelete(deleteId, isScheduled);
-                          }}
-                          disabled={deletingId === deleteId}
-                          title="Delete post"
+
+      {/* Stats Summary */}
+      {postedPosts.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+          <div className="card text-center">
+            <div className="text-2xl font-bold text-blue-600">
+              {postedPosts.length}
+            </div>
+            <div className="text-sm text-gray-600">Total Posts</div>
+          </div>
+          <div className="card text-center">
+            <div className="text-2xl font-bold text-red-600">
+              {postedPosts.reduce((sum, post) => sum + (post.likes || 0), 0).toLocaleString()}
+            </div>
+            <div className="text-sm text-gray-600">Total Likes</div>
+          </div>
+          <div className="card text-center">
+            <div className="text-2xl font-bold text-green-600">
+              {postedPosts.reduce((sum, post) => sum + (post.shares || 0), 0).toLocaleString()}
+            </div>
+            <div className="text-sm text-gray-600">Total Shares</div>
+          </div>
+          <div className="card text-center">
+            <div className="text-2xl font-bold text-purple-600">
+              {postedPosts.reduce((sum, post) => sum + (post.comments || 0), 0).toLocaleString()}
+            </div>
+            <div className="text-sm text-gray-600">Total Comments</div>
+          </div>
+        </div>
+      )}
+
+      {/* Post History List */}
+      <div className="space-y-4">
+        {postedPosts.length > 0 ? (
+          postedPosts.map((post) => {
+            const postId = post.id || post.linkedin_post_id;
+
+            return (
+              <div key={postId} className="card hover:shadow-md transition-shadow">
+                <div className="flex items-start justify-between">
+                  <div className="flex-1 min-w-0">
+                    {/* Post Header */}
+                    <div className="flex items-center space-x-3 mb-3">
+                      <div className="flex items-center space-x-2">
+                        <div className="h-8 w-8 bg-blue-700 rounded-sm flex items-center justify-center">
+                          <span className="text-white text-sm font-medium">in</span>
+                        </div>
+                        {/* Source Indicator */}
+                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                          post.source === 'external' 
+                            ? 'bg-green-100 text-green-700' 
+                            : 'bg-blue-100 text-blue-700'
+                        }`}>
+                          {post.source === 'external' ? '🔗 LinkedIn' : '🚀 Platform'}
+                        </span>
+                        {/* Status Indicator */}
+                        {post.status === 'deleted' && (
+                          <span className="px-2 py-1 bg-red-100 text-red-700 rounded-full text-xs font-medium">
+                            🗑️ Deleted
+                          </span>
+                        )}
+                        {post.status === 'posted' && (
+                          <span className="px-2 py-1 bg-green-100 text-green-700 rounded-full text-xs font-medium">
+                            ✅ Live
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-sm text-gray-500">
+                        {formatDate(post.display_created_at || post.posted_at || post.created_at)}
+                      </span>
+                      {getPostUrl(post) && (
+                        <a
+                          href={getPostUrl(post)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-500 hover:text-blue-700"
+                          title="View on LinkedIn"
                         >
-                          <Trash2 size={16} />
-                          {deletingId === deleteId ? 'Deleting...' : 'Delete'}
-                        </button>
-                      </td>
-                    </tr>
-                  );
-              })}
-            </tbody>
-          </table>
-        </div>
+                          <ExternalLink className="h-4 w-4" />
+                        </a>
+                      )}
+                    </div>
+                    
+                    {/* Post Content */}
+                    <p className="text-gray-900 mb-4 whitespace-pre-wrap">
+                      {post.post_content}
+                    </p>
+
+                    {/* Media Indicators */}
+                    {post.media_urls && post.media_urls.length > 0 && (
+                      <div className="mb-4">
+                        <div className="flex items-center text-sm text-gray-500">
+                          <span>📷 {post.media_urls.filter(url => url && url !== null).length} media file(s) attached</span>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Engagement Metrics */}
+                    <div className="flex items-center space-x-6 text-sm text-gray-500">
+                      <div className="flex items-center space-x-1">
+                        <Heart className="h-4 w-4" />
+                        <span>{(post.likes || 0).toLocaleString()}</span>
+                      </div>
+                      <div className="flex items-center space-x-1">
+                        <Share2 className="h-4 w-4" />
+                        <span>{(post.shares || 0).toLocaleString()}</span>
+                      </div>
+                      <div className="flex items-center space-x-1">
+                        <MessageCircle className="h-4 w-4" />
+                        <span>{(post.comments || 0).toLocaleString()}</span>
+                      </div>
+                      {post.views && (
+                        <div className="flex items-center space-x-1">
+                          <Eye className="h-4 w-4" />
+                          <span>{post.views.toLocaleString()}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Performance Indicators */}
+                    {post.views && (
+                      <div className="mt-2 flex items-center space-x-4 text-xs text-gray-500">
+                        <span>
+                          Engagement Rate: {getEngagementRate(post)}%
+                        </span>
+                        {post.views > 1000 && (
+                          <span className="px-2 py-1 bg-green-100 text-green-700 rounded-full">
+                            High Reach
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Action Buttons */}
+                  <div className="ml-4 flex flex-col items-end space-y-2">
+                    {/* Delete Button - Only for platform posts */}
+                    {post.source !== 'external' && (
+                      <button
+                        onClick={() => handleDeletePost(post)}
+                        disabled={deletingPosts.has(postId)}
+                        className="flex items-center px-2 py-1 text-red-600 hover:text-red-800 hover:bg-red-50 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Delete post from history"
+                      >
+                        {deletingPosts.has(postId) ? (
+                          <div className="animate-spin h-4 w-4 border-2 border-red-600 border-t-transparent rounded-full"></div>
+                        ) : (
+                          <Trash2 className="h-4 w-4" />
+                        )}
+                        <span className="ml-1 text-xs">Delete</span>
+                      </button>
+                    )}
+
+                    {/* External Post Info */}
+                    {post.source === 'external' && (
+                      <div className="text-xs text-gray-500 bg-gray-50 px-2 py-1 rounded">
+                        From LinkedIn
+                      </div>
+                    )}
+
+                    {/* Badges */}
+                    <div className="flex flex-col space-y-1">
+                      {post.scheduled_for && (
+                        <span className="badge badge-warning text-xs">Scheduled</span>
+                      )}
+                      {post.ai_generated && (
+                        <span className="badge badge-info text-xs">AI Generated</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })
+        ) : (
+          <div className="card text-center py-12">
+            <HistoryIcon className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+            <h3 className="text-lg font-medium text-gray-900 mb-2">
+              No posted content found
+            </h3>
+            <p className="text-gray-600 mb-6">
+              {filter === 'all' 
+                ? "You haven't posted any LinkedIn content yet"
+                : `No posts found for the selected time period`
+              }
+            </p>
+            <a
+              href="/compose"
+              className="btn btn-primary btn-md"
+            >
+              <MessageCircle className="h-4 w-4 mr-2" />
+              Create Your First Post
+            </a>
+          </div>
+        )}
       </div>
     </div>
   );
