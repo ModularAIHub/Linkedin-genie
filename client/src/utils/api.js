@@ -136,6 +136,7 @@ export const posts = {
 // Scheduling endpoints
 export const scheduling = {
   create: (scheduleData) => api.post('/api/scheduling', scheduleData),
+  bulk: (bulkData) => api.post('/api/scheduling/bulk', bulkData),
   list: (params) => api.get('/api/scheduling', { params }),
   update: (scheduleId, data) => api.put(`/api/scheduling/${scheduleId}`, data),
   cancel: (scheduleId) => api.delete(`/api/scheduling/${scheduleId}`),
@@ -156,6 +157,14 @@ export const credits = {
   getBalance: () => api.get('/api/credits/balance'),
   getHistory: (params) => api.get('/api/credits/history', { params }),
   getPricing: () => api.get('/api/credits/pricing'),
+};
+
+// AI endpoints
+export const ai = {
+  generate: ({ prompt, style = 'professional', isThread = false }) => api.post('/api/ai/generate', { prompt, style, isThread }),
+  generateOptions: (prompt, style = 'professional', count = 3) => 
+    api.post('/api/ai/generate-options', { prompt, style, count }),
+  bulkGenerate: (prompts, options) => api.post('/api/ai/bulk-generate', { prompts, options }),
 };
 
 export default api;
