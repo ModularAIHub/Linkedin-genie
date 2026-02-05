@@ -11,7 +11,15 @@ const newPlatformPool = new Pool({
 // Get all LinkedIn accounts for user (personal + team accounts they have access to)
 export async function getAccounts(req, res) {
   try {
-    const userId = req.user.id;
+    // Support both authenticated requests (req.user) and inter-service requests (user_id param)
+    const userId = req.user?.id || req.query.user_id || req.headers['x-user-id'];
+    
+    if (!userId) {
+      console.error('[getAccounts] No userId available');
+      return res.status(401).json({ error: 'User ID required', accounts: [] });
+    }
+    
+    console.log('[getAccounts] Fetching accounts for user:', userId);
 
     // Get personal LinkedIn account
     const { rows: personalAccounts } = await pool.query(
