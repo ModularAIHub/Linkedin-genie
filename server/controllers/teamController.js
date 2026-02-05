@@ -21,7 +21,78 @@ export async function getAccounts(req, res) {
     
     console.log('[getAccounts] Fetching accounts for user:', userId);
 
-    // Get personal LinkedIn account
+    // Check if user is in any active team
+    const { rows: userTeams } = await newPlatformPool.query(
+      `SELECT team_id, role, status FROM team_members WHERE user_id = $1 AND status = 'active'`,
+      [userId]
+    );
+
+    // If user is in a team, ONLY return team accounts (no personal account access)
+    if (userTeams.length > 0) {
+      console.log('[getAccounts] User is in team, returning ONLY team accounts');
+      
+      // Get all team LinkedIn accounts for teams the user belongs to
+      const { rows: allTeamAccounts } = await pool.query(
+        `SELECT 
+          lta.id,
+          lta.team_id,
+          lta.user_id,
+          lta.linkedin_user_id,
+          lta.linkedin_username,
+          lta.linkedin_display_name,
+          lta.linkedin_profile_image_url,
+          lta.connections_count,
+          lta.headline,
+          lta.active
+         FROM linkedin_team_accounts lta
+         WHERE lta.active = true
+         ORDER BY lta.created_at DESC`
+      );
+
+      // Filter team accounts to only those in user's teams and enrich with team info
+      const teamAccounts = await Promise.all(
+        allTeamAccounts
+          .filter(acc => userTeams.some(tm => tm.team_id === acc.team_id))
+          .map(async (acc) => {
+            const teamMember = userTeams.find(tm => tm.team_id === acc.team_id);
+            // Try to get team name from new-platform database
+            let teamName = 'Unknown Team';
+            try {
+              const { rows: teamRows } = await newPlatformPool.query(
+                `SELECT name FROM teams WHERE id = $1`,
+                [acc.team_id]
+              );
+              if (teamRows.length > 0) {
+                teamName = teamRows[0].name;
+              }
+            } catch (err) {
+              console.warn('[getAccounts] Could not fetch team name for:', acc.team_id);
+            }
+            
+            return {
+              account_type: 'team',
+              account_id: acc.id,
+              team_id: acc.team_id,
+              team_name: teamName,
+              id: acc.id,
+              linkedin_user_id: acc.linkedin_user_id,
+              linkedin_username: acc.linkedin_username,
+              linkedin_display_name: acc.linkedin_display_name,
+              linkedin_profile_image_url: acc.linkedin_profile_image_url,
+              connections_count: acc.connections_count,
+              headline: acc.headline,
+              user_role: teamMember?.role,
+              label: `${acc.linkedin_display_name || acc.linkedin_username} (Team: ${teamName})`,
+              isTeamAccount: true
+            };
+          })
+      );
+
+      return res.json({ accounts: teamAccounts });
+    }
+
+    // User is NOT in a team - return personal account only
+    console.log('[getAccounts] User is not in team, returning personal account');
     const { rows: personalAccounts } = await pool.query(
       `SELECT 
         'personal' as account_type,
@@ -40,80 +111,11 @@ export async function getAccounts(req, res) {
       [userId]
     );
 
-    // Get team LinkedIn accounts for teams the user belongs to
-    // First, get all team accounts
-    const { rows: allTeamAccounts } = await pool.query(
-      `SELECT 
-        lta.id,
-        lta.team_id,
-        lta.user_id,
-        lta.linkedin_user_id,
-        lta.linkedin_username,
-        lta.linkedin_display_name,
-        lta.linkedin_profile_image_url,
-        lta.connections_count,
-        lta.headline,
-        lta.active
-       FROM linkedin_team_accounts lta
-       WHERE lta.active = true
-       ORDER BY lta.created_at DESC`
-    );
-
-    // Get user's team memberships from new-platform database
-    const { rows: userTeams } = await newPlatformPool.query(
-      `SELECT team_id, role, status FROM team_members WHERE user_id = $1 AND status = 'active'`,
-      [userId]
-    );
-
-    // Filter team accounts to only those in user's teams and enrich with team info
-    const teamAccounts = await Promise.all(
-      allTeamAccounts
-        .filter(acc => userTeams.some(tm => tm.team_id === acc.team_id))
-        .map(async (acc) => {
-          const teamMember = userTeams.find(tm => tm.team_id === acc.team_id);
-          // Try to get team name from new-platform database
-          let teamName = 'Unknown Team';
-          try {
-            const { rows: teamRows } = await newPlatformPool.query(
-              `SELECT name FROM teams WHERE id = $1`,
-              [acc.team_id]
-            );
-            if (teamRows.length > 0) {
-              teamName = teamRows[0].name;
-            }
-          } catch (err) {
-            console.warn('[getAccounts] Could not fetch team name for:', acc.team_id);
-          }
-          
-          return {
-            account_type: 'team',
-            account_id: acc.id,
-            team_id: acc.team_id,
-            team_name: teamName,
-            id: acc.id,
-            linkedin_user_id: acc.linkedin_user_id,
-            linkedin_username: acc.linkedin_username,
-            linkedin_display_name: acc.linkedin_display_name,
-            linkedin_profile_image_url: acc.linkedin_profile_image_url,
-            connections_count: acc.connections_count,
-            headline: acc.headline,
-            user_role: teamMember?.role
-          };
-        })
-    );
-
-    const accounts = [
-      ...personalAccounts.map(acc => ({
-        ...acc,
-        label: `${acc.linkedin_display_name || acc.linkedin_username} (Personal)`,
-        isTeamAccount: false
-      })),
-      ...teamAccounts.map(acc => ({
-        ...acc,
-        label: `${acc.linkedin_display_name || acc.linkedin_username} (Team: ${acc.team_name})`,
-        isTeamAccount: true
-      }))
-    ];
+    const accounts = personalAccounts.map(acc => ({
+      ...acc,
+      label: `${acc.linkedin_display_name || acc.linkedin_username} (Personal)`,
+      isTeamAccount: false
+    }));
 
     res.json({ accounts });
   } catch (error) {
