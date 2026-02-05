@@ -3,6 +3,7 @@
 
 import * as config from '../config/index.js';
 import axios from 'axios';
+import crypto from 'crypto';
 import { pool } from '../config/database.js';
 import pg from 'pg';
 
@@ -23,7 +24,7 @@ export function startOAuth(req, res) {
     response_type: 'code',
     client_id: config.getLinkedInClientId(),
     redirect_uri: config.getLinkedInRedirectUri(),
-    // Use OpenID Connect scopes for LinkedIn Sign In with LinkedIn
+    // OpenID Connect scopes for LinkedIn Sign In
     scope: 'openid profile email w_member_social',
     state
   });
@@ -134,48 +135,113 @@ export async function handleOAuthCallback(req, res) {
             return res.redirect(`${returnUrl}?error=insufficient_permissions`);
           }
           
-          // Check if this LinkedIn account is already connected to THIS SPECIFIC TEAM
-          // (Same account CAN be connected to different teams)
-          const { rows: existingRows } = await pool.query(
-            `SELECT lta.id, lta.team_id, lta.linkedin_username, lta.linkedin_display_name
-             FROM linkedin_team_accounts lta
-             WHERE lta.linkedin_user_id = $1 AND lta.team_id = $2 AND lta.active = true`,
-            [linkedinUserId, teamId]
-          );
-          
-          if (existingRows.length > 0) {
-            const existing = existingRows[0];
-            // Get team name from new-platform database
-            let teamName = 'this team';
-            try {
-              const { rows: teamRows } = await newPlatformPool.query(
-                `SELECT name FROM teams WHERE id = $1`,
-                [teamId]
-              );
-              if (teamRows.length > 0) {
-                teamName = teamRows[0].name;
+          // Fetch organization pages the user manages (requires Community Management API approval)
+          let organizations = [];
+          try {
+            console.log('[Team OAuth] Fetching organizations with token:', accessToken.substring(0, 20) + '...');
+            const orgResponse = await axios.get(
+              'https://api.linkedin.com/v2/organizationAcls?q=roleAssignee&projection=(elements*(organization~(localizedName,vanityName,logoV2(original~:playableStreams)),roleAssignee,state))',
+              {
+                headers: {
+                  'Authorization': `Bearer ${accessToken}`,
+                  'LinkedIn-Version': '202405'
+                }
               }
-            } catch (err) {
-              console.warn('[Team OAuth] Could not fetch team name:', err);
-            }
+            );
             
-            console.log('[Team OAuth] LinkedIn account already connected to this team:', { linkedinUserId, teamId, teamName });
-            // Include account info in error URL for better UX
-            const errorParams = new URLSearchParams({
-              error: 'already_connected',
-              existingTeam: teamName,
-              accountName: existing.linkedin_display_name || existing.linkedin_username || 'this account'
-            });
-            return res.redirect(`${returnUrl}?${errorParams.toString()}`);
+            console.log('[Team OAuth] Organization API response:', JSON.stringify(orgResponse.data, null, 2));
+            
+            if (orgResponse.data?.elements) {
+              organizations = orgResponse.data.elements
+                .filter(acl => acl.state === 'APPROVED' && acl.roleAssignee)
+                .map(acl => ({
+                  id: acl.organization?.replace('urn:li:organization:', ''),
+                  urn: acl.organization,
+                  name: acl['organization~']?.localizedName,
+                  vanityName: acl['organization~']?.vanityName,
+                  logo: acl['organization~']?.logoV2?.['original~']?.elements?.[0]?.identifiers?.[0]?.identifier
+                }));
+              console.log(`[Team OAuth] Found ${organizations.length} organizations:`, organizations);
+            }
+          } catch (orgError) {
+            console.error('[Team OAuth] Could not fetch organizations:', orgError.response?.data || orgError.message);
+            // Continue - org fetch may fail if Community Management API not approved
           }
           
-          // Insert into linkedin_team_accounts
+          // Check if personal account is already connected to ANY team globally
+          const { rows: existingGlobalRows } = await pool.query(
+            `SELECT lta.id, lta.linkedin_display_name, lta.team_id, t.name as team_name
+             FROM linkedin_team_accounts lta
+             LEFT JOIN teams t ON t.id::text = lta.team_id::text
+             WHERE lta.linkedin_user_id = $1 AND lta.active = true`,
+            [linkedinUserId]
+          );
+          
+          console.log('[Team OAuth] Existing connections found:', existingGlobalRows);
+          console.log('[Team OAuth] Current teamId:', teamId);
+          
+          // Check if connected to a DIFFERENT team
+          const connectedToOtherTeam = existingGlobalRows.find(row => row.team_id !== teamId);
+          if (connectedToOtherTeam) {
+            console.log('[Team OAuth] Personal account already connected to another team:', connectedToOtherTeam);
+            return res.redirect(`${returnUrl}?error=already_connected&existingTeam=${encodeURIComponent(connectedToOtherTeam.team_name || 'another team')}&accountName=${encodeURIComponent(connectedToOtherTeam.linkedin_display_name || 'this account')}`);
+          }
+          
+          // Check if connected to THIS team
+          const personalAlreadyConnected = existingGlobalRows.some(row => row.team_id === teamId);
+          
+          // If user has organizations, redirect to selection page
+          if (organizations.length > 0) {
+            // Store the OAuth data temporarily so we can use it after selection
+            const selectionId = crypto.randomUUID();
+            stateStore.set(`selection_${selectionId}`, {
+              teamId,
+              userId,
+              returnUrl,
+              accessToken,
+              linkedinUserId,
+              linkedinUsername,
+              linkedinDisplayName,
+              linkedinProfileImageUrl,
+              headline,
+              organizations,
+              personalAlreadyConnected,
+              expiresAt: Date.now() + 10 * 60 * 1000 // 10 minutes
+            });
+            
+            // Redirect to selection page with options
+            const clientUrl = process.env.PLATFORM_URL || process.env.CLIENT_URL || 'http://localhost:5173';
+            const orgsParam = encodeURIComponent(JSON.stringify(organizations.map(o => ({
+              id: o.id,
+              name: o.name,
+              logo: o.logo
+            }))));
+            return res.redirect(`${clientUrl}/team?select_linkedin_account=true&selectionId=${selectionId}&organizations=${orgsParam}&personalConnected=${personalAlreadyConnected}&userName=${encodeURIComponent(linkedinDisplayName || linkedinUsername || '')}`);
+          }
+          
+          // If personal account is already connected to this team
+          if (personalAlreadyConnected) {
+            console.log('[Team OAuth] Personal account already connected to this team');
+            return res.redirect(`${returnUrl}?error=no_org_pages&accountName=${encodeURIComponent(linkedinDisplayName || 'this account')}`);
+          }
+          
+          // Insert or update (reactivate) personal account in linkedin_team_accounts
           await pool.query(
             `INSERT INTO linkedin_team_accounts (
               team_id, user_id, linkedin_user_id, linkedin_username, linkedin_display_name,
               access_token, refresh_token, token_expires_at, linkedin_profile_image_url,
               connections_count, headline, active
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true)`,
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true)
+            ON CONFLICT (team_id, linkedin_user_id) DO UPDATE SET
+              user_id = EXCLUDED.user_id,
+              linkedin_username = EXCLUDED.linkedin_username,
+              linkedin_display_name = EXCLUDED.linkedin_display_name,
+              access_token = EXCLUDED.access_token,
+              linkedin_profile_image_url = EXCLUDED.linkedin_profile_image_url,
+              connections_count = EXCLUDED.connections_count,
+              headline = EXCLUDED.headline,
+              active = true,
+              updated_at = CURRENT_TIMESTAMP`,
             [
               teamId,
               userId,
@@ -191,7 +257,7 @@ export async function handleOAuthCallback(req, res) {
             ]
           );
           
-          console.log('[Team OAuth] Successfully connected LinkedIn account to team:', { teamId, linkedinUserId });
+          console.log('[Team OAuth] Successfully connected LinkedIn personal account to team:', { teamId, linkedinUserId });
           
           // Redirect back to team page with success
           return res.redirect(`${returnUrl}?success=team&username=${linkedinUsername || linkedinDisplayName}`);
@@ -335,6 +401,7 @@ export function startTeamOAuth(req, res) {
       response_type: 'code',
       client_id: config.getLinkedInClientId(),
       redirect_uri: config.getLinkedInRedirectUri(),
+      // OpenID Connect scopes for LinkedIn Sign In
       scope: 'openid profile email w_member_social',
       state
     });
@@ -398,5 +465,128 @@ export async function selectAccountType(req, res) {
   } catch (error) {
     console.error('[Select Account Type] Error:', error);
     res.status(500).json({ error: 'Failed to save account type selection' });
+  }
+}
+
+// Complete team LinkedIn account selection (personal or organization)
+export async function completeTeamAccountSelection(req, res) {
+  try {
+    const { selectionId, accountType, organizationId } = req.body;
+    
+    if (!selectionId) {
+      return res.status(400).json({ error: 'Selection ID required' });
+    }
+    
+    if (!accountType || !['personal', 'organization'].includes(accountType)) {
+      return res.status(400).json({ error: 'Invalid account type' });
+    }
+    
+    if (accountType === 'organization' && !organizationId) {
+      return res.status(400).json({ error: 'Organization ID required for organization account' });
+    }
+    
+    // Get stored OAuth data
+    const storedData = stateStore.get(`selection_${selectionId}`);
+    if (!storedData) {
+      return res.status(400).json({ error: 'Selection session expired. Please try connecting again.' });
+    }
+    
+    // Check expiration
+    if (Date.now() > storedData.expiresAt) {
+      stateStore.delete(`selection_${selectionId}`);
+      return res.status(400).json({ error: 'Selection session expired. Please try connecting again.' });
+    }
+    
+    const {
+      teamId,
+      userId,
+      accessToken,
+      linkedinUserId,
+      linkedinUsername,
+      linkedinDisplayName,
+      linkedinProfileImageUrl,
+      headline,
+      organizations
+    } = storedData;
+    
+    // Clean up stored data
+    stateStore.delete(`selection_${selectionId}`);
+    
+    let accountName, accountId, profileUrl;
+    
+    if (accountType === 'personal') {
+      // Check if personal account already connected
+      const { rows: existingRows } = await pool.query(
+        `SELECT id FROM linkedin_team_accounts 
+         WHERE linkedin_user_id = $1 AND team_id = $2 AND active = true AND (account_type = 'personal' OR account_type IS NULL)`,
+        [linkedinUserId, teamId]
+      );
+      
+      if (existingRows.length > 0) {
+        return res.status(400).json({ error: 'Personal account is already connected to this team' });
+      }
+      
+      accountName = linkedinDisplayName || linkedinUsername;
+      accountId = linkedinUserId;
+      profileUrl = linkedinProfileImageUrl;
+    } else {
+      // Organization account
+      const org = organizations.find(o => o.id === organizationId);
+      if (!org) {
+        return res.status(400).json({ error: 'Organization not found in your authorized list' });
+      }
+      
+      // Check if this organization is already connected
+      const { rows: existingOrgRows } = await pool.query(
+        `SELECT id FROM linkedin_team_accounts 
+         WHERE organization_id = $1 AND team_id = $2 AND active = true`,
+        [organizationId, teamId]
+      );
+      
+      if (existingOrgRows.length > 0) {
+        return res.status(400).json({ error: `Organization "${org.name}" is already connected to this team` });
+      }
+      
+      accountName = org.name;
+      accountId = org.urn || `urn:li:organization:${organizationId}`;
+      profileUrl = org.logo;
+    }
+    
+    // Insert into linkedin_team_accounts
+    await pool.query(
+      `INSERT INTO linkedin_team_accounts (
+        team_id, user_id, linkedin_user_id, linkedin_username, linkedin_display_name,
+        access_token, refresh_token, token_expires_at, linkedin_profile_image_url,
+        connections_count, headline, active, account_type, organization_id, organization_name
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true, $12, $13, $14)`,
+      [
+        teamId,
+        userId,
+        accountType === 'personal' ? linkedinUserId : linkedinUserId, // User who connected
+        accountType === 'personal' ? linkedinUsername : null,
+        accountType === 'personal' ? linkedinDisplayName : accountName,
+        accessToken,
+        null, // refresh_token
+        null, // token_expires_at
+        profileUrl,
+        null, // connectionsCount
+        accountType === 'personal' ? headline : null,
+        accountType,
+        accountType === 'organization' ? organizationId : null,
+        accountType === 'organization' ? accountName : null
+      ]
+    );
+    
+    console.log(`[Team Account Selection] Successfully connected ${accountType} account to team:`, { teamId, accountType, accountName });
+    
+    res.json({
+      success: true,
+      message: `Successfully connected ${accountType === 'organization' ? accountName : 'personal'} account`,
+      accountType,
+      accountName
+    });
+  } catch (error) {
+    console.error('[Team Account Selection] Error:', error);
+    res.status(500).json({ error: 'Failed to complete account selection' });
   }
 }
