@@ -4,18 +4,76 @@ import * as linkedinService from '../services/linkedinService.js';
 
 // Create a LinkedIn post (with media, carousels, etc.)
 export async function createPost(req, res) {
-  console.log('[CREATE POST] Route called, req.body:', req.body, 'headers:', req.headers['content-type']);
+  console.log('[CREATE POST] Route called, req.body:', req.body, 'headers:', req.headers);
   try {
-    const accessToken = req.user?.linkedinAccessToken || 'LINKEDIN_ACCESS_TOKEN';
-    const authorUrn = req.user?.linkedinUrn || 'urn:li:person:xxxx';
+    const user = req.user;
+    if (!user) {
+      console.error('[CREATE POST ERROR] Not authenticated');
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+    
+    // Get account_id from request (for team accounts)
+    const accountId = req.body.account_id || req.headers['x-selected-account-id'];
+    
+    let accessToken, authorUrn;
+    
+    // If account_id is provided and not null, fetch team account credentials
+    if (accountId && accountId !== 'null' && accountId !== 'undefined') {
+      // Check if accountId looks like a UUID (has hyphens) vs an integer
+      const isUUID = accountId.includes('-');
+      let teamAccountResult;
+      
+      if (isUUID) {
+        // Query by team_id if it's a UUID
+        console.log('[CREATE POST] Account ID is UUID, querying by team_id:', accountId);
+        teamAccountResult = await pool.query(
+          `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE team_id = $1 AND active = true LIMIT 1`,
+          [accountId]
+        );
+      } else {
+        // Query by id if it's an integer
+        console.log('[CREATE POST] Account ID is integer, querying by id:', accountId);
+        teamAccountResult = await pool.query(
+          `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE id = $1 AND active = true`,
+          [accountId]
+        );
+      }
+      
+      if (teamAccountResult.rows.length === 0) {
+        console.error('[CREATE POST ERROR] Team account not found for', isUUID ? 'team_id' : 'id', ':', accountId);
+        return res.status(400).json({ error: 'LinkedIn team account not found' });
+      }
+      
+      accessToken = teamAccountResult.rows[0].access_token;
+      authorUrn = `urn:li:person:${teamAccountResult.rows[0].linkedin_user_id}`;
+      console.log('[CREATE POST] Using team account credentials');
+    } else {
+      // Fallback to personal account
+      accessToken = user.linkedinAccessToken;
+      authorUrn = user.linkedinUrn;
+      console.log('[CREATE POST] Using personal account for user:', user.id);
+    }
+    
+    if (!accessToken || !authorUrn) {
+      console.error('[CREATE POST ERROR] LinkedIn account not connected', { 
+        hasAccessToken: !!accessToken, 
+        hasAuthorUrn: !!authorUrn, 
+        accountId,
+        userId: user.id,
+        hasPersonalToken: !!user.linkedinAccessToken
+      });
+      return res.status(400).json({ error: 'LinkedIn account not connected' });
+    }
+    
     const { post_content, media_urls = [], post_type = 'single_post', company_id } = req.body;
     if (!post_content) return res.status(400).json({ error: 'Post content is required' });
 
     // Call LinkedIn API to create post
     const result = await linkedinService.createLinkedInPost(accessToken, authorUrn, post_content, media_urls, post_type, company_id);
 
-    console.log('[CREATE POST] About to insert:', {
-      userId: req.user.id,
+    console.log('[CREATE POST] LinkedIn API success, saving to DB:', {
+      userId: user.id,
+      accountId: accountId || 'personal',
       linkedin_post_id: result.id || result.urn,
       post_content,
       media_urls,
@@ -85,12 +143,18 @@ export async function getPosts(req, res) {
 export async function deletePost(req, res) {
   try {
     const { id } = req.params;
-    const userId = req.user?.id;
+    const user = req.user;
+    const userId = user?.id;
     console.log(`[DELETE POST] Request received for post id: ${id}, user id: ${userId}`);
+    
     if (!userId) {
       console.error('[DELETE POST] No userId found in request. Auth/session missing.');
       return res.status(401).json({ error: 'Unauthorized: No userId' });
     }
+    
+    // Get account_id from headers only (DELETE requests don't have body)
+    const accountId = req.headers['x-selected-account-id'];
+    
     let { rows } = await pool.query(
       'SELECT * FROM linkedin_posts WHERE id = $1 AND user_id = $2',
       [id, userId]
@@ -106,15 +170,62 @@ export async function deletePost(req, res) {
       console.error(`[DELETE POST] Post not found for id/linkedin_post_id: ${id}, user id: ${userId}`);
       return res.status(404).json({ error: 'Post not found' });
     }
+    
     const post = rows[0];
     let postUrn = post.linkedin_post_id;
     if (postUrn && !postUrn.startsWith('urn:li:share:')) {
       postUrn = `urn:li:share:${postUrn}`;
     }
+    
     console.log(`[DELETE POST] Attempting to delete LinkedIn post with URN: ${postUrn}`);
-    console.log(`[DELETE POST] Access token: ${req.user.linkedinAccessToken ? '[REDACTED]' : 'MISSING'}`);
+    
+    // Get access token based on account type
+    let accessToken;
+    
+    // If account_id is provided and not null, fetch team account credentials
+    if (accountId && accountId !== 'null' && accountId !== 'undefined') {
+      // Check if accountId looks like a UUID (has hyphens) vs an integer
+      const isUUID = accountId.includes('-');
+      let teamAccountResult;
+      
+      if (isUUID) {
+        // Query by team_id if it's a UUID
+        console.log('[DELETE POST] Account ID is UUID, querying by team_id:', accountId);
+        teamAccountResult = await pool.query(
+          `SELECT access_token FROM linkedin_team_accounts WHERE team_id = $1 AND active = true LIMIT 1`,
+          [accountId]
+        );
+      } else {
+        // Query by id if it's an integer
+        console.log('[DELETE POST] Account ID is integer, querying by id:', accountId);
+        teamAccountResult = await pool.query(
+          `SELECT access_token FROM linkedin_team_accounts WHERE id = $1 AND active = true`,
+          [accountId]
+        );
+      }
+      
+      if (teamAccountResult.rows.length === 0) {
+        console.error('[DELETE POST ERROR] Team account not found for', isUUID ? 'team_id' : 'id', ':', accountId);
+        return res.status(400).json({ error: 'LinkedIn team account not found' });
+      }
+      
+      accessToken = teamAccountResult.rows[0].access_token;
+      console.log('[DELETE POST] Using team account credentials');
+    } else {
+      // Fallback to personal account
+      accessToken = user.linkedinAccessToken;
+      console.log('[DELETE POST] Using personal account for user:', userId);
+    }
+    
+    if (!accessToken) {
+      console.error('[DELETE POST ERROR] No access token available', { accountId, userId });
+      return res.status(400).json({ error: 'LinkedIn account not connected' });
+    }
+    
+    console.log(`[DELETE POST] Access token: ${accessToken ? '[REDACTED]' : 'MISSING'}`);
+    
     try {
-      const apiResult = await linkedinService.deleteLinkedInPost(req.user.linkedinAccessToken, postUrn);
+      const apiResult = await linkedinService.deleteLinkedInPost(accessToken, postUrn);
       console.log(`[DELETE POST] LinkedIn API response:`, apiResult);
       await pool.query(
         'UPDATE linkedin_posts SET status = $1, updated_at = NOW() WHERE id = $2',

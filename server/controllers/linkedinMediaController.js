@@ -6,10 +6,58 @@ export async function uploadImageBase64(req, res) {
       console.error('[UPLOAD IMAGE BASE64 ERROR] Not authenticated');
       return res.status(401).json({ error: 'Not authenticated' });
     }
-    const accessToken = user.linkedinAccessToken;
-    const authorUrn = user.linkedinUrn;
+    
+    // Get account_id from request (for team accounts)
+    const accountId = req.body.account_id || req.headers['x-selected-account-id'];
+    
+    let accessToken, authorUrn;
+    
+    // If account_id is provided and not null, fetch team account credentials
+    if (accountId && accountId !== 'null' && accountId !== 'undefined') {
+      const { pool } = await import('../config/database.js');
+      // Check if accountId looks like a UUID (has hyphens) vs an integer
+      const isUUID = accountId.includes('-');
+      let teamAccountResult;
+      
+      if (isUUID) {
+        // Query by team_id if it's a UUID
+        console.log('[UPLOAD IMAGE BASE64] Account ID is UUID, querying by team_id:', accountId);
+        teamAccountResult = await pool.query(
+          `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE team_id = $1 AND active = true LIMIT 1`,
+          [accountId]
+        );
+      } else {
+        // Query by id if it's an integer
+        console.log('[UPLOAD IMAGE BASE64] Account ID is integer, querying by id:', accountId);
+        teamAccountResult = await pool.query(
+          `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE id = $1 AND active = true`,
+          [accountId]
+        );
+      }
+      
+      if (teamAccountResult.rows.length === 0) {
+        console.error('[UPLOAD IMAGE BASE64 ERROR] Team account not found for', isUUID ? 'team_id' : 'id', ':', accountId);
+        return res.status(400).json({ error: 'LinkedIn team account not found' });
+      }
+      
+      accessToken = teamAccountResult.rows[0].access_token;
+      authorUrn = `urn:li:person:${teamAccountResult.rows[0].linkedin_user_id}`;
+      console.log('[UPLOAD IMAGE BASE64] Using team account credentials');
+    } else {
+      // Fallback to personal account
+      accessToken = user.linkedinAccessToken;
+      authorUrn = user.linkedinUrn;
+      console.log('[UPLOAD IMAGE BASE64] Using personal account for user:', user.id);
+    }
+    
     if (!accessToken || !authorUrn) {
-      console.error('[UPLOAD IMAGE BASE64 ERROR] LinkedIn account not connected', { accessToken, authorUrn });
+      console.error('[UPLOAD IMAGE BASE64 ERROR] LinkedIn account not connected', { 
+        hasAccessToken: !!accessToken, 
+        hasAuthorUrn: !!authorUrn, 
+        accountId,
+        userId: user.id,
+        hasPersonalToken: !!user.linkedinAccessToken
+      });
       return res.status(400).json({ error: 'LinkedIn account not connected' });
     }
     const { base64, mimetype, filename } = req.body;
@@ -52,9 +100,61 @@ export async function uploadImage(req, res) {
   try {
     const user = req.user;
     if (!user) return res.status(401).json({ error: 'Not authenticated' });
-    const accessToken = user.linkedinAccessToken;
-    const authorUrn = user.linkedinUrn;
-    if (!accessToken || !authorUrn) return res.status(400).json({ error: 'LinkedIn account not connected' });
+    
+    // Get account_id from request (for team accounts)
+    const accountId = req.body.account_id || req.headers['x-selected-account-id'];
+    
+    let accessToken, authorUrn;
+    
+    // If account_id is provided and not null, fetch team account credentials
+    if (accountId && accountId !== 'null' && accountId !== 'undefined') {
+      const { pool } = await import('../config/database.js');
+      // Check if accountId looks like a UUID (has hyphens) vs an integer
+      const isUUID = accountId.includes('-');
+      let teamAccountResult;
+      
+      if (isUUID) {
+        // Query by team_id if it's a UUID
+        console.log('[UPLOAD IMAGE] Account ID is UUID, querying by team_id:', accountId);
+        teamAccountResult = await pool.query(
+          `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE team_id = $1 AND active = true LIMIT 1`,
+          [accountId]
+        );
+      } else {
+        // Query by id if it's an integer
+        console.log('[UPLOAD IMAGE] Account ID is integer, querying by id:', accountId);
+        teamAccountResult = await pool.query(
+          `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE id = $1 AND active = true`,
+          [accountId]
+        );
+      }
+      
+      if (teamAccountResult.rows.length === 0) {
+        console.error('[UPLOAD IMAGE ERROR] Team account not found for', isUUID ? 'team_id' : 'id', ':', accountId);
+        return res.status(400).json({ error: 'LinkedIn team account not found' });
+      }
+      
+      accessToken = teamAccountResult.rows[0].access_token;
+      authorUrn = `urn:li:person:${teamAccountResult.rows[0].linkedin_user_id}`;
+      console.log('[UPLOAD IMAGE] Using team account credentials');
+    } else {
+      // Fallback to personal account
+      accessToken = user.linkedinAccessToken;
+      authorUrn = user.linkedinUrn;
+      console.log('[UPLOAD IMAGE] Using personal account for user:', user.id);
+    }
+    
+    if (!accessToken || !authorUrn) {
+      console.error('[UPLOAD IMAGE ERROR] LinkedIn account not connected', { 
+        hasAccessToken: !!accessToken, 
+        hasAuthorUrn: !!authorUrn, 
+        accountId,
+        userId: user.id,
+        hasPersonalToken: !!user.linkedinAccessToken
+      });
+      return res.status(400).json({ error: 'LinkedIn account not connected' });
+    }
+    
     if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
 
     // Upload image to LinkedIn and get media URL

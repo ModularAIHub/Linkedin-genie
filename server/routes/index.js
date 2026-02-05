@@ -13,6 +13,8 @@ import aiBulkRoutes from './aiBulk.js';
 import imageGenerationRoutes from './imageGeneration.js';
 import creditsRoutes from './credits.js';
 import debugRoutes from './debug.js';
+import oauthRoutes from './oauth.js';
+import teamRoutes from './team.js';
 
 const router = express.Router();
 // CSRF protection middleware (cookie-based)
@@ -34,6 +36,8 @@ router.use('/ai', aiRoutes);
 router.use('/ai', aiBulkRoutes);
 router.use('/image-generation', imageGenerationRoutes);
 router.use('/credits', creditsRoutes);
+router.use('/oauth', oauthRoutes);
+router.use('/team', teamRoutes);
 
 // Debug routes (only in development)
 if (process.env.NODE_ENV === 'development') {

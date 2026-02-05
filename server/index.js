@@ -9,6 +9,8 @@ import dotenv from 'dotenv';
 import oauthRoutes from './routes/oauth.js';
 import authRoutes from './routes/auth.js';
 import apiRoutes from './routes/index.js';
+import adminRoutes from './routes/admin.js';
+import cleanupRoutes from './routes/cleanup.js';
 
 // Middleware imports
 import { requirePlatformLogin } from './middleware/requirePlatformLogin.js';
@@ -45,15 +47,16 @@ app.use(cors({
     if (!origin) return callback(null, true);
     
     if (allowedOrigins.indexOf(origin) !== -1) {
+      console.log('[CORS] Allowed origin:', origin);
       return callback(null, true);
     } else {
-      console.log('CORS blocked origin:', origin);
+      console.log('[CORS] Blocked origin:', origin);
       return callback(new Error('Not allowed by CORS'));
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'X-CSRF-Token', 'x-csrf-token'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'X-CSRF-Token', 'x-csrf-token', 'X-Selected-Account-Id'],
   exposedHeaders: ['Set-Cookie']
 }));
 
@@ -79,6 +82,10 @@ app.get('/api/csrf-token', (req, res) => {
 app.use('/api/oauth', oauthRoutes);
 // Platform auth routes (callback, validate, refresh, logout)
 app.use('/auth', authRoutes);
+// Admin routes (for migrations and maintenance)
+app.use('/api/admin', adminRoutes);
+// Cleanup routes (for deleting user/team data)
+app.use('/api/cleanup', cleanupRoutes);
 
 // Protect all API routes by default
 app.use(requirePlatformLogin);

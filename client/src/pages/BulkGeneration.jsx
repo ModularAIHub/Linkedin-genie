@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import Masonry from 'react-masonry-css';
 import Collapsible from '../components/Collapsible';
+import SelectionTextEditor from '../components/SelectionTextEditor';
 import { ai, scheduling } from '../utils/api';
 import dayjs from 'dayjs';
 import moment from 'moment-timezone';
@@ -446,11 +447,13 @@ const BulkGeneration = () => {
                           defaultOpen={Object.keys(outputs).length <= 3}
                         >
                           <div className="flex flex-col items-start gap-2 p-2">
-                            <textarea
-                              className="border rounded px-3 py-3 text-base max-w-full min-w-0 min-h-[120px] max-h-[500px] focus:ring-2 focus:ring-blue-400 focus:border-blue-400 transition overflow-auto"
-                              style={{ width: '100%', resize: 'vertical', fontSize: '1.05rem' }}
+                            <SelectionTextEditor
                               value={output.text}
                               onChange={e => updateText(Number(idx), e.target.value)}
+                              placeholder="Post content..."
+                              className="border rounded px-3 py-3 text-base max-w-full min-w-0 min-h-[120px] max-h-[500px] focus:ring-2 focus:ring-blue-400 focus:border-blue-400 transition overflow-auto w-full resize-vertical"
+                              style={{ fontSize: '1.05rem' }}
+                              disabled={loading}
                               rows={Math.max(5, Math.min(20, output.text.split('\n').length))}
                             />
                             <div className="flex flex-col space-y-2 mt-1 w-full">

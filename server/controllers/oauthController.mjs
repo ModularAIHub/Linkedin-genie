@@ -4,6 +4,14 @@
 import * as config from '../config/index.js';
 import axios from 'axios';
 import { pool } from '../config/database.js';
+import pg from 'pg';
+
+// Create a separate pool for new-platform database (for teams and team_members tables)
+const { Pool } = pg;
+const newPlatformPool = new Pool({
+  connectionString: process.env.NEW_PLATFORM_DATABASE_URL || process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+});
 
 // Start LinkedIn OAuth: return LinkedIn OAuth URL for popup
 export function startOAuth(req, res) {
@@ -27,6 +35,11 @@ export function startOAuth(req, res) {
 export async function handleOAuthCallback(req, res) {
   const { code, state } = req.query;
   if (!code) return res.status(400).send('Missing code');
+  
+  // Check if this is a team connection (state starts with 'team_')
+  const isTeamConnection = state && state.startsWith('team_');
+  const stateData = isTeamConnection ? stateStore.get(state) : null;
+  
   try {
     // Debug log for OAuth params
     const redirectUri = config.getLinkedInRedirectUri();
@@ -92,6 +105,105 @@ export async function handleOAuthCallback(req, res) {
       console.error('Failed to fetch LinkedIn profile/email:', userInfoErr?.response?.data || userInfoErr.message, userInfoErr.stack);
     }
 
+    // Handle team connection
+    if (isTeamConnection && stateData) {
+      const { teamId, userId, returnUrl } = stateData;
+      stateStore.delete(state);
+      
+      if (userInfo && userInfo.sub) {
+        const linkedinUserId = userInfo.sub;
+        const linkedinUsername = userInfo.preferred_username || null;
+        const linkedinDisplayName = userInfo.name || userInfo.given_name || null;
+        const linkedinProfileImageUrl = userInfo.picture || null;
+        const headline = userInfo.headline || null;
+        const connectionsCount = null;
+        
+        try {
+          // Verify user is owner or admin of this team (query new-platform database)
+          const { rows: memberRows } = await newPlatformPool.query(
+            `SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2`,
+            [teamId, userId]
+          );
+          
+          if (!memberRows.length) {
+            return res.redirect(`${returnUrl}?error=not_team_member`);
+          }
+          
+          const userRole = memberRows[0].role;
+          if (userRole !== 'owner' && userRole !== 'admin') {
+            return res.redirect(`${returnUrl}?error=insufficient_permissions`);
+          }
+          
+          // Check if this LinkedIn account is already connected to THIS SPECIFIC TEAM
+          // (Same account CAN be connected to different teams)
+          const { rows: existingRows } = await pool.query(
+            `SELECT lta.id, lta.team_id, lta.linkedin_username, lta.linkedin_display_name
+             FROM linkedin_team_accounts lta
+             WHERE lta.linkedin_user_id = $1 AND lta.team_id = $2 AND lta.active = true`,
+            [linkedinUserId, teamId]
+          );
+          
+          if (existingRows.length > 0) {
+            const existing = existingRows[0];
+            // Get team name from new-platform database
+            let teamName = 'this team';
+            try {
+              const { rows: teamRows } = await newPlatformPool.query(
+                `SELECT name FROM teams WHERE id = $1`,
+                [teamId]
+              );
+              if (teamRows.length > 0) {
+                teamName = teamRows[0].name;
+              }
+            } catch (err) {
+              console.warn('[Team OAuth] Could not fetch team name:', err);
+            }
+            
+            console.log('[Team OAuth] LinkedIn account already connected to this team:', { linkedinUserId, teamId, teamName });
+            // Include account info in error URL for better UX
+            const errorParams = new URLSearchParams({
+              error: 'already_connected',
+              existingTeam: teamName,
+              accountName: existing.linkedin_display_name || existing.linkedin_username || 'this account'
+            });
+            return res.redirect(`${returnUrl}?${errorParams.toString()}`);
+          }
+          
+          // Insert into linkedin_team_accounts
+          await pool.query(
+            `INSERT INTO linkedin_team_accounts (
+              team_id, user_id, linkedin_user_id, linkedin_username, linkedin_display_name,
+              access_token, refresh_token, token_expires_at, linkedin_profile_image_url,
+              connections_count, headline, active
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true)`,
+            [
+              teamId,
+              userId,
+              linkedinUserId,
+              linkedinUsername,
+              linkedinDisplayName,
+              accessToken,
+              null, // refresh_token
+              null, // token_expires_at
+              linkedinProfileImageUrl,
+              connectionsCount,
+              headline
+            ]
+          );
+          
+          console.log('[Team OAuth] Successfully connected LinkedIn account to team:', { teamId, linkedinUserId });
+          
+          // Redirect back to team page with success
+          return res.redirect(`${returnUrl}?success=team&username=${linkedinUsername || linkedinDisplayName}`);
+        } catch (error) {
+          console.error('[Team OAuth] Error saving team account:', error);
+          return res.redirect(`${returnUrl}?error=save_failed`);
+        }
+      } else {
+        return res.redirect(`${stateData.returnUrl}?error=profile_fetch_failed`);
+      }
+    }
+
     // Persist LinkedIn OAuth tokens and profile in linkedin_auth table (parity with twitter_auth)
     if (userInfo && userInfo.email) {
       const linkedinUserId = userInfo.sub || userInfo.id || null;
@@ -139,37 +251,65 @@ export async function handleOAuthCallback(req, res) {
       }
     }
 
-    // For popup flow: send a postMessage to opener and close window
-    const clientOrigin = process.env.CLIENT_URL || 'http://localhost:5175';
-    res.send(`
-      <html><body style="font-family:sans-serif;text-align:center;padding:2em;">
-      <script>
-        console.log('OAuth popup: sending postMessage to opener...');
-        if (window.opener) {
-          window.opener.postMessage({ type: 'linkedin_auth_success', accessToken: '${accessToken}', user: ${JSON.stringify(userInfo)} }, '${clientOrigin}');
-          window.close();
-        }
-      </script>
-      <h2>LinkedIn connected!</h2>
-      <p>You can close this window and return to the app.</p>
-      </body></html>
-    `);
+    // Redirect to settings page after successful personal account connection
+    const clientUrl = process.env.CLIENT_URL || 'http://localhost:5175';
+    res.redirect(`${clientUrl}/settings?linkedin_connected=true`);
   } catch (error) {
     console.error('OAuth callback error:', error?.response?.data || error.message, error.stack);
-    const clientOrigin = process.env.CLIENT_URL || 'http://localhost:5175';
-    res.send(`
-      <html><body style="font-family:sans-serif;text-align:center;padding:2em;">
-      <script>
-        console.log('OAuth popup: sending postMessage error to opener...');
-        if (window.opener) {
-          window.opener.postMessage({ type: 'linkedin_auth_error', error: '${error.message}' }, '${clientOrigin}');
-          window.close();
-        }
-      </script>
-      <h2>LinkedIn connection failed</h2>
-      <p>There was a problem connecting your LinkedIn account.<br/>You can close this window and try again.</p>
-      <pre style="color:#c00;font-size:0.9em;text-align:left;max-width:600px;margin:2em auto;overflow-x:auto;">${error?.response?.data ? JSON.stringify(error.response.data, null, 2) : error.message}</pre>
-      </body></html>
-    `);
+    const clientUrl = process.env.CLIENT_URL || 'http://localhost:5175';
+    res.redirect(`${clientUrl}/settings?error=oauth_failed&message=${encodeURIComponent(error.message)}`);
+  }
+}
+
+// In-memory store for team OAuth state (like Twitter's pkceStore)
+const stateStore = new Map();
+
+// Start Team LinkedIn OAuth
+export function startTeamOAuth(req, res) {
+  try {
+    const { teamId, userId, returnUrl } = req.query;
+    
+    if (!teamId || !userId || !returnUrl) {
+      return res.status(400).json({ 
+        error: 'Missing required parameters: teamId, userId, and returnUrl' 
+      });
+    }
+    
+    console.log('Generating LinkedIn OAuth URL for team connection:', { teamId, userId, returnUrl });
+    
+    // Generate unique state for this team connection
+    const state = `team_${teamId}_${userId}_${Math.random().toString(36).substring(2, 15)}`;
+    
+    // Store team context with state
+    stateStore.set(state, {
+      teamId,
+      userId,
+      returnUrl,
+      timestamp: Date.now()
+    });
+    
+    // Set expiry for the stored state (5 minutes)
+    setTimeout(() => {
+      stateStore.delete(state);
+    }, 5 * 60 * 1000);
+    
+    const params = new URLSearchParams({
+      response_type: 'code',
+      client_id: config.getLinkedInClientId(),
+      redirect_uri: config.getLinkedInRedirectUri(),
+      scope: 'openid profile email w_member_social',
+      state
+    });
+    
+    const url = `https://www.linkedin.com/oauth/v2/authorization?${params.toString()}`;
+    console.log('Generated team OAuth URL, redirecting to LinkedIn...');
+    res.redirect(url);
+  } catch (error) {
+    console.error('Failed to generate team OAuth URL:', error);
+    const { returnUrl } = req.query;
+    if (returnUrl) {
+      return res.redirect(`${returnUrl}?error=oauth_init_failed`);
+    }
+    res.status(500).json({ error: 'Failed to initiate LinkedIn team connection' });
   }
 }
