@@ -2,14 +2,12 @@ import creditService from '../services/creditService.js';
 
 export async function getBalance(req, res) {
   try {
-    console.log('DEBUG /credits/balance req.user:', req.user);
     const userId = req.user?.id;
     if (!userId) {
       console.error('No userId found in req.user!');
       return res.status(401).json({ error: 'Not authenticated (no userId)' });
     }
     const balance = await creditService.getBalance(userId);
-    console.log(`DEBUG /credits/balance userId: ${userId}, balance: ${balance}`);
     res.json({ balance, creditsRemaining: balance });
   } catch (error) {
     console.error('Error in getBalance:', error);

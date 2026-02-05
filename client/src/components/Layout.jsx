@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { useAccount } from '../contexts/AccountContext';
 import { credits } from '../utils/api';
+import AccountSwitcher from './AccountSwitcher';
 import {
   LayoutDashboard,
   Edit3,
@@ -18,6 +20,7 @@ import {
 
 const Layout = ({ children }) => {
   const { user, logout } = useAuth();
+  const { accounts, selectedAccount } = useAccount();
   const location = useLocation();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
@@ -147,6 +150,19 @@ const Layout = ({ children }) => {
               <Menu className="h-5 w-5" />
             </button>
             <div className="flex items-center space-x-4">
+              {/* Account Switcher - only show if user has LinkedIn accounts */}
+              {accounts.length > 0 && (
+                <div className="flex items-center space-x-3">
+                  <AccountSwitcher />
+                  {selectedAccount && (
+                    <div className="hidden sm:flex flex-col leading-tight text-xs text-blue-600">
+                      <span className="font-semibold text-blue-800">Viewing as</span>
+                      <span>{selectedAccount.linkedin_display_name || selectedAccount.linkedin_username}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+              
               <div className="relative">
                 <button
                   onClick={() => setIsUserMenuOpen(!isUserMenuOpen)}

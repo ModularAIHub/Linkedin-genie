@@ -3,8 +3,10 @@ import { History as HistoryIcon, MessageCircle, Heart, Share2, Eye, Calendar, Fi
 import api, { posts, scheduling } from '../utils/api';
 import LoadingSpinner from '../components/LoadingSpinner';
 import toast from 'react-hot-toast';
+import { useAccountAwareAPI } from '../hooks/useAccountAwareAPI';
 
 const History = () => {
+  const { fetchForCurrentAccount, selectedAccount, accountId } = useAccountAwareAPI();
   const [postedPosts, setPostedPosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
@@ -12,7 +14,6 @@ const History = () => {
   const [statusFilter, setStatusFilter] = useState('all');
   const [sortBy, setSortBy] = useState('newest');
   const [deletingPosts, setDeletingPosts] = useState(new Set());
-  const [syncing, setSyncing] = useState(false);
 
   // Load saved filters from localStorage
   useEffect(() => {
@@ -52,14 +53,27 @@ const History = () => {
       if (isScheduled) {
         await scheduling.cancel(postId);
       } else {
-        await posts.delete(postId);
+        // Use fetch with account_id header for delete
+        const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:3004'}/api/posts/${postId}`, {
+          method: 'DELETE',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(accountId ? { 'X-Selected-Account-Id': accountId } : {})
+          }
+        });
+        
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Failed to delete post');
+        }
       }
       
       setPostedPosts(prev => prev.filter(p => (p.id || p.linkedin_post_id) !== postId));
       toast.success('Post deleted successfully');
     } catch (err) {
       console.error('Delete error:', err);
-      if (err.response?.status === 404) {
+      if (err.response?.status === 404 || err.message?.includes('not found')) {
         // Post not found, remove from UI anyway
         setPostedPosts(prev => prev.filter(p => (p.id || p.linkedin_post_id) !== postId));
         toast.success('Post removed from history');
@@ -77,7 +91,7 @@ const History = () => {
 
   useEffect(() => {
     fetchPostedPosts();
-  }, [filter, sortBy, sourceFilter, statusFilter]);
+  }, [filter, sortBy, sourceFilter, statusFilter, accountId]); // Re-fetch when account changes
 
   const fetchPostedPosts = async () => {
     try {
@@ -113,8 +127,10 @@ const History = () => {
         }
       }
 
-      const response = await api.get('/api/posts', { params });
-      let fetchedPosts = response.data.posts || [];
+      // Use account-aware API to fetch history for selected account only
+      const response = await fetchForCurrentAccount('/api/posts?' + new URLSearchParams(params));
+      const data = await response.json();
+      let fetchedPosts = data.posts || [];
       
       const scheduledRes = await api.get('/api/schedule?status=completed');
       const scheduledPosts = (scheduledRes.data.posts || []).map(sp => ({
@@ -194,25 +210,6 @@ const History = () => {
     return null;
   };
 
-  const handleSyncAnalytics = async () => {
-    if (syncing) return;
-    
-    setSyncing(true);
-    const toastId = toast.loading('Syncing LinkedIn analytics...');
-    
-    try {
-      await api.post('/api/analytics/sync');
-      toast.success('Analytics synced successfully!', { id: toastId });
-      // Refresh the posts to show updated metrics
-      await fetchPostedPosts();
-    } catch (error) {
-      console.error('Sync error:', error);
-      toast.error('Failed to sync analytics: ' + (error.response?.data?.message || error.message), { id: toastId });
-    } finally {
-      setSyncing(false);
-    }
-  };
-
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-96">
@@ -237,17 +234,6 @@ const History = () => {
             View and analyze your posted LinkedIn content
           </p>
         </div>
-        
-        {/* Sync Button */}
-        <button
-          onClick={handleSyncAnalytics}
-          disabled={syncing}
-          className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          title="Sync latest engagement metrics from LinkedIn"
-        >
-          <RefreshCw className={`h-4 w-4 ${syncing ? 'animate-spin' : ''}`} />
-          {syncing ? 'Syncing...' : 'Sync Analytics'}
-        </button>
       </div>
 
       {/* Filters and Controls */}

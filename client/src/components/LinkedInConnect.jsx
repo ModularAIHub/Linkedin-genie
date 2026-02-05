@@ -1,9 +1,10 @@
 
 
 import React, { useState, useEffect } from 'react';
-import { Linkedin, ExternalLink, CheckCircle } from 'lucide-react';
+import { Linkedin, ExternalLink, CheckCircle, Users } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { linkedin } from '../utils/api';
+import { useAccount } from '../contexts/AccountContext';
 
 // Helper to fetch user info if LinkedIn account is missing
 async function fetchUserStatus() {
@@ -18,20 +19,17 @@ async function fetchUserStatus() {
 }
 
 const LinkedInConnect = () => {
-
-  const [connected, setConnected] = useState(false);
+  const { accounts, loading: accountsLoading, refreshAccounts } = useAccount();
   const [connecting, setConnecting] = useState(false);
-  const [account, setAccount] = useState(null);
 
   useEffect(() => {
-    fetchStatus();
     // Listen for postMessage from OAuth popup
     const handlePopupMessage = (event) => {
       if (event.origin !== window.location.origin) return;
       if (event.data.type === 'linkedin_auth_success') {
         toast.success('LinkedIn account connected!');
         setConnecting(false);
-        fetchStatus();
+        refreshAccounts();
       } else if (event.data.type === 'linkedin_auth_error') {
         toast.error('LinkedIn authentication failed.');
         setConnecting(false);
@@ -39,32 +37,7 @@ const LinkedInConnect = () => {
     };
     window.addEventListener('message', handlePopupMessage);
     return () => window.removeEventListener('message', handlePopupMessage);
-  }, []);
-
-  const fetchStatus = async () => {
-    try {
-      const res = await linkedin.getStatus();
-      if (res.data.accounts && res.data.accounts.length > 0) {
-        setAccount(res.data.accounts[0]);
-        setConnected(true);
-        console.debug('[LinkedInConnect] Connected account:', res.data.accounts[0]);
-      } else {
-        // Fallback: check if user is authenticated and show minimal info
-        const user = await fetchUserStatus();
-        if (user) {
-          setAccount({ display_name: user.name || user.email, id: user.id });
-          setConnected(true);
-          console.debug('[LinkedInConnect] No LinkedIn account, but user is authenticated:', user);
-        } else {
-          setAccount(null);
-          setConnected(false);
-        }
-      }
-    } catch (err) {
-      setAccount(null);
-      setConnected(false);
-    }
-  };
+  }, [refreshAccounts]);
 
   const handleConnect = async () => {
     setConnecting(true);
@@ -95,23 +68,24 @@ const LinkedInConnect = () => {
   };
 
   return (
-    <div className="card p-4 flex items-center gap-4">
-      <Linkedin className="h-8 w-8 text-blue-700" />
-      <div className="flex-1">
-        <h3 className="font-semibold text-gray-900">LinkedIn Account</h3>
-        {connected ? (
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center gap-2 text-green-700">
-              <CheckCircle className="h-5 w-5" /> Connected
-            </div>
-            {account && (
+    <div className="space-y-4">
+      {/* Personal Accounts */}
+      {accounts.filter(acc => !acc.isTeamAccount).map((account) => (
+        <div key={account.id} className="card p-4 flex items-center gap-4">
+          <Linkedin className="h-8 w-8 text-blue-700" />
+          <div className="flex-1">
+            <h3 className="font-semibold text-gray-900">Personal LinkedIn Account</h3>
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 text-green-700">
+                <CheckCircle className="h-5 w-5" /> Connected
+              </div>
               <div className="flex items-center gap-4 mt-2">
-                {account.profile_image_url && (
-                  <img src={account.profile_image_url} alt="Profile" className="h-12 w-12 rounded-full border" />
+                {account.linkedin_profile_image_url && (
+                  <img src={account.linkedin_profile_image_url} alt="Profile" className="h-12 w-12 rounded-full border" />
                 )}
                 <div>
                   <div className="font-medium text-gray-900 text-base">
-                    {account.display_name || account.username || 'N/A'}
+                    {account.linkedin_display_name || account.linkedin_username || 'N/A'}
                   </div>
                   {account.headline && (
                     <div className="text-xs text-gray-500 mt-1">{account.headline}</div>
@@ -121,31 +95,78 @@ const LinkedInConnect = () => {
                   )}
                 </div>
               </div>
-            )}
-            <button
-              className="btn btn-secondary mt-3 w-max"
-              onClick={async () => {
-                try {
-                  await linkedin.disconnect();
-                  toast.success('Disconnected LinkedIn account');
-                  fetchStatus();
-                } catch (err) {
-                  toast.error('Failed to disconnect');
-                }
-              }}
-            >Disconnect</button>
+              <button
+                className="btn btn-secondary mt-3 w-max"
+                onClick={async () => {
+                  try {
+                    await linkedin.disconnect();
+                    toast.success('Disconnected LinkedIn account');
+                    refreshAccounts();
+                  } catch (err) {
+                    toast.error('Failed to disconnect');
+                  }
+                }}
+              >Disconnect</button>
+            </div>
           </div>
-        ) : (
-          <button
-            className="btn btn-primary"
-            onClick={handleConnect}
-            disabled={connecting}
-          >
-            <ExternalLink className="h-4 w-4 mr-1 inline" />
-            {connecting ? 'Connecting...' : 'Connect LinkedIn'}
-          </button>
-        )}
-      </div>
+        </div>
+      ))}
+
+      {/* Team Accounts */}
+      {accounts.filter(acc => acc.isTeamAccount).map((account) => (
+        <div key={`${account.team_id}-${account.account_id}`} className="card p-4 flex items-center gap-4 bg-blue-50 border-blue-200">
+          <Users className="h-8 w-8 text-blue-700" />
+          <div className="flex-1">
+            <h3 className="font-semibold text-gray-900">Team LinkedIn Account</h3>
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 text-green-700">
+                <CheckCircle className="h-5 w-5" /> Connected to Team: {account.team_name}
+              </div>
+              <div className="flex items-center gap-4 mt-2">
+                {account.linkedin_profile_image_url && (
+                  <img src={account.linkedin_profile_image_url} alt="Profile" className="h-12 w-12 rounded-full border" />
+                )}
+                <div>
+                  <div className="font-medium text-gray-900 text-base">
+                    {account.linkedin_display_name || account.linkedin_username || 'N/A'}
+                  </div>
+                  {account.headline && (
+                    <div className="text-xs text-gray-500 mt-1">{account.headline}</div>
+                  )}
+                  <div className="text-xs text-blue-600 mt-1">Team Account • {account.user_role}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ))}
+
+      {/* Connect New Account Button */}
+      {accounts.length === 0 && !accountsLoading && (
+        <div className="card p-4 flex items-center gap-4">
+          <Linkedin className="h-8 w-8 text-blue-700" />
+          <div className="flex-1">
+            <h3 className="font-semibold text-gray-900">LinkedIn Account</h3>
+            <button
+              className="btn btn-primary mt-2"
+              onClick={handleConnect}
+              disabled={connecting}
+            >
+              <ExternalLink className="h-4 w-4 mr-1 inline" />
+              {connecting ? 'Connecting...' : 'Connect LinkedIn'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {accountsLoading && (
+        <div className="card p-4">
+          <div className="flex items-center space-x-2">
+            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+            <span className="text-gray-500">Loading accounts...</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

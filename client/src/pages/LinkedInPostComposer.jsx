@@ -11,9 +11,11 @@ import {
   SchedulingPanel
 } from '../components/LinkedInPostComposer';
 import { useLinkedInPostComposer } from '../hooks/useLinkedInPostComposer';
+import { useAccount } from '../contexts/AccountContext';
 import { byok } from '../utils/api';
 
 const LinkedInPostComposer = () => {
+  const { accounts, loading: accountsLoading, selectedAccount } = useAccount();
   const [imageModal, setImageModal] = useState({ open: false, src: null });
   const [apiKeyMode, setApiKeyMode] = useState('platform');
   const [apiKeyPreference, setApiKeyPreference] = useState(null);
@@ -42,8 +44,8 @@ const LinkedInPostComposer = () => {
     isScheduling,
     scheduledFor,
     setScheduledFor,
-    linkedInAccounts,
-    isLoadingLinkedInAccounts,
+  // linkedInAccounts, // No longer needed - use accounts from AccountContext
+  // isLoadingLinkedInAccounts, // No longer needed
   // carouselSlides,
   // carouselImages,
   // isCarousel,
@@ -82,18 +84,18 @@ const LinkedInPostComposer = () => {
     fetchScheduledPosts
   } = useLinkedInPostComposer();
 
-  if (isLoadingLinkedInAccounts) {
+  if (accountsLoading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
           <LoadingSpinner />
-          <p className="mt-4 text-gray-600">Loading your LinkedIn account...</p>
+          <p className="mt-4 text-gray-600">Loading your LinkedIn accounts...</p>
         </div>
       </div>
     );
   }
 
-  if (!linkedInAccounts || linkedInAccounts.length === 0) {
+  if (!accounts || accounts.length === 0) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center max-w-md mx-auto">
@@ -124,7 +126,7 @@ const LinkedInPostComposer = () => {
       </div>
   <div className="max-w-4xl mx-auto px-2 sm:px-8 lg:px-16 py-8">
         {/* LinkedIn Account Info */}
-        <LinkedInAccountInfo linkedInAccounts={linkedInAccounts} />
+        <LinkedInAccountInfo />
 
         {/* Composer Card - Modern UI */}
   <div className="bg-white rounded-2xl shadow-xl p-6 md:p-10 border border-gray-100 mt-6 max-w-3xl mx-auto">

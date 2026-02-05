@@ -14,7 +14,9 @@ export async function requirePlatformLogin(req, res, next) {
   }
 
   try {
-    console.log('[requirePlatformLogin] Incoming cookies:', req.cookies);
+    // Reduce logging noise - only log when debugging auth issues
+    // console.log('[requirePlatformLogin] Incoming cookies:', req.cookies);
+    
     // 1. Get token from cookie or header
     let token = req.cookies?.accessToken;
     if (!token) {

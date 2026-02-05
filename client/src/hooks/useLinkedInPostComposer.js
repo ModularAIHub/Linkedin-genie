@@ -3,15 +3,15 @@ import api, { linkedin } from '../utils/api';
 import { sanitizeAIContent } from '../utils/sanitization';
 import { htmlToUnicode } from '../components/LinkedInPostComposer/LinkedInPostContentEditor';
 import toast from 'react-hot-toast';
+import { useAccountAwareAPI } from './useAccountAwareAPI';
 
 const useLinkedInPostComposer = () => {
+  const { accountId, selectedAccount, postForCurrentAccount, getScheduledPosts } = useAccountAwareAPI();
   // State
   const [content, setContent] = useState('');
   const [isPosting, setIsPosting] = useState(false);
   const [isScheduling, setIsScheduling] = useState(false);
   const [scheduledFor, setScheduledFor] = useState('');
-  const [linkedInAccounts, setLinkedInAccounts] = useState([]);
-  const [isLoadingLinkedInAccounts, setIsLoadingLinkedInAccounts] = useState(true);
   const [showAIPrompt, setShowAIPrompt] = useState(false);
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiStyle, setAiStyle] = useState('casual');
@@ -25,14 +25,6 @@ const useLinkedInPostComposer = () => {
   const [scheduledPosts, setScheduledPosts] = useState([]);
   const [isLoadingScheduled, setIsLoadingScheduled] = useState(false);
   const [characterCount, setCharacterCount] = useState(0);
-
-  useEffect(() => {
-    setIsLoadingLinkedInAccounts(true);
-    api.get('/api/linkedin/status')
-      .then(res => setLinkedInAccounts(res.data.accounts || []))
-      .catch(() => setLinkedInAccounts([]))
-      .finally(() => setIsLoadingLinkedInAccounts(false));
-  }, []);
 
   // Image upload for single post (uploads as base64 to backend, stores LinkedIn URL)
   const handleImageUpload = async (event) => {
@@ -53,14 +45,24 @@ const useLinkedInPostComposer = () => {
           reader.onerror = reject;
           reader.readAsDataURL(file);
         });
-        // Upload to backend
+        // Upload to backend using account-aware API
         let data;
         try {
-          const res = await linkedin.uploadImageBase64(base64, file.type, file.name);
-          data = res.data;
+          const res = await postForCurrentAccount('/api/linkedin/upload-image-base64', {
+            base64,
+            mimetype: file.type,
+            filename: file.name
+          });
+          
+          if (!res.ok) {
+            const errorData = await res.json();
+            throw new Error(errorData.error || 'Upload failed');
+          }
+          
+          data = await res.json();
         } catch (uploadErr) {
-          console.error('Image upload error:', uploadErr, uploadErr?.response?.data);
-          toast.error('Image upload failed: ' + (uploadErr?.response?.data?.error || uploadErr.message));
+          console.error('Image upload error:', uploadErr);
+          toast.error('Image upload failed: ' + uploadErr.message);
           continue;
         }
         uploadedImages.push({
@@ -132,11 +134,15 @@ const useLinkedInPostComposer = () => {
       const unicodeContent = htmlToUnicode(content);
       // Prepare media as array of URLs or base64 (assume .url exists, fallback to file name)
       const media_urls = selectedImages.map(img => img.url || img.file?.name || '');
-      await api.post('/api/posts', {
+      
+      // Use account-aware API to post with selected account
+      await postForCurrentAccount('/api/posts', {
         post_content: unicodeContent,
         media_urls
       });
-      toast.success('Posted to LinkedIn!');
+      
+      const accountInfo = selectedAccount?.linkedin_display_name || selectedAccount?.linkedin_username || 'LinkedIn';
+      toast.success(`Posted to ${accountInfo}!`);
       setContent('');
       setSelectedImages([]);
     } catch (err) {
@@ -158,8 +164,9 @@ const useLinkedInPostComposer = () => {
       const unicodeContent = htmlToUnicode(content);
       // Prepare media as array of URLs
       const media_urls = selectedImages.map(img => img.url || img.file?.name || '');
-      // Send local datetime and timezone to backend
-      await api.post('/api/schedule', {
+      
+      // Use account-aware API to schedule with selected account
+      await postForCurrentAccount('/api/schedule', {
         post_content: unicodeContent,
         media_urls,
         post_type: 'single_post',
@@ -167,7 +174,9 @@ const useLinkedInPostComposer = () => {
         scheduled_time: scheduleDate,
         user_timezone: userTimezone
       });
-      toast.success('Post scheduled!');
+      
+      const accountInfo = selectedAccount?.linkedin_display_name || selectedAccount?.linkedin_username || 'LinkedIn';
+      toast.success(`Post scheduled for ${accountInfo}!`);
       setScheduledFor(scheduleDate);
       setContent('');
       setSelectedImages([]);
@@ -183,7 +192,7 @@ const useLinkedInPostComposer = () => {
   const fetchScheduledPosts = () => {};
 
   return {
-    content, setContent, isPosting, isScheduling, scheduledFor, setScheduledFor, linkedInAccounts, isLoadingLinkedInAccounts, showAIPrompt, aiPrompt, setAiPrompt, aiStyle, setAiStyle, isGenerating, showImagePrompt, imagePrompt, setImagePrompt, imageStyle, setImageStyle, isGeneratingImage, selectedImages, isUploadingImages, scheduledPosts, isLoadingScheduled, characterCount,
+    content, setContent, isPosting, isScheduling, scheduledFor, setScheduledFor, showAIPrompt, aiPrompt, setAiPrompt, aiStyle, setAiStyle, isGenerating, showImagePrompt, imagePrompt, setImagePrompt, imageStyle, setImageStyle, isGeneratingImage, selectedImages, isUploadingImages, scheduledPosts, isLoadingScheduled, characterCount,
     handleImageUpload, handleImageRemove, handlePost, handleSchedule, handleAIGenerate, handleImageGenerate, handleCancelScheduled, handleAIButtonClick, handleImageButtonClick, fetchScheduledPosts,
     setShowAIPrompt // expose for modal cancel
   };
