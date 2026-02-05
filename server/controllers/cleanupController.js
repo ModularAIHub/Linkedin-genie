@@ -134,5 +134,67 @@ export const cleanupController = {
                 message: error.message
             });
         }
+    },
+
+    // Clean up LinkedIn data when a member leaves/is removed from a team
+    async cleanupMemberData(req, res) {
+        try {
+            const { teamId, userId } = req.body;
+
+            if (!teamId || !userId) {
+                return res.status(400).json({
+                    error: 'teamId and userId are required',
+                    code: 'MISSING_PARAMS'
+                });
+            }
+
+            console.log(`🗑️ [LinkedIn] Starting cleanup for member ${userId} leaving team ${teamId}`);
+
+            const client = await pool.connect();
+
+            try {
+                await client.query('BEGIN');
+
+                // Delete LinkedIn team accounts connected by this user for this team
+                const teamAccountsResult = await client.query(
+                    'DELETE FROM linkedin_team_accounts WHERE team_id = $1 AND user_id = $2',
+                    [teamId, userId]
+                );
+                console.log(`   ✓ Deleted ${teamAccountsResult.rowCount} LinkedIn accounts for member`);
+
+                // Delete scheduled posts created by this user for this team
+                const scheduledPostsResult = await client.query(
+                    'DELETE FROM scheduled_posts WHERE team_id = $1 AND user_id = $2',
+                    [teamId, userId]
+                );
+                console.log(`   ✓ Deleted ${scheduledPostsResult.rowCount} scheduled posts for member`);
+
+                await client.query('COMMIT');
+                console.log(`✅ [LinkedIn] Member cleanup completed`);
+
+                res.json({
+                    success: true,
+                    message: 'LinkedIn member data cleaned up successfully',
+                    deletedCounts: {
+                        teamAccounts: teamAccountsResult.rowCount,
+                        scheduledPosts: scheduledPostsResult.rowCount
+                    }
+                });
+
+            } catch (error) {
+                await client.query('ROLLBACK');
+                throw error;
+            } finally {
+                client.release();
+            }
+
+        } catch (error) {
+            console.error('❌ [LinkedIn] Member cleanup error:', error);
+            res.status(500).json({
+                error: 'Failed to cleanup LinkedIn member data',
+                code: 'CLEANUP_ERROR',
+                message: error.message
+            });
+        }
     }
 };
