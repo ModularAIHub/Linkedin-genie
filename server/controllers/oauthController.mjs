@@ -213,6 +213,37 @@ export async function handleOAuthCallback(req, res) {
       const headline = userInfo.headline || null;
       // Do not fetch or store connections count (LinkedIn API does not allow it for most apps)
       let connectionsCount = null;
+      
+      // Fetch organization pages the user manages
+      let organizations = [];
+      try {
+        const orgResponse = await axios.get(
+          'https://api.linkedin.com/v2/organizationAcls?q=roleAssignee&projection=(elements*(organization~(localizedName,vanityName,logoV2(original~:playableStreams)),roleAssignee,state))',
+          {
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'LinkedIn-Version': '202405'
+            }
+          }
+        );
+        
+        if (orgResponse.data?.elements) {
+          organizations = orgResponse.data.elements
+            .filter(acl => acl.state === 'APPROVED' && acl.roleAssignee)
+            .map(acl => ({
+              id: acl.organization?.replace('urn:li:organization:', ''),
+              urn: acl.organization,
+              name: acl['organization~']?.localizedName,
+              vanityName: acl['organization~']?.vanityName,
+              logo: acl['organization~']?.logoV2?.['original~']?.elements?.[0]?.identifiers?.[0]?.identifier
+            }));
+          console.log(`[OAuth] Found ${organizations.length} organizations for user`);
+        }
+      } catch (orgError) {
+        console.warn('[OAuth] Could not fetch organizations:', orgError.message);
+        // Continue even if org fetch fails
+      }
+      
       // Find user_id from users table by email only
       let userId = null;
       const result = await pool.query('SELECT id FROM users WHERE email = $1', [userInfo.email]);
@@ -248,6 +279,13 @@ export async function handleOAuthCallback(req, res) {
           connectionsCount,
           headline
         ]);
+      }
+      
+      // If user has organizations, redirect to selection page
+      if (organizations.length > 0) {
+        const clientUrl = process.env.CLIENT_URL || 'http://localhost:5175';
+        const orgsParam = encodeURIComponent(JSON.stringify(organizations));
+        return res.redirect(`${clientUrl}/settings?linkedin_connected=true&select_account=true&organizations=${orgsParam}`);
       }
     }
 
@@ -311,5 +349,54 @@ export function startTeamOAuth(req, res) {
       return res.redirect(`${returnUrl}?error=oauth_init_failed`);
     }
     res.status(500).json({ error: 'Failed to initiate LinkedIn team connection' });
+  }
+}
+
+// Select account type (personal profile vs organization page)
+export async function selectAccountType(req, res) {
+  try {
+    const user = req.user;
+    if (!user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+    
+    const { accountType, organizationId, organizationName, organizationVanityName } = req.body;
+    
+    if (!accountType || !['personal', 'organization'].includes(accountType)) {
+      return res.status(400).json({ error: 'Invalid account type. Must be "personal" or "organization"' });
+    }
+    
+    if (accountType === 'organization' && !organizationId) {
+      return res.status(400).json({ error: 'Organization ID required when selecting organization account' });
+    }
+    
+    // Update the linkedin_auth record with account type selection
+    await pool.query(`
+      UPDATE linkedin_auth 
+      SET account_type = $1,
+          organization_id = $2,
+          organization_name = $3,
+          organization_vanity_name = $4,
+          updated_at = NOW()
+      WHERE user_id = $5
+    `, [
+      accountType,
+      accountType === 'organization' ? organizationId : null,
+      accountType === 'organization' ? organizationName : null,
+      accountType === 'organization' ? organizationVanityName : null,
+      user.id
+    ]);
+    
+    console.log(`[Select Account Type] User ${user.id} selected ${accountType}${accountType === 'organization' ? ` - ${organizationName}` : ''}`);
+    
+    res.json({ 
+      success: true, 
+      message: `Successfully configured ${accountType} account`,
+      accountType,
+      organizationName: accountType === 'organization' ? organizationName : null
+    });
+  } catch (error) {
+    console.error('[Select Account Type] Error:', error);
+    res.status(500).json({ error: 'Failed to save account type selection' });
   }
 }
