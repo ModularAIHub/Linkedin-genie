@@ -3,10 +3,12 @@ import { History as HistoryIcon, MessageCircle, Heart, Share2, Eye, Calendar, Fi
 import api, { posts, scheduling } from '../utils/api';
 import LoadingSpinner from '../components/LoadingSpinner';
 import toast from 'react-hot-toast';
+import { saveFilters, loadFilters, showError } from '../utils/filterUtils';
 import { useAccountAwareAPI } from '../hooks/useAccountAwareAPI';
+import AccountSelector from '../components/AccountSelector';
 
 const History = () => {
-  const { fetchForCurrentAccount, selectedAccount, accountId } = useAccountAwareAPI();
+  const { fetchForCurrentAccount, selectedAccount, accountId, accounts } = useAccountAwareAPI();
   const [postedPosts, setPostedPosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
@@ -15,27 +17,21 @@ const History = () => {
   const [sortBy, setSortBy] = useState('newest');
   const [deletingPosts, setDeletingPosts] = useState(new Set());
 
-  // Load saved filters from localStorage
+  // Unified filter persistence
   useEffect(() => {
-    const saved = localStorage.getItem('historyFilters');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        setFilter(parsed.filter || 'all');
-        setSourceFilter(parsed.sourceFilter || 'all');
-        setStatusFilter(parsed.statusFilter || 'all');
-        setSortBy(parsed.sortBy || 'newest');
-      } catch (err) {
-        console.error('Failed to parse saved history filters', err);
-      }
-    }
-  }, []);
+    if (!selectedAccount?.id) return;
+    const defaults = { filter: 'all', sourceFilter: 'all', statusFilter: 'all', sortBy: 'newest' };
+    const loaded = loadFilters('historyFilters', selectedAccount.id, defaults);
+    setFilter(loaded.filter);
+    setSourceFilter(loaded.sourceFilter);
+    setStatusFilter(loaded.statusFilter);
+    setSortBy(loaded.sortBy);
+  }, [selectedAccount]);
 
-  // Persist filters when they change
   useEffect(() => {
-    const payload = { filter, sourceFilter, statusFilter, sortBy };
-    localStorage.setItem('historyFilters', JSON.stringify(payload));
-  }, [filter, sourceFilter, statusFilter, sortBy]);
+    if (!selectedAccount?.id) return;
+    saveFilters('historyFilters', selectedAccount.id, { filter, sourceFilter, statusFilter, sortBy });
+  }, [filter, sourceFilter, statusFilter, sortBy, selectedAccount]);
 
   const handleDeletePost = async (post) => {
     const confirmed = window.confirm(
@@ -165,7 +161,7 @@ const History = () => {
       setPostedPosts(fetchedPosts);
     } catch (error) {
       console.error('[HISTORY] Fetch error:', error);
-      toast.error('Failed to load post history');
+      showError('Failed to load post history', toast);
     } finally {
       setLoading(false);
     }
@@ -223,7 +219,7 @@ const History = () => {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
+      {/* Header & Account Selector */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-gray-900 flex items-center">
@@ -234,6 +230,18 @@ const History = () => {
             View and analyze your posted LinkedIn content
           </p>
         </div>
+        <AccountSelector
+          accounts={accounts || []}
+          selectedAccount={selectedAccount}
+          onSelect={account => {
+            if (typeof window !== 'undefined' && window.setSelectedAccount) {
+              window.setSelectedAccount(account);
+            } else {
+              window.location.reload();
+            }
+          }}
+          label="Account"
+        />
       </div>
 
       {/* Filters and Controls */}

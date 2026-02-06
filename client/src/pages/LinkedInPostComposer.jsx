@@ -12,6 +12,7 @@ import {
 } from '../components/LinkedInPostComposer';
 import { useLinkedInPostComposer } from '../hooks/useLinkedInPostComposer';
 import { useAccount } from '../contexts/AccountContext';
+import AccountSelector from '../components/AccountSelector';
 import { byok } from '../utils/api';
 
 const LinkedInPostComposer = () => {
@@ -109,8 +110,8 @@ const LinkedInPostComposer = () => {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* BYOK/platform mode indicator - always visible at top */}
-      <div className="w-full flex justify-center pt-4 pb-2">
+      {/* BYOK/platform mode indicator & Account Selector */}
+      <div className="w-full flex justify-center pt-4 pb-2 gap-4">
         <div className="flex flex-col items-center space-y-1">
           <span className={`inline-block px-4 py-2 rounded-full text-sm font-semibold shadow ${
             apiKeyMode === 'byok' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-[#0077B5]'
@@ -123,6 +124,18 @@ const LinkedInPostComposer = () => {
             </span>
           )}
         </div>
+        <AccountSelector
+          accounts={accounts}
+          selectedAccount={selectedAccount}
+          onSelect={account => {
+            if (typeof window !== 'undefined' && window.setSelectedAccount) {
+              window.setSelectedAccount(account);
+            } else {
+              window.location.reload();
+            }
+          }}
+          label="Account"
+        />
       </div>
   <div className="max-w-4xl mx-auto px-2 sm:px-8 lg:px-16 py-8">
         {/* LinkedIn Account Info */}
