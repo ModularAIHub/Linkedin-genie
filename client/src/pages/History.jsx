@@ -361,24 +361,7 @@ const History = () => {
             </div>
             <div className="text-sm text-gray-600">Total Posts</div>
           </div>
-          <div className="card text-center">
-            <div className="text-2xl font-bold text-red-600">
-              {postedPosts.reduce((sum, post) => sum + (post.likes || 0), 0).toLocaleString()}
-            </div>
-            <div className="text-sm text-gray-600">Total Likes</div>
-          </div>
-          <div className="card text-center">
-            <div className="text-2xl font-bold text-green-600">
-              {postedPosts.reduce((sum, post) => sum + (post.shares || 0), 0).toLocaleString()}
-            </div>
-            <div className="text-sm text-gray-600">Total Shares</div>
-          </div>
-          <div className="card text-center">
-            <div className="text-2xl font-bold text-purple-600">
-              {postedPosts.reduce((sum, post) => sum + (post.comments || 0), 0).toLocaleString()}
-            </div>
-            <div className="text-sm text-gray-600">Total Comments</div>
-          </div>
+          {/* Analytics summary removed from History page */}
         </div>
       )}
 
@@ -448,41 +431,7 @@ const History = () => {
                       </div>
                     )}
                     
-                    {/* Engagement Metrics */}
-                    <div className="flex items-center space-x-6 text-sm text-gray-500">
-                      <div className="flex items-center space-x-1">
-                        <Heart className="h-4 w-4" />
-                        <span>{(post.likes || 0).toLocaleString()}</span>
-                      </div>
-                      <div className="flex items-center space-x-1">
-                        <Share2 className="h-4 w-4" />
-                        <span>{(post.shares || 0).toLocaleString()}</span>
-                      </div>
-                      <div className="flex items-center space-x-1">
-                        <MessageCircle className="h-4 w-4" />
-                        <span>{(post.comments || 0).toLocaleString()}</span>
-                      </div>
-                      {post.views && (
-                        <div className="flex items-center space-x-1">
-                          <Eye className="h-4 w-4" />
-                          <span>{post.views.toLocaleString()}</span>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Performance Indicators */}
-                    {post.views && (
-                      <div className="mt-2 flex items-center space-x-4 text-xs text-gray-500">
-                        <span>
-                          Engagement Rate: {getEngagementRate(post)}%
-                        </span>
-                        {post.views > 1000 && (
-                          <span className="px-2 py-1 bg-green-100 text-green-700 rounded-full">
-                            High Reach
-                          </span>
-                        )}
-                      </div>
-                    )}
+                    {/* Engagement/analytics metrics removed from History post cards */}
                   </div>
 
                   {/* Action Buttons */}

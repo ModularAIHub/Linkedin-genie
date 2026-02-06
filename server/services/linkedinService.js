@@ -67,21 +67,25 @@ export async function createLinkedInPost(accessToken, authorUrn, post_content, m
     shareMediaCategory = 'IMAGE';
     media = media_urls.map(url => ({ status: 'READY', media: url }));
   }
-  if (post_type === 'carousel') shareMediaCategory = 'CAROUSEL';
-  if (post_type === 'video') shareMediaCategory = 'VIDEO';
-  if (post_type === 'document') shareMediaCategory = 'DOCUMENT';
-  const body = {
-    author: company_id ? `urn:li:organization:${company_id}` : authorUrn,
-    lifecycleState: 'PUBLISHED',
-    specificContent: {
-      'com.linkedin.ugc.ShareContent': {
-        shareCommentary: { text: post_content },
-        shareMediaCategory,
-        ...(media.length > 0 && { media })
-      }
-    },
-    visibility: { 'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC' }
-  };
+    // Fallback: Always use person URN for author unless company_id is confirmed valid
+    let authorField = authorUrn;
+    // Optionally, add logic here to check if company_id is a valid LinkedIn org ID and user is admin
+    // If you want to force org posting, uncomment below and ensure company_id is valid
+    // if (company_id && company_id !== 'null' && company_id !== 'undefined' && String(company_id).match(/^[0-9]+$/)) {
+    //   authorField = `urn:li:organization:${company_id}`;
+    // }
+    const body = {
+      author: authorField,
+      lifecycleState: 'PUBLISHED',
+      specificContent: {
+        'com.linkedin.ugc.ShareContent': {
+          shareCommentary: { text: post_content },
+          shareMediaCategory,
+          ...(media.length > 0 && { media })
+        }
+      },
+      visibility: { 'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC' }
+    };
   try {
     const response = await axios.post(url, body, {
       headers: {

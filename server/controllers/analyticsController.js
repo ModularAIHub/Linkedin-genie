@@ -18,9 +18,13 @@ async function updatePostAnalytics(postId, { views, likes, comments, shares }) {
 
 // Helper: Fetch engagement for a LinkedIn post via API
 async function fetchLinkedInPostAnalytics(accessToken, postUrn) {
-  // LinkedIn API: https://api.linkedin.com/v2/ugcPosts/{postUrn}/socialMetadata
-  // postUrn is the full URN, e.g. urn:li:share:123456789
-  const url = `https://api.linkedin.com/v2/socialMetadata/${encodeURIComponent(postUrn)}`;
+  // LinkedIn API: https://api.linkedin.com/v2/ugcPosts/{shareId}?projection=(id,created,time,statistics)
+  // postUrn can be a numeric ID or a URN. Always extract the numeric ID for the API call.
+  let shareId = postUrn;
+  if (typeof shareId === 'string' && shareId.startsWith('urn:li:share:')) {
+    shareId = shareId.replace('urn:li:share:', '');
+  }
+  const url = `https://api.linkedin.com/v2/ugcPosts/${shareId}?projection=(id,created,time,statistics)`;
   try {
     const res = await axios.get(url, {
       headers: {
@@ -28,11 +32,12 @@ async function fetchLinkedInPostAnalytics(accessToken, postUrn) {
         'X-Restli-Protocol-Version': '2.0.0',
       },
     });
+    const stats = res.data.statistics || {};
     return {
-      views: res.data.viewCount || 0,
-      likes: res.data.likeCount || 0,
-      comments: res.data.commentCount || 0,
-      shares: res.data.shareCount || 0,
+      views: stats.viewCount || 0,
+      likes: stats.likeCount || 0,
+      comments: stats.commentCount || 0,
+      shares: stats.shareCount || 0,
     };
   } catch (err) {
     console.error('[LinkedIn Analytics Sync] Error fetching analytics for', postUrn, err.response?.data || err.message);
@@ -67,10 +72,10 @@ export async function syncAnalytics(req, res) {
     for (const post of posts) {
       // Try to fetch from LinkedIn API if we have a post ID
       let analytics = null;
-      
+      // Only use the numeric ID for LinkedIn API
       if (post.linkedin_post_id && !post.linkedin_post_id.includes('DEMO') && !post.linkedin_post_id.includes('test')) {
-        const postUrn = `urn:li:share:${post.linkedin_post_id}`;
-        analytics = await fetchLinkedInPostAnalytics(accessToken, postUrn);
+        // Pass only the numeric ID to fetchLinkedInPostAnalytics
+        analytics = await fetchLinkedInPostAnalytics(accessToken, post.linkedin_post_id);
         console.log(`[Analytics Sync] API analytics for post ${post.linkedin_post_id}:`, analytics);
       }
       
@@ -122,9 +127,16 @@ import { pool } from '../config/database.js';
 export async function getAnalytics(req, res) {
   try {
     const userId = req.user.id;
-    const { days = 30 } = req.query;
+    const { days = 30, account_id, account_type } = req.query;
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - parseInt(days));
+
+    let filterField = 'user_id';
+    let filterValue = userId;
+    if (account_type === 'team' && account_id) {
+      filterField = 'account_id';
+      filterValue = account_id;
+    }
 
     // Overview metrics
     const { rows: overview } = await pool.query(
@@ -139,8 +151,8 @@ export async function getAnalytics(req, res) {
         COALESCE(AVG(comments), 0) as avg_comments,
         COALESCE(AVG(shares), 0) as avg_shares
        FROM linkedin_posts 
-       WHERE user_id = $1 AND created_at >= $2 AND status = 'posted'`,
-      [userId, startDate]
+       WHERE ${filterField} = $1 AND created_at >= $2 AND status = 'posted'`,
+      [filterValue, startDate]
     );
     console.log('[Analytics getAnalytics] Overview:', overview[0]);
 
@@ -154,20 +166,20 @@ export async function getAnalytics(req, res) {
         COALESCE(SUM(comments), 0) as comments,
         COALESCE(SUM(shares), 0) as shares
        FROM linkedin_posts 
-       WHERE user_id = $1 AND created_at >= $2 AND status = 'posted'
+       WHERE ${filterField} = $1 AND created_at >= $2 AND status = 'posted'
        GROUP BY DATE(created_at)
        ORDER BY date DESC
        LIMIT 30`,
-      [userId, startDate]
+      [filterValue, startDate]
     );
 
     // Top posts
     const { rows: topPosts } = await pool.query(
       `SELECT * FROM linkedin_posts 
-       WHERE user_id = $1 AND created_at >= $2 AND status = 'posted'
+       WHERE ${filterField} = $1 AND created_at >= $2 AND status = 'posted'
        ORDER BY views DESC, likes DESC, comments DESC, shares DESC
        LIMIT 10`,
-      [userId, startDate]
+      [filterValue, startDate]
     );
 
     res.json({

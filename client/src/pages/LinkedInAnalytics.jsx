@@ -12,7 +12,10 @@ import AccountSelector from '../components/AccountSelector';
 import toast from 'react-hot-toast';
 import { saveFilters, loadFilters, showError } from '../utils/filterUtils';
 
+
 const LinkedInAnalytics = () => {
+  // Account selector context (must be declared before use)
+  const { accounts, selectedAccount } = typeof window !== 'undefined' && window.AccountContext ? window.AccountContext : { accounts: [], selectedAccount: null };
   const [analyticsData, setAnalyticsData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -30,13 +33,19 @@ const LinkedInAnalytics = () => {
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('overview');
   const [updatedPostIds, setUpdatedPostIds] = useState(new Set());
-  // Account selector context
-  const { accounts, selectedAccount } = typeof window !== 'undefined' && window.AccountContext ? window.AccountContext : { accounts: [], selectedAccount: null };
 
   const fetchAnalytics = async () => {
     try {
       setError(null);
-      const response = await analytics.getOverview({ days: timeframe });
+      if (!selectedAccount?.id || !selectedAccount?.account_type) {
+        setAnalyticsData({ overview: {}, daily: [], topPosts: [] });
+        return;
+      }
+      const response = await analytics.getOverview({
+        days: timeframe,
+        account_id: selectedAccount.id,
+        account_type: selectedAccount.account_type
+      });
       console.log('Analytics data:', response.data);
       setAnalyticsData(response.data);
     } catch (error) {

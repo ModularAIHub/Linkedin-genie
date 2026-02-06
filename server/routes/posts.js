@@ -1,15 +1,16 @@
 
 import express from 'express';
-import * as postController from '../controllers/postController.js';
+import { createPost, getPosts, deletePost, aiGenerate } from '../controllers/postController.js';
+
 const router = express.Router();
 
 // Create a LinkedIn post
-router.post('/', postController.createPost);
+router.post('/', createPost);
 // Fetch user's LinkedIn posts
-router.get('/', postController.getPosts);
+router.get('/', getPosts);
 // Delete a LinkedIn post
-router.delete('/:id', postController.deletePost);
+router.delete('/:id', deletePost);
 // AI content generation for LinkedIn posts
-router.post('/ai-generate', postController.aiGenerate);
+router.post('/ai-generate', aiGenerate);
 
 export default router;

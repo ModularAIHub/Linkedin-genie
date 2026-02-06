@@ -355,9 +355,39 @@ export async function handleOAuthCallback(req, res) {
       }
     }
 
-    // Redirect to settings page after successful personal account connection
+    // If user is in a team and personal account is not shown, show a popup message and log it
     const clientUrl = process.env.CLIENT_URL || 'http://localhost:5175';
-    res.redirect(`${clientUrl}/settings?linkedin_connected=true`);
+    if (userInfo && userInfo.email && req.user && req.user.team_id) {
+      console.log('[OAuth] User is in a team, personal account will not be shown:', {
+        userId: req.user.id,
+        teamId: req.user.team_id,
+        email: userInfo.email
+      });
+      return res.send(`
+        <html>
+          <body>
+            <script>
+              window.opener && window.opener.postMessage({ type: 'linkedin_auth_error', reason: 'in_team' }, window.origin);
+              window.close();
+            </script>
+            <h2>Personal LinkedIn account not available</h2>
+            <p>Your account is part of a team. Only team accounts can be connected in this workspace.</p>
+            <p>If you believe this is a mistake, please contact support or your team admin.</p>
+          </body>
+        </html>
+      `);
+    }
+    res.send(`
+      <html>
+        <body>
+          <script>
+            window.opener && window.opener.postMessage({ type: 'linkedin_auth_success' }, window.origin);
+            window.close();
+          </script>
+          <p>LinkedIn account connected! You can close this window.</p>
+        </body>
+      </html>
+    `);
   } catch (error) {
     console.error('OAuth callback error:', error?.response?.data || error.message, error.stack);
     const clientUrl = process.env.CLIENT_URL || 'http://localhost:5175';
