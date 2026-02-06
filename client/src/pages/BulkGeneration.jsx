@@ -446,15 +446,15 @@ const BulkGeneration = () => {
                           }
                           defaultOpen={Object.keys(outputs).length <= 3}
                         >
-                          <div className="flex flex-col items-start gap-2 p-2">
+                          <div className="flex flex-col items-start gap-2 p-2 w-full max-w-3xl mx-auto">
                             <SelectionTextEditor
                               value={output.text}
                               onChange={e => updateText(Number(idx), e.target.value)}
                               placeholder="Post content..."
-                              className="border rounded px-3 py-3 text-base max-w-full min-w-0 min-h-[120px] max-h-[500px] focus:ring-2 focus:ring-blue-400 focus:border-blue-400 transition overflow-auto w-full resize-vertical"
-                              style={{ fontSize: '1.05rem' }}
+                              className="border rounded px-4 py-5 text-lg min-w-[500px] max-w-full min-h-[260px] max-h-[700px] focus:ring-2 focus:ring-blue-400 focus:border-blue-400 transition overflow-auto w-full resize-vertical"
+                              style={{ fontSize: '1.18rem', lineHeight: '1.7' }}
                               disabled={loading}
-                              rows={Math.max(5, Math.min(20, output.text.split('\n').length))}
+                              rows={Math.max(10, Math.min(30, output.text.split('\n').length))}
                             />
                             <div className="flex flex-col space-y-2 mt-1 w-full">
                               <div className="flex items-center space-x-2">
@@ -525,5 +525,4 @@ const BulkGeneration = () => {
 };
 
 export default BulkGeneration;
-
 

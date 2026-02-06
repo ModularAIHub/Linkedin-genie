@@ -27,7 +27,7 @@ const LinkedInPostActions = ({
       <button
         onClick={onPost}
         disabled={!canPost || isPosting}
-        className="flex-1 flex items-center justify-center px-4 py-2 bg-[#0077B5] text-white rounded-md hover:bg-[#005983] disabled:opacity-50 disabled:cursor-not-allowed"
+        className="flex-1 flex items-center justify-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
       >
         {isPosting ? (
           <>
@@ -44,7 +44,7 @@ const LinkedInPostActions = ({
       <button
         onClick={() => setShowScheduleModal(true)}
         disabled={!canPost || isScheduling}
-        className="flex items-center px-4 py-2 border border-blue-300 text-[#0077B5] rounded-md hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed"
+        className="flex items-center px-4 py-2 border border-gray-300 text-gray-700 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
       >
         {isScheduling ? (
           <>
@@ -61,25 +61,25 @@ const LinkedInPostActions = ({
       {/* Schedule Modal */}
       <Modal isOpen={showScheduleModal} onClose={() => { setShowScheduleModal(false); setLocalError(''); }}>
         <h2 className="text-lg font-semibold mb-4">Schedule LinkedIn Post</h2>
-        <label className="block text-sm font-medium text-[#0077B5] mb-2">Date & Time</label>
+        <label className="block text-sm font-medium text-gray-700 mb-2">Date & Time</label>
         <input
           type="datetime-local"
           value={scheduleDate}
           min={new Date().toISOString().slice(0, 16)}
           onChange={e => setScheduleDate(e.target.value)}
-          className="w-full px-3 py-2 border border-blue-300 rounded-md focus:outline-none focus:ring-2 focus:ring-[#0077B5] mb-4"
+          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
         />
         {localError && <div className="text-red-500 text-sm mb-2">{localError}</div>}
         <div className="flex justify-end space-x-2 mt-4">
           <button
-            className="px-4 py-2 bg-blue-100 rounded hover:bg-blue-200"
+            className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300"
             onClick={() => { setShowScheduleModal(false); setLocalError(''); }}
             disabled={isScheduling}
           >
             Cancel
           </button>
           <button
-            className="px-4 py-2 bg-[#0077B5] text-white rounded hover:bg-[#005983] disabled:opacity-50"
+            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
             onClick={async () => {
               if (!scheduleDate) {
                 setLocalError('Please select a date and time');
