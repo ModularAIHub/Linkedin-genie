@@ -28,7 +28,6 @@ const Settings = () => {
 
   const tabs = [
     { id: 'linkedin', name: 'LinkedIn Account', icon: SettingsIcon },
-    { id: 'ai', name: 'AI Providers', icon: Sparkles },
   ];
 
   return (
@@ -158,19 +157,7 @@ const Settings = () => {
         </div>
       )}
 
-      {/* AI Providers Tab (placeholder for parity) */}
-      {activeTab === 'ai' && (
-        <div className="space-y-6">
-          <div className="card">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">
-              AI Content Providers
-            </h3>
-            <p className="text-sm text-gray-600 mb-6">
-              Configure your own API keys or use the platform's built-in providers (coming soon)
-            </p>
-          </div>
-        </div>
-      )}
+      {/* AI Providers Tab removed */}
     </div>
   );
 };

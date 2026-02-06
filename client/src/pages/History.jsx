@@ -368,11 +368,14 @@ const History = () => {
       {/* Post History List */}
       <div className="space-y-4">
         {postedPosts.length > 0 ? (
-          postedPosts.map((post) => {
+          postedPosts.map((post, idx) => {
             const postId = post.id || post.linkedin_post_id;
 
             return (
-              <div key={postId} className="card hover:shadow-md transition-shadow">
+              <div
+                key={postId}
+                className={`card hover:shadow-md transition-shadow${idx !== postedPosts.length - 1 ? ' border-b-2 border-blue-200' : ''}`}
+              >
                 <div className="flex items-start justify-between">
                   <div className="flex-1 min-w-0">
                     {/* Post Header */}
