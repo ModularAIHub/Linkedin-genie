@@ -8,16 +8,30 @@ import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, Cartesia
   Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { analytics } from '../utils/api';
 import LoadingSpinner from '../components/LoadingSpinner';
+import AccountSelector from '../components/AccountSelector';
 import toast from 'react-hot-toast';
+import { saveFilters, loadFilters, showError } from '../utils/filterUtils';
 
 const LinkedInAnalytics = () => {
   const [analyticsData, setAnalyticsData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [timeframe, setTimeframe] = useState('30');
+  // Unified filter persistence for timeframe
+  useEffect(() => {
+    if (!selectedAccount?.id) return;
+    const loaded = loadFilters('analyticsFilters', selectedAccount.id, { timeframe: '30' });
+    setTimeframe(loaded.timeframe);
+  }, [selectedAccount]);
+  useEffect(() => {
+    if (!selectedAccount?.id) return;
+    saveFilters('analyticsFilters', selectedAccount.id, { timeframe });
+  }, [timeframe, selectedAccount]);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('overview');
   const [updatedPostIds, setUpdatedPostIds] = useState(new Set());
+  // Account selector context
+  const { accounts, selectedAccount } = typeof window !== 'undefined' && window.AccountContext ? window.AccountContext : { accounts: [], selectedAccount: null };
 
   const fetchAnalytics = async () => {
     try {
@@ -27,7 +41,7 @@ const LinkedInAnalytics = () => {
       setAnalyticsData(response.data);
     } catch (error) {
       console.error('Failed to fetch analytics:', error);
-      setError('Failed to load analytics data');
+      showError('Failed to load analytics data', toast);
     } finally {
       setLoading(false);
     }
@@ -59,7 +73,7 @@ const LinkedInAnalytics = () => {
       console.error('Failed to sync analytics:', error);
       toast.dismiss();
       toast.error(error.response?.data?.error || 'Failed to sync analytics');
-      setError('Failed to sync analytics data');
+      showError('Failed to sync analytics data', toast);
     } finally {
       setSyncing(false);
     }
@@ -122,13 +136,25 @@ const LinkedInAnalytics = () => {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
+      {/* Header & Account Selector */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">LinkedIn Analytics</h1>
           <p className="mt-2 text-gray-600">Comprehensive insights into your LinkedIn performance</p>
         </div>
         <div className="flex items-center space-x-4">
+          <AccountSelector
+            accounts={accounts || []}
+            selectedAccount={selectedAccount}
+            onSelect={account => {
+              if (typeof window !== 'undefined' && window.setSelectedAccount) {
+                window.setSelectedAccount(account);
+              } else {
+                window.location.reload();
+              }
+            }}
+            label="Account"
+          />
           <select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="input w-auto border rounded px-3 py-2">
             <option value={7}>Last 7 days</option>
             <option value={30}>Last 30 days</option>
