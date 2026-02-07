@@ -19,51 +19,60 @@ import LoadingSpinner from '../components/LoadingSpinner';
 import toast from 'react-hot-toast';
 
 const Dashboard = () => {
-  const [loading, setLoading] = useState(true);
+  const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const [analyticsData, setAnalyticsData] = useState(null);
+  const [postsLoading, setPostsLoading] = useState(true);
   const [recentPosts, setRecentPosts] = useState([]);
+  const [creditsLoading, setCreditsLoading] = useState(true);
   const [creditBalance, setCreditBalance] = useState(null);
+  const [byokLoading, setByokLoading] = useState(true);
   const [apiKeyPreference, setApiKeyPreference] = useState(null);
 
   useEffect(() => {
-    fetchDashboardData();
+    analytics.getOverview({ days: 30 })
+      .then(res => {
+        setAnalyticsData(res.data);
+      })
+      .catch(err => {
+        toast.error('Failed to load analytics data');
+        console.error('Analytics API error:', err);
+      })
+      .finally(() => setAnalyticsLoading(false));
+
+    posts.list({ limit: 5 })
+      .then(res => {
+        setRecentPosts(res.data.posts || []);
+      })
+      .catch(err => {
+        toast.error('Failed to load recent posts');
+        console.error('Posts API error:', err);
+      })
+      .finally(() => setPostsLoading(false));
+
+    credits.getBalance()
+      .then(res => {
+        setCreditBalance(res.data);
+      })
+      .catch(err => {
+        toast.error('Failed to load credit balance');
+        console.error('Credits API error:', err);
+      })
+      .finally(() => setCreditsLoading(false));
+
+    byok.getPreference()
+      .then(res => {
+        setApiKeyPreference(res.data);
+      })
+      .catch(err => {
+        toast.error('Failed to load BYOK preference');
+        console.error('BYOK API error:', err);
+      })
+      .finally(() => setByokLoading(false));
   }, []);
 
-  const fetchDashboardData = async () => {
-    try {
-      setLoading(true);
-      const [analyticsRes, postsRes, creditsRes, byokRes] = await Promise.allSettled([
-        analytics.getOverview({ days: 30 }),
-        posts.list({ limit: 5 }),
-        credits.getBalance(),
-        byok.getPreference(),
-      ]);
 
-      if (analyticsRes.status === 'fulfilled') {
-        console.log('Analytics API response:', analyticsRes.value.data); // Debug log
-        setAnalyticsData(analyticsRes.value.data);
-      } else {
-        console.error('Analytics API error:', analyticsRes.reason); // Debug log
-        toast.error('Failed to load analytics data');
-      }
-      if (postsRes.status === 'fulfilled') {
-        setRecentPosts(postsRes.value.data.posts || []);
-      }
-      if (creditsRes.status === 'fulfilled') {
-        setCreditBalance(creditsRes.value.data);
-      }
-      if (byokRes.status === 'fulfilled') {
-        setApiKeyPreference(byokRes.value.data);
-      }
-    } catch (error) {
-      toast.error('Failed to load dashboard data');
-      console.error('Dashboard fetch error:', error); // Debug log
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  if (loading) {
+  // Optionally, show a global spinner if all are loading (first load)
+  if (analyticsLoading && postsLoading && creditsLoading && byokLoading) {
     return (
       <div className="flex items-center justify-center min-h-96">
         <div className="text-center">
@@ -74,31 +83,33 @@ const Dashboard = () => {
     );
   }
 
+  // Always show '—' for all stats if analytics is not available (warning is shown)
+  const analyticsUnavailable = true; // Force unavailable until real LinkedIn analytics is implemented
   const stats = [
     {
       name: 'Total Posts',
-      value: analyticsData?.overview?.total_posts ?? '—',
+      value: '—',
       icon: MessageCircle,
       color: 'text-blue-600',
       bgColor: 'bg-blue-50',
     },
     {
       name: 'Total Views',
-      value: analyticsData?.overview?.total_views ?? '—',
+      value: '—',
       icon: Eye,
       color: 'text-green-600',
       bgColor: 'bg-green-50',
     },
     {
       name: 'Total Likes',
-      value: analyticsData?.overview?.total_likes ?? '—',
+      value: '—',
       icon: Heart,
       color: 'text-pink-600',
       bgColor: 'bg-pink-50',
     },
     {
       name: 'Total Shares',
-      value: analyticsData?.overview?.total_shares ?? '—',
+      value: '—',
       icon: Share2,
       color: 'text-purple-600',
       bgColor: 'bg-purple-50',
@@ -148,74 +159,84 @@ const Dashboard = () => {
         </Link>
       </div>
 
+
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        {stats.map((stat) => {
-          const Icon = stat.icon;
-          return (
-            <div key={stat.name} className="card">
-              <div className="flex items-center">
-                <div className={`p-3 rounded-lg ${stat.bgColor}`}>
-                  <Icon className={`h-6 w-6 ${stat.color}`} />
-                </div>
-                <div className="ml-4">
-                  <p className="text-sm font-medium text-gray-600">{stat.name}</p>
-                  <p className="text-2xl font-bold text-gray-900">
-                    {typeof stat.value === 'number' ? stat.value.toLocaleString() : stat.value}
-                  </p>
+        <div className="col-span-4">
+          <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 rounded-lg p-4 mb-4 text-center">
+            <strong>Analytics is under progress and not available yet.</strong><br />
+            We do not have the required LinkedIn API scope for analytics at this time.
+          </div>
+        </div>
+        {analyticsLoading
+          ? Array(4).fill(0).map((_, i) => (
+              <div key={i} className="card animate-pulse">
+                <div className="flex items-center">
+                  <div className="p-3 rounded-lg bg-gray-100 h-12 w-12" />
+                  <div className="ml-4">
+                    <div className="h-4 w-24 bg-gray-200 rounded mb-2" />
+                    <div className="h-6 w-16 bg-gray-300 rounded" />
+                  </div>
                 </div>
               </div>
-            </div>
-          );
-        })}
+            ))
+          : stats.map((stat) => {
+              const Icon = stat.icon;
+              return (
+                <div key={stat.name} className="card">
+                  <div className="flex items-center">
+                    <div className={`p-3 rounded-lg ${stat.bgColor}`}>
+                      <Icon className={`h-6 w-6 ${stat.color}`} />
+                    </div>
+                    <div className="ml-4">
+                      <p className="text-sm font-medium text-gray-600">{stat.name}</p>
+                      <p className="text-2xl font-bold text-gray-900">
+                        {typeof stat.value === 'number' ? stat.value.toLocaleString() : stat.value}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
       </div>
 
       {/* Credits Balance & Mode */}
-      {(creditBalance || apiKeyPreference) && (
-        <div className="space-y-4">
-          <div className="card">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-lg font-semibold text-gray-900">Credit Balance</h3>
-                <p className="text-3xl font-bold text-primary-600 mt-2">
-                  {creditBalance?.balance}
-                </p>
-                <p className="text-sm text-gray-600">
-                  Credits available for posting and AI generation
-                </p>
-                {apiKeyPreference?.api_key_preference && (
-                  <div className="mt-3 p-3 bg-gray-50 rounded-lg">
-                    <div className="flex items-center space-x-2 mb-1">
-                      <span className="text-neutral-600">Current mode:</span>
-                      <span className={`font-semibold px-2 py-1 rounded-md text-sm ${
-                        apiKeyPreference.api_key_preference === 'byok' 
-                          ? 'bg-green-100 text-green-700' 
-                          : 'bg-blue-100 text-blue-700'
-                      }`}>
-                        {apiKeyPreference.api_key_preference === 'byok' ? '🔑 BYOK' : '🏢 Platform'}
-                      </span>
-                    </div>
-                    {apiKeyPreference.api_key_preference === 'byok' && apiKeyPreference.byok_locked_until && (
-                      <div className="text-xs text-yellow-600 bg-yellow-50 px-2 py-1 rounded-md inline-block">
-                        🔒 Locked until {new Date(apiKeyPreference.byok_locked_until).toLocaleDateString()}
-                      </div>
-                    )}
-                    <div className="text-xs text-gray-500 mt-2">
-                      {apiKeyPreference.api_key_preference === 'byok' 
-                        ? 'Using your own API keys for AI content generation'
-                        : 'Using platform-provided API keys'
-                      }
-                    </div>
-                  </div>
+      <div className="space-y-4">
+        <div className="card">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-lg font-semibold text-gray-900">Credit Balance</h3>
+              <p className="text-3xl font-bold text-primary-600 mt-2">
+                {creditsLoading ? (
+                  <span className="animate-pulse bg-gray-200 h-8 w-24 inline-block rounded" />
+                ) : creditBalance && typeof creditBalance === 'object' ? (
+                  <>
+                    {creditBalance.balance ?? '—'}
+                    <span className="block text-sm text-gray-500 mt-1">
+                      {typeof creditBalance.creditsRemaining !== 'undefined' && `(${creditBalance.creditsRemaining} credits remaining)`}
+                    </span>
+                  </>
+                ) : (
+                  creditBalance ?? '—'
                 )}
-              </div>
-            
+              </p>
             </div>
+            <CreditCard className="h-8 w-8 text-primary-400" />
           </div>
-          {/* LinkedIn Connect Button */}
-          {/* <LinkedInConnect /> */}
         </div>
-      )}
+        <div className="card">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-lg font-semibold text-gray-900">API Key Preference</h3>
+              <p className="text-lg mt-2">
+                {byokLoading ? <span className="animate-pulse bg-gray-200 h-6 w-32 inline-block rounded" /> : (apiKeyPreference?.mode ?? '—')}
+              </p>
+            </div>
+            <BarChart3 className="h-8 w-8 text-purple-400" />
+          </div>
+        </div>
+      </div>
+
 
       {/* Quick Actions */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">

@@ -29,24 +29,47 @@ export async function schedulePost(req, res) {
       scheduledTimeUtc = DateTime.fromISO(scheduled_time).toUTC().toISO();
     }
     // Save to DB
+    let fixedCompanyId = company_id;
+    // If company_id is present and not a valid UUID, try to fetch the UUID from the team table
+    if (company_id && !/^[0-9a-fA-F-]{36}$/.test(company_id)) {
+      // Try to find the team with this integer id
+      const { rows: teamRows } = await pool.query('SELECT team_id FROM team_members WHERE team_id = $1::text OR id = $1::int LIMIT 1', [company_id]);
+      if (teamRows.length > 0) {
+        fixedCompanyId = teamRows[0].team_id;
+      }
+    }
     const scheduledPost = await create({
       user_id: userId,
       post_content,
       media_urls,
       post_type,
-      company_id,
+      company_id: fixedCompanyId,
       scheduled_time: scheduledTimeUtc,
       status: 'scheduled'
     });
-    // Enqueue job with LinkedIn credentials and post data
+    // Determine LinkedIn credentials for team/company posts
+    let linkedinAccessToken = req.user?.linkedinAccessToken;
+    let authorUrn = req.user?.linkedinUrn;
+    if (fixedCompanyId && fixedCompanyId !== 'null' && fixedCompanyId !== 'undefined') {
+      // Fetch team account credentials
+      const { rows: teamAccountRows } = await pool.query(
+        `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE team_id = $1 AND active = true LIMIT 1`,
+        [fixedCompanyId]
+      );
+      if (teamAccountRows.length > 0) {
+        linkedinAccessToken = teamAccountRows[0].access_token;
+        authorUrn = `urn:li:person:${teamAccountRows[0].linkedin_user_id}`;
+      }
+    }
+    // Enqueue job with correct credentials
     const job = await scheduleQueue.add('publish', {
       scheduledPostId: scheduledPost.id,
-      linkedinAccessToken: req.user?.linkedinAccessToken,
-      authorUrn: req.user?.linkedinUrn,
+      linkedinAccessToken,
+      authorUrn,
       postContent: post_content,
       mediaUrls: media_urls,
       postType: post_type,
-      companyId: company_id
+      companyId: fixedCompanyId
     }, {
       delay: Math.max(0, DateTime.fromISO(scheduledTimeUtc).toMillis() - Date.now()),
       attempts: 3

@@ -190,16 +190,26 @@ export async function deletePost(req, res) {
       )).rows;
     }
 
-    // If not found, try to find post by company_id and check team membership
+    // If not found, try to find post by company_id and check team membership/role (only owner/admin can delete)
     if (rows.length === 0) {
       const teamAccountId = req.headers['x-selected-account-id'];
       if (teamAccountId && teamAccountId !== 'null' && teamAccountId !== 'undefined') {
-        rows = (await pool.query(
-          `SELECT p.* FROM linkedin_posts p
-           INNER JOIN team_members tm ON p.company_id::text = tm.team_id::text
-           WHERE (p.id::text = $1::text OR p.linkedin_post_id::text = $1::text) AND tm.user_id = $2 AND tm.status = 'active'`,
-          [id, userId]
-        )).rows;
+        // Check role for this user in the team
+        const { rows: memberRows } = await pool.query(
+          `SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2 AND status = 'active'`,
+          [teamAccountId, userId]
+        );
+        if (memberRows.length > 0 && (memberRows[0].role === 'owner' || memberRows[0].role === 'admin')) {
+          // Only allow if user is owner or admin
+          rows = (await pool.query(
+            `SELECT p.* FROM linkedin_posts p
+             WHERE (p.id::text = $1::text OR p.linkedin_post_id::text = $1::text) AND p.company_id::text = $2::text`,
+            [id, teamAccountId]
+          )).rows;
+        } else {
+          // Not allowed
+          return res.status(403).json({ error: 'Only team owners and admins can delete posts for this team.' });
+        }
       }
     }
 
