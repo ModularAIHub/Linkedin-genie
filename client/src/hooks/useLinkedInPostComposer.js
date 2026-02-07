@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import api, { linkedin } from '../utils/api';
-import { sanitizeAIContent } from '../utils/sanitization';
+import { sanitizeAIContent, sanitizeImagePrompt } from '../utils/sanitization';
 import { htmlToUnicode } from '../components/LinkedInPostComposer/LinkedInPostContentEditor';
 import toast from 'react-hot-toast';
 import { useAccountAwareAPI } from './useAccountAwareAPI';
@@ -186,9 +186,68 @@ const useLinkedInPostComposer = () => {
       setIsScheduling(false);
     }
   };
-  const handleImageGenerate = () => {};
+  const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+  // Helper to get base64 size
+  const getBase64Size = (base64String) => {
+    if (!base64String) return 0;
+    const base64Data = base64String.replace(/^data:image\/[a-z]+;base64,/, '');
+    return (base64Data.length * 3) / 4;
+  };
+  const handleImageGenerate = async () => {
+    const sanitizedPrompt = sanitizeImagePrompt(imagePrompt.trim());
+    if (!sanitizedPrompt) {
+      toast.error('Please enter a valid image description');
+      return;
+    }
+    if (sanitizedPrompt.includes('[FILTERED]')) {
+      toast.error('Some content was filtered from your prompt for safety reasons');
+    }
+    setIsGeneratingImage(true);
+    try {
+      const response = await api.post('/api/image-generation/generate', { prompt: sanitizedPrompt, style: imageStyle }, {
+        timeout: 90000,
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity
+      });
+      if (response.data && response.data.success && response.data.imageUrl) {
+        const imageSize = getBase64Size(response.data.imageUrl);
+        if (imageSize > MAX_IMAGE_SIZE) {
+          toast.error(`Generated image is too large (${(imageSize / (1024 * 1024)).toFixed(1)}MB). Max allowed is 5MB. Please try a different prompt.`);
+          return;
+        }
+        const newImage = {
+          file: null,
+          preview: response.data.imageUrl,
+          url: response.data.imageUrl,
+          id: Math.random().toString(36).substr(2, 9),
+          isAIGenerated: true,
+          prompt: sanitizedPrompt,
+          provider: response.data.provider || 'AI'
+        };
+        setSelectedImages(prev => [...prev, newImage]);
+        setShowImagePrompt(false);
+        setImagePrompt('');
+        toast.success('Image generated successfully!');
+      } else {
+        toast.error('Failed to generate image - invalid response');
+      }
+    } catch (error) {
+      console.error('Image generation error:', error);
+      if (error.code === 'ECONNABORTED') {
+        toast.error('Image generation timed out. Please try again.');
+      } else if (error.response?.status === 413) {
+        toast.error('Generated image is too large. Please try again.');
+      } else if (error.response?.status === 500) {
+        toast.error('Server error during image generation. Please try again.');
+      } else {
+        toast.error(`Failed to generate image: ${error.message}`);
+      }
+    } finally {
+      setIsGeneratingImage(false);
+    }
+  };
   const handleCancelScheduled = () => {};
-  const handleImageButtonClick = () => {};
+  const handleImageButtonClick = () => setShowImagePrompt(v => !v);
   const fetchScheduledPosts = () => {};
 
   return {

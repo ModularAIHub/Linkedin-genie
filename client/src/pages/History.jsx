@@ -128,20 +128,25 @@ const History = () => {
       const data = await response.json();
       let fetchedPosts = data.posts || [];
       
+      // Only fetch and merge completed/posted scheduled posts
       const scheduledRes = await api.get('/api/schedule?status=completed');
-      const scheduledPosts = (scheduledRes.data.posts || []).map(sp => ({
-        ...sp,
-        linkedin_post_id: sp.id,
-        views: sp.views || 0,
-        likes: sp.likes || 0,
-        shares: sp.shares || 0,
-        comments: sp.comments || 0,
-        created_at: sp.posted_at || sp.created_at,
-        source: sp.source || 'platform',
-        status: sp.status || 'posted'
-      }));
-      
-      fetchedPosts = [...fetchedPosts, ...scheduledPosts];
+      const scheduledPosts = (scheduledRes.data.posts || [])
+        .filter(sp => sp.status === 'posted' || sp.status === 'completed')
+        .map(sp => ({
+          ...sp,
+          linkedin_post_id: sp.id,
+          views: sp.views || 0,
+          likes: sp.likes || 0,
+          shares: sp.shares || 0,
+          comments: sp.comments || 0,
+          created_at: sp.posted_at || sp.created_at,
+          source: sp.source || 'platform',
+          status: sp.status || 'posted'
+        }));
+      // Avoid duplicates: filter out posts already in fetchedPosts by linkedin_post_id
+      const fetchedIds = new Set(fetchedPosts.map(p => p.linkedin_post_id || p.id));
+      const uniqueScheduledPosts = scheduledPosts.filter(sp => !fetchedIds.has(sp.linkedin_post_id));
+      fetchedPosts = [...fetchedPosts, ...uniqueScheduledPosts];
       
       // Apply source filter
       if (sourceFilter !== 'all') {
@@ -206,6 +211,23 @@ const History = () => {
     return null;
   };
 
+
+  // DEBUG: Log selectedAccount and accounts for troubleshooting
+  useEffect(() => {
+    if (selectedAccount && accounts) {
+      // eslint-disable-next-line no-console
+      console.log('[History] selectedAccount:', selectedAccount);
+      // eslint-disable-next-line no-console
+      console.log('[History] accounts:', accounts);
+    }
+  }, [selectedAccount, accounts]);
+
+  // Improved: Only show disconnected if selectedAccount is not found by id or account_id in accounts
+  // Improved: Match by id, account_id, or username for all account types
+  // TEMP WORKAROUND: Always show history if a selected account exists, regardless of accounts list
+  // Remove this workaround when backend /api/team/accounts is fixed
+  // const isAccountDisconnected = ...
+  // if (isAccountDisconnected) { ... }
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-96">
