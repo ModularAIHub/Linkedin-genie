@@ -1,5 +1,6 @@
 
 import express from 'express';
+import Honeybadger from '@honeybadger-io/js';
 import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
@@ -18,7 +19,16 @@ import errorHandler from './middleware/errorHandler.js';
 
 dotenv.config();
 
+// Honeybadger configuration
+Honeybadger.configure({
+  apiKey: 'hbp_A8vjKimYh8OnyV8J3djwKrpqc4OniI3a4MJg', // Replace with your real key
+  environment: process.env.NODE_ENV || 'development'
+});
+
 const app = express();
+
+// Honeybadger request handler (must be first middleware)
+app.use(Honeybadger.requestHandler);
 const PORT = process.env.PORT || 3004;
 
 // Basic middleware
@@ -101,6 +111,9 @@ app.get('/', (req, res) => {
   });
 });
 
+
+// Honeybadger error handler (must be after all routes/middleware)
+app.use(Honeybadger.errorHandler);
 // Error handling with CORS headers like Tweet Genie
 app.use((err, req, res, next) => {
   // Add CORS headers even on errors
