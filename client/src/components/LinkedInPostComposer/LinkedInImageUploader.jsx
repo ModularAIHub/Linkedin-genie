@@ -29,13 +29,13 @@ const LinkedInImageUploader = ({
       </div>
       {/* Image Previews */}
       {selectedImages.length > 0 && (
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
           {selectedImages.map((image, index) => (
             <div key={image.id || index} className="relative group">
               <img
                 src={image.preview || image.url}
                 alt={`Preview ${index + 1}`}
-                className="w-full h-32 object-cover rounded-lg border cursor-pointer"
+                className="w-full aspect-square object-cover rounded-lg border cursor-pointer"
                 onClick={() => onImagePreview && onImagePreview(image)}
               />
               <button

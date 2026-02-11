@@ -240,15 +240,15 @@ const History = () => {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 p-4 sm:p-0">
       {/* Header & Account Selector */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900 flex items-center">
-            <HistoryIcon className="h-8 w-8 mr-3 text-blue-600" />
+          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 flex items-center">
+            <HistoryIcon className="h-6 w-6 sm:h-8 sm:w-8 mr-2 sm:mr-3 text-blue-600" />
             LinkedIn Post History
           </h1>
-          <p className="mt-2 text-gray-600">
+          <p className="mt-2 text-sm sm:text-base text-gray-600">
             View and analyze your posted LinkedIn content
           </p>
         </div>
@@ -376,7 +376,7 @@ const History = () => {
 
       {/* Stats Summary */}
       {postedPosts.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+        <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-4 gap-4 sm:gap-6">
           <div className="card text-center">
             <div className="text-2xl font-bold text-blue-600">
               {postedPosts.length}
@@ -396,14 +396,14 @@ const History = () => {
             return (
               <div
                 key={postId}
-                className={`card hover:shadow-md transition-shadow${idx !== postedPosts.length - 1 ? ' border-b-2 border-blue-200' : ''}`}
+                className={`card p-4 sm:p-6 hover:shadow-md transition-shadow${idx !== postedPosts.length - 1 ? ' border-b-2 border-blue-200' : ''}`}
               >
-                <div className="flex items-start justify-between">
+                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     {/* Post Header */}
-                    <div className="flex items-center space-x-3 mb-3">
-                      <div className="flex items-center space-x-2">
-                        <div className="h-8 w-8 bg-blue-700 rounded-sm flex items-center justify-center">
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 mb-3">
+                      <div className="flex items-center flex-wrap gap-2">
+                        <div className="h-8 w-8 bg-blue-700 rounded-sm flex items-center justify-center flex-shrink-0">
                           <span className="text-white text-sm font-medium">in</span>
                         </div>
                         {/* Source Indicator */}
@@ -426,24 +426,26 @@ const History = () => {
                           </span>
                         )}
                       </div>
-                      <span className="text-sm text-gray-500">
-                        {formatDate(post.display_created_at || post.posted_at || post.created_at)}
-                      </span>
-                      {getPostUrl(post) && (
-                        <a
-                          href={getPostUrl(post)}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-blue-500 hover:text-blue-700"
-                          title="View on LinkedIn"
-                        >
-                          <ExternalLink className="h-4 w-4" />
-                        </a>
-                      )}
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs sm:text-sm text-gray-500">
+                          {formatDate(post.display_created_at || post.posted_at || post.created_at)}
+                        </span>
+                        {getPostUrl(post) && (
+                          <a
+                            href={getPostUrl(post)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-500 hover:text-blue-700"
+                            title="View on LinkedIn"
+                          >
+                            <ExternalLink className="h-4 w-4" />
+                          </a>
+                        )}
+                      </div>
                     </div>
                     
                     {/* Post Content */}
-                    <p className="text-gray-900 mb-4 whitespace-pre-wrap">
+                    <p className="text-sm sm:text-base text-gray-900 mb-4 whitespace-pre-wrap break-words">
                       {post.post_content}
                     </p>
 

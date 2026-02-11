@@ -4,21 +4,21 @@ import api from '../utils/api';
 // Helper to get current account ID  
 export const getCurrentAccountId = (selectedAccount) => {
   if (!selectedAccount) return null;
-  
+
   // For team accounts, use account_id or id (should be integer)
   // For personal accounts, we don't need account_id (returns null)
   const accountId = selectedAccount.account_id || selectedAccount.id;
-  
+
   // Personal accounts don't have account_id, which is correct
   if (selectedAccount.account_type === 'personal' || selectedAccount.isTeamAccount === false) {
     return null;
   }
-  
+
   // Warn if we're getting a UUID when we expect an integer for team accounts
   if (accountId && typeof accountId === 'string' && accountId.includes('-')) {
     console.warn('[getCurrentAccountId] Unexpected UUID as account ID:', accountId, 'from account:', selectedAccount);
   }
-  
+
   return accountId;
 };
 
@@ -55,7 +55,7 @@ export const AccountProvider = ({ children }) => {
   const updateSelectedAccount = (account) => {
     console.log('[AccountContext] Updating selected account:', account);
     setSelectedAccount(account);
-    
+
     if (account) {
       // Save to localStorage
       localStorage.setItem(
@@ -86,17 +86,24 @@ export const AccountProvider = ({ children }) => {
   const fetchAccounts = async () => {
     try {
       setLoading(true);
-      
+
+      console.log('[AccountContext] Fetching accounts from /api/team/accounts...');
+
       // Fetch personal + team accounts
       const accountsResponse = await api.get('/api/team/accounts');
+
+      console.log('[AccountContext] API Response:', accountsResponse);
+      console.log('[AccountContext] Response data:', accountsResponse.data);
+
       const fetchedAccounts = accountsResponse.data.accounts || [];
-      
+
       console.log('[AccountContext] Fetched accounts:', fetchedAccounts);
       setAccounts(fetchedAccounts);
 
       // Fetch teams
       try {
         const teamsResponse = await api.get('/api/team/teams');
+        console.log('[AccountContext] Teams response:', teamsResponse.data);
         setTeams(teamsResponse.data.teams || []);
       } catch (teamError) {
         console.error('Failed to fetch teams:', teamError);
@@ -127,9 +134,12 @@ export const AccountProvider = ({ children }) => {
 
         updateSelectedAccount(accountToSelect);
         console.log('[AccountContext] Auto-selected account:', accountToSelect);
+      } else {
+        console.warn('[AccountContext] No accounts found! User may need to connect a LinkedIn account.');
       }
     } catch (error) {
-      console.error('Failed to fetch accounts:', error);
+      console.error('[AccountContext] Failed to fetch accounts:', error);
+      console.error('[AccountContext] Error details:', error.response?.data || error.message);
       setAccounts([]);
     } finally {
       setLoading(false);

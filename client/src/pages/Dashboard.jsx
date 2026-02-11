@@ -141,9 +141,9 @@ const Dashboard = () => {
   ];
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-8 px-2 sm:px-0">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
           <p className="mt-2 text-gray-600">
@@ -152,7 +152,7 @@ const Dashboard = () => {
         </div>
         <Link
           to="/compose"
-          className="btn btn-primary btn-lg"
+          className="btn btn-primary btn-lg w-full sm:w-auto"
         >
           <Plus className="h-5 w-5 mr-2" />
           New Post
@@ -161,85 +161,87 @@ const Dashboard = () => {
 
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <div className="col-span-4">
-          <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 rounded-lg p-4 mb-4 text-center">
-            <strong>Analytics is under progress and not available yet.</strong><br />
-            We do not have the required LinkedIn API scope for analytics at this time.
-          </div>
+      <div className="space-y-4">
+        <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 rounded-lg p-4 text-center">
+          <strong>Analytics is under progress and not available yet.</strong><br />
+          We do not have the required LinkedIn API scope for analytics at this time.
         </div>
-        {analyticsLoading
-          ? Array(4).fill(0).map((_, i) => (
-              <div key={i} className="card animate-pulse">
-                <div className="flex items-center">
-                  <div className="p-3 rounded-lg bg-gray-100 h-12 w-12" />
-                  <div className="ml-4">
-                    <div className="h-4 w-24 bg-gray-200 rounded mb-2" />
-                    <div className="h-6 w-16 bg-gray-300 rounded" />
-                  </div>
-                </div>
-              </div>
-            ))
-          : stats.map((stat) => {
-              const Icon = stat.icon;
-              return (
-                <div key={stat.name} className="card">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          {analyticsLoading
+            ? Array(4).fill(0).map((_, i) => (
+                <div key={i} className="card animate-pulse">
                   <div className="flex items-center">
-                    <div className={`p-3 rounded-lg ${stat.bgColor}`}>
-                      <Icon className={`h-6 w-6 ${stat.color}`} />
-                    </div>
+                    <div className="p-3 rounded-lg bg-gray-100 h-12 w-12" />
                     <div className="ml-4">
-                      <p className="text-sm font-medium text-gray-600">{stat.name}</p>
-                      <p className="text-2xl font-bold text-gray-900">
-                        {typeof stat.value === 'number' ? stat.value.toLocaleString() : stat.value}
-                      </p>
+                      <div className="h-4 w-24 bg-gray-200 rounded mb-2" />
+                      <div className="h-6 w-16 bg-gray-300 rounded" />
                     </div>
                   </div>
                 </div>
-              );
-            })}
+              ))
+            : stats.map((stat) => {
+                const Icon = stat.icon;
+                return (
+                  <div key={stat.name} className="card">
+                    <div className="flex items-center">
+                      <div className={`p-3 rounded-lg ${stat.bgColor}`}>
+                        <Icon className={`h-6 w-6 ${stat.color}`} />
+                      </div>
+                      <div className="ml-4">
+                        <p className="text-sm font-medium text-gray-600">{stat.name}</p>
+                        <p className="text-2xl font-bold text-gray-900">
+                          {typeof stat.value === 'number' ? stat.value.toLocaleString() : stat.value}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+        </div>
       </div>
 
       {/* Credits Balance & Mode */}
       <div className="space-y-4">
-        <div className="card">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="text-lg font-semibold text-gray-900">Credit Balance</h3>
-              <p className="text-3xl font-bold text-primary-600 mt-2">
-                {creditsLoading ? (
-                  <span className="animate-pulse bg-gray-200 h-8 w-24 inline-block rounded" />
-                ) : creditBalance && typeof creditBalance === 'object' ? (
-                  <>
-                    {creditBalance.balance ?? '—'}
-                    <span className="block text-sm text-gray-500 mt-1">
-                      {typeof creditBalance.creditsRemaining !== 'undefined' && `(${creditBalance.creditsRemaining} credits remaining)`}
-                    </span>
-                  </>
-                ) : (
-                  creditBalance ?? '—'
-                )}
-              </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="card">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Credit Balance</h3>
+                <p className="text-3xl font-bold text-primary-600 mt-2">
+                  {creditsLoading ? (
+                    <span className="animate-pulse bg-gray-200 h-8 w-24 inline-block rounded" />
+                  ) : creditBalance && typeof creditBalance === 'object' ? (
+                    <>
+                      {creditBalance.balance ?? '—'}
+                      <span className="block text-sm text-gray-500 mt-1">
+                        {typeof creditBalance.creditsRemaining !== 'undefined' && `(${creditBalance.creditsRemaining} credits remaining)`}
+                      </span>
+                    </>
+                  ) : (
+                    creditBalance ?? '—'
+                  )}
+                </p>
+              </div>
+              <CreditCard className="h-8 w-8 text-primary-400" />
             </div>
-            <CreditCard className="h-8 w-8 text-primary-400" />
           </div>
-        </div>
-        <div className="card">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="text-lg font-semibold text-gray-900">API Key Preference</h3>
-              <p className="text-lg mt-2">
-                {byokLoading ? <span className="animate-pulse bg-gray-200 h-6 w-32 inline-block rounded" /> : (apiKeyPreference?.mode ?? '—')}
-              </p>
+          <div className="card">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">API Key Preference</h3>
+                <p className="text-lg mt-2">
+                  {byokLoading ? <span className="animate-pulse bg-gray-200 h-6 w-32 inline-block rounded" /> : (apiKeyPreference?.mode ?? '—')}
+                </p>
+              </div>
+              <BarChart3 className="h-8 w-8 text-purple-400" />
             </div>
-            <BarChart3 className="h-8 w-8 text-purple-400" />
           </div>
         </div>
       </div>
 
 
       {/* Quick Actions */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-4">
         {quickActions.map((action) => {
           const Icon = action.icon;
           return (
@@ -265,7 +267,7 @@ const Dashboard = () => {
       </div>
 
       {/* Recent Posts */}
-      <div className="card">
+      <div className="card mt-6">
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-lg font-semibold text-gray-900">Recent Posts</h3>
           <Link

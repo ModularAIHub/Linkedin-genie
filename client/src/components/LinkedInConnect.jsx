@@ -143,16 +143,19 @@ const LinkedInConnect = () => {
 
       {/* Connect New Account Button */}
       {accounts.length === 0 && !accountsLoading && (
-        <div className="card p-4 flex items-center gap-4">
-          <Linkedin className="h-8 w-8 text-blue-700" />
-          <div className="flex-1">
-            <h3 className="font-semibold text-gray-900">LinkedIn Account</h3>
+        <div className="card p-6 flex flex-col items-center gap-4 bg-gradient-to-br from-blue-50 to-white border border-blue-100 shadow-lg rounded-xl text-center">
+          <div className="flex flex-col items-center gap-2">
+            <div className="bg-blue-100 rounded-full p-4 mb-2">
+              <Linkedin className="h-10 w-10 text-blue-700" />
+            </div>
+            <h3 className="font-bold text-lg text-gray-900">Connect your LinkedIn Account</h3>
+            <p className="text-gray-600 text-sm max-w-xs mb-2">To use SuiteGenie, please connect your LinkedIn account. This enables posting, analytics, and more features.</p>
             <button
-              className="btn btn-primary mt-2"
+              className="btn btn-primary mt-2 px-6 py-2 text-base rounded-lg shadow hover:bg-blue-700 transition-all"
               onClick={handleConnect}
               disabled={connecting}
             >
-              <ExternalLink className="h-4 w-4 mr-1 inline" />
+              <ExternalLink className="h-4 w-4 mr-2 inline" />
               {connecting ? 'Connecting...' : 'Connect LinkedIn'}
             </button>
           </div>
