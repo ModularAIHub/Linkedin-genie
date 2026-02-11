@@ -123,15 +123,14 @@ const LinkedInPostComposer = () => {
           </span>
         )}
       </div>
-  <div className="max-w-4xl mx-auto px-4 sm:px-8 lg:px-16 py-8">
+  <div className="max-w-4xl mx-auto px-2 sm:px-4 lg:px-16 py-4 sm:py-8">
         {/* LinkedIn Account Info */}
         <LinkedInAccountInfo />
 
         {/* Composer Card - Modern UI */}
-  <div className="bg-white rounded-2xl shadow-xl p-6 md:p-10 border border-gray-100 mt-6 max-w-3xl mx-auto">
+  <div className="bg-white rounded-2xl shadow-xl p-3 sm:p-6 md:p-10 border border-gray-100 mt-4 sm:mt-6 max-w-full sm:max-w-3xl mx-auto">
           {/* Card Header */}
           <div className="flex items-center mb-4">
-            <svg className="h-7 w-7 text-[#0077B5] mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 01.88 7.9M12 3v1m0 16v1m8.66-13.66l-.7.7M4.34 19.66l-.7.7M21 12h-1M4 12H3m16.66 7.66l-.7-.7M4.34 4.34l-.7-.7" /></svg>
             <h2 className="text-xl md:text-2xl font-bold text-gray-900">Compose LinkedIn Post</h2>
           </div>
 

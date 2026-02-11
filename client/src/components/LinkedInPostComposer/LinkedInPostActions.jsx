@@ -23,38 +23,38 @@ const LinkedInPostActions = ({
   // Detect user's timezone
   const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   return (
-    <div className="flex space-x-3">
+    <div className="flex flex-col gap-2 sm:flex-row sm:space-x-3 w-full">
       <button
         onClick={onPost}
         disabled={!canPost || isPosting}
-        className="flex-1 flex items-center justify-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+        className="w-full sm:w-auto sm:flex-1 flex items-center justify-center px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-md font-semibold text-base transition-all"
       >
         {isPosting ? (
           <>
-            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
             Posting...
           </>
         ) : (
           <>
-            <Send className="h-4 w-4 mr-2" />
-            {isCarousel ? 'Post Carousel' : 'Post'}
+            <Send className="h-5 w-5 mr-2" />
+            {isCarousel ? 'Post Carousel Now' : 'Post Now'}
           </>
         )}
       </button>
       <button
         onClick={() => setShowScheduleModal(true)}
         disabled={!canPost || isScheduling}
-        className="flex items-center px-4 py-2 border border-gray-300 text-gray-700 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+        className="w-full sm:w-auto sm:flex-1 flex items-center justify-center px-6 py-3 border-2 border-blue-600 text-blue-600 bg-white rounded-lg hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm font-medium text-base transition-all"
       >
         {isScheduling ? (
           <>
-            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-[#0077B5] mr-2"></div>
+            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600 mr-2"></div>
             Scheduling...
           </>
         ) : (
           <>
-            <Calendar className="h-4 w-4 mr-2" />
-            Schedule
+            <Calendar className="h-5 w-5 mr-2" />
+            Schedule for Later
           </>
         )}
       </button>
