@@ -1,6 +1,5 @@
 
-
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Linkedin, ExternalLink, CheckCircle, Users } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { linkedin } from '../utils/api';
@@ -21,16 +20,39 @@ async function fetchUserStatus() {
 const LinkedInConnect = () => {
   const { accounts, loading: accountsLoading, refreshAccounts } = useAccount();
   const [connecting, setConnecting] = useState(false);
+  const oauthMessageReceivedRef = useRef(false);
+
+  const refreshAccountsWithRetry = async () => {
+    try {
+      await refreshAccounts();
+      setTimeout(() => {
+        refreshAccounts().catch(() => {});
+      }, 1200);
+    } catch {
+      // Ignore and let normal UI fetch cycle continue
+    }
+  };
 
   useEffect(() => {
+    const allowedOrigins = new Set([window.location.origin]);
+    try {
+      const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:3004';
+      const apiOrigin = new URL(apiBaseUrl).origin;
+      allowedOrigins.add(apiOrigin);
+    } catch {
+      // Ignore malformed URL env values
+    }
+
     // Listen for postMessage from OAuth popup
-    const handlePopupMessage = (event) => {
-      if (event.origin !== window.location.origin) return;
+    const handlePopupMessage = async (event) => {
+      if (!allowedOrigins.has(event.origin)) return;
       if (event.data.type === 'linkedin_auth_success') {
+        oauthMessageReceivedRef.current = true;
         toast.success('LinkedIn account connected!');
         setConnecting(false);
-        refreshAccounts();
+        await refreshAccountsWithRetry();
       } else if (event.data.type === 'linkedin_auth_error') {
+        oauthMessageReceivedRef.current = true;
         toast.error('LinkedIn authentication failed.');
         setConnecting(false);
       }
@@ -40,10 +62,11 @@ const LinkedInConnect = () => {
   }, [refreshAccounts]);
 
   const handleConnect = async () => {
+    oauthMessageReceivedRef.current = false;
     setConnecting(true);
     try {
       const response = await linkedin.connect();
-      const oauthUrl = response.data.url + '&popup=true';
+      const oauthUrl = response.data.url;
       const popup = window.open(
         oauthUrl,
         'linkedin-oauth',
@@ -59,6 +82,11 @@ const LinkedInConnect = () => {
         if (popup.closed) {
           clearInterval(checkPopup);
           setConnecting(false);
+          // Always refresh after popup closes so newly linked account appears
+          refreshAccountsWithRetry();
+          if (!oauthMessageReceivedRef.current) {
+            toast.success('LinkedIn connection completed. Refreshing accounts...');
+          }
         }
       }, 1000);
     } catch (error) {

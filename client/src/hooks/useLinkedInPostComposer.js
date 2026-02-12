@@ -30,8 +30,8 @@ const useLinkedInPostComposer = () => {
   const handleImageUpload = async (event) => {
     const files = Array.from(event.target.files);
     const validFiles = files.filter(file => file.type.startsWith('image/') && file.size <= 5 * 1024 * 1024);
-    if (selectedImages.length + validFiles.length > 4) {
-      toast.error('Maximum 4 images allowed per post');
+    if (selectedImages.length + validFiles.length > 9) {
+      toast.error('Maximum 9 images allowed per post');
       return;
     }
     setIsUploadingImages(true);
