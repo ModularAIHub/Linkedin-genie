@@ -14,12 +14,53 @@ const newPlatformPool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
 });
 
+function sendPopupResult(res, messageType, payload = {}, message = 'Authentication complete. You can close this window.') {
+  const eventData = JSON.stringify({ type: messageType, ...payload })
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e');
+  const safeMessage = String(message).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  // Helmet default CSP/COOP can block inline script and sever opener for popup callbacks.
+  // Override only for this tiny callback page.
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; base-uri 'self'; object-src 'none'");
+  res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
+
+  return res.send(`
+    <html>
+      <body>
+        <script>
+          try {
+            if (window.opener) {
+              window.opener.postMessage(${eventData}, '*');
+            }
+          } catch (e) {}
+          window.close();
+          // Chrome fallback for some popup states
+          setTimeout(function () {
+            try { window.open('', '_self'); } catch (e) {}
+            try { window.close(); } catch (e) {}
+          }, 20);
+        </script>
+        <p>${safeMessage}</p>
+      </body>
+    </html>
+  `);
+}
+
 // Start LinkedIn OAuth: return LinkedIn OAuth URL for popup
 export function startOAuth(req, res) {
   // Debug log to check env values
   console.log('DEBUG LINKEDIN_CLIENT_ID:', config.getLinkedInClientId());
   console.log('DEBUG LINKEDIN_REDIRECT_URI:', config.getLinkedInRedirectUri());
-  const state = Math.random().toString(36).substring(2, 15); // Simple random state
+  const popup = String(req.query.popup || '').toLowerCase() === 'true';
+  const state = `personal_${Math.random().toString(36).substring(2, 15)}`;
+  stateStore.set(state, {
+    popup,
+    timestamp: Date.now()
+  });
+  setTimeout(() => {
+    stateStore.delete(state);
+  }, 10 * 60 * 1000);
   const params = new URLSearchParams({
     response_type: 'code',
     client_id: config.getLinkedInClientId(),
@@ -39,7 +80,11 @@ export async function handleOAuthCallback(req, res) {
   
   // Check if this is a team connection (state starts with 'team_')
   const isTeamConnection = state && state.startsWith('team_');
-  const stateData = isTeamConnection ? stateStore.get(state) : null;
+  const stateData = state ? stateStore.get(state) : null;
+  const isPopupFlow = !isTeamConnection && !!stateData?.popup;
+  if (state && !isTeamConnection) {
+    stateStore.delete(state);
+  }
   
   try {
     // Debug log for OAuth params
@@ -349,6 +394,14 @@ export async function handleOAuthCallback(req, res) {
       
       // If user has organizations, redirect to selection page
       if (organizations.length > 0) {
+        if (isPopupFlow) {
+          return sendPopupResult(
+            res,
+            'linkedin_auth_success',
+            { organizations, selectAccount: true },
+            'LinkedIn connected. Please continue in the original tab.'
+          );
+        }
         const clientUrl = process.env.CLIENT_URL || 'http://localhost:5175';
         const orgsParam = encodeURIComponent(JSON.stringify(organizations));
         return res.redirect(`${clientUrl}/settings?linkedin_connected=true&select_account=true&organizations=${orgsParam}`);
@@ -363,35 +416,31 @@ export async function handleOAuthCallback(req, res) {
         teamId: req.user.team_id,
         email: userInfo.email
       });
-      return res.send(`
-        <html>
-          <body>
-            <script>
-              window.opener && window.opener.postMessage({ type: 'linkedin_auth_error', reason: 'in_team' }, window.origin);
-              window.close();
-            </script>
-            <h2>Personal LinkedIn account not available</h2>
-            <p>Your account is part of a team. Only team accounts can be connected in this workspace.</p>
-            <p>If you believe this is a mistake, please contact support or your team admin.</p>
-          </body>
-        </html>
-      `);
+      return sendPopupResult(
+        res,
+        'linkedin_auth_error',
+        { reason: 'in_team' },
+        'Personal LinkedIn account not available for this workspace.'
+      );
     }
-    res.send(`
-      <html>
-        <body>
-          <script>
-            window.opener && window.opener.postMessage({ type: 'linkedin_auth_success' }, window.origin);
-            window.close();
-          </script>
-          <p>LinkedIn account connected! You can close this window.</p>
-        </body>
-      </html>
-    `);
+    return sendPopupResult(
+      res,
+      'linkedin_auth_success',
+      {},
+      'LinkedIn account connected! You can close this window.'
+    );
   } catch (error) {
     console.error('OAuth callback error:', error?.response?.data || error.message, error.stack);
+    if (isPopupFlow) {
+      return sendPopupResult(
+        res,
+        'linkedin_auth_error',
+        { reason: 'oauth_failed', message: error.message },
+        `LinkedIn authentication failed: ${error.message}`
+      );
+    }
     const clientUrl = process.env.CLIENT_URL || 'http://localhost:5175';
-    res.redirect(`${clientUrl}/settings?error=oauth_failed&message=${encodeURIComponent(error.message)}`);
+    return res.redirect(`${clientUrl}/settings?error=oauth_failed&message=${encodeURIComponent(error.message)}`);
   }
 }
 

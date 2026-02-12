@@ -1,7 +1,7 @@
 // LinkedIn endpoints (parity with Twitter endpoints)
 export const linkedin = {
   getStatus: () => api.get('/api/linkedin/status'),
-  connect: () => api.get('/api/linkedin/connect'),
+  connect: () => api.get('/api/linkedin/connect', { params: { popup: 'true' } }),
   disconnect: () => api.post('/api/linkedin/disconnect'),
   getProfile: () => api.get('/api/linkedin/profile'),
   uploadImageBase64: (base64, mimetype, filename) =>
