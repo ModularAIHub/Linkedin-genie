@@ -1,17 +1,51 @@
 
 import { pool } from '../config/database.js';
-import { Queue } from 'bullmq';
 import { create, findByUser, findById, updateStatus, deleteById } from '../models/scheduledPostModel.js';
-import dotenv from 'dotenv';
-dotenv.config();
 import { DateTime } from 'luxon';
-
-const scheduleQueue = new Queue('linkedin-schedule', {
-  connection: {
-    url: process.env.REDIS_URL,
-  },
-});
+import { logger } from '../utils/logger.js';
+import { getLinkedinSchedulerStatus } from '../workers/linkedinScheduler.js';
 // LinkedIn Genie Schedule Controller
+
+const isMeaningfulAccountId = (value) =>
+  value !== undefined && value !== null && String(value) !== '' && String(value) !== 'null' && String(value) !== 'undefined';
+
+async function resolveTeamAccountForUser(userId, rawAccountId) {
+  if (!isMeaningfulAccountId(rawAccountId)) {
+    return null;
+  }
+
+  const normalizedId = String(rawAccountId);
+  const isUUID = normalizedId.includes('-');
+
+  if (isUUID) {
+    const { rows } = await pool.query(
+      `SELECT lta.id, lta.team_id, lta.access_token, lta.linkedin_user_id
+       FROM linkedin_team_accounts lta
+       JOIN team_members tm ON tm.team_id = lta.team_id
+       WHERE lta.team_id::text = $1
+         AND lta.active = true
+         AND tm.user_id = $2
+         AND tm.status = 'active'
+       ORDER BY lta.updated_at DESC NULLS LAST, lta.id DESC
+       LIMIT 1`,
+      [normalizedId, userId]
+    );
+    return rows[0] || null;
+  }
+
+  const { rows } = await pool.query(
+    `SELECT lta.id, lta.team_id, lta.access_token, lta.linkedin_user_id
+     FROM linkedin_team_accounts lta
+     JOIN team_members tm ON tm.team_id = lta.team_id
+     WHERE lta.id = $1::int
+       AND lta.active = true
+       AND tm.user_id = $2
+       AND tm.status = 'active'
+     LIMIT 1`,
+    [normalizedId, userId]
+  );
+  return rows[0] || null;
+}
 
 
 // Schedule a LinkedIn post
@@ -19,8 +53,16 @@ export async function schedulePost(req, res) {
   try {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-    const { post_content, media_urls, post_type, company_id, scheduled_time, user_timezone } = req.body;
+    const { post_content, media_urls, post_type, company_id, account_id, scheduled_time, user_timezone } = req.body;
     if (!post_content || !scheduled_time) return res.status(400).json({ error: 'Missing post content or scheduled time' });
+
+    const selectedAccountId = account_id || req.headers['x-selected-account-id'] || company_id;
+    const teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId);
+
+    if (isMeaningfulAccountId(selectedAccountId) && !teamAccount) {
+      return res.status(403).json({ error: 'Selected LinkedIn team account not found or access denied' });
+    }
+
     // Convert local time + timezone to UTC
     let scheduledTimeUtc;
     if (user_timezone) {
@@ -28,16 +70,21 @@ export async function schedulePost(req, res) {
     } else {
       scheduledTimeUtc = DateTime.fromISO(scheduled_time).toUTC().toISO();
     }
-    // Save to DB
-    let fixedCompanyId = company_id;
-    // If company_id is present and not a valid UUID, try to fetch the UUID from the team table
-    if (company_id && !/^[0-9a-fA-F-]{36}$/.test(company_id)) {
-      // Try to find the team with this integer id
-      const { rows: teamRows } = await pool.query('SELECT team_id FROM team_members WHERE team_id = $1::text OR id = $1::int LIMIT 1', [company_id]);
-      if (teamRows.length > 0) {
-        fixedCompanyId = teamRows[0].team_id;
-      }
+
+    let linkedinAccessToken = req.user?.linkedinAccessToken;
+    let authorUrn = req.user?.linkedinUrn;
+    const fixedCompanyId = teamAccount ? teamAccount.team_id : null;
+
+    if (teamAccount) {
+      linkedinAccessToken = teamAccount.access_token;
+      authorUrn = `urn:li:person:${teamAccount.linkedin_user_id}`;
     }
+
+    if (!linkedinAccessToken || !authorUrn) {
+      return res.status(400).json({ error: 'LinkedIn account not connected' });
+    }
+
+    // Save to DB
     const scheduledPost = await create({
       user_id: userId,
       post_content,
@@ -47,42 +94,14 @@ export async function schedulePost(req, res) {
       scheduled_time: scheduledTimeUtc,
       status: 'scheduled'
     });
-    // Determine LinkedIn credentials for team/company posts
-    let linkedinAccessToken = req.user?.linkedinAccessToken;
-    let authorUrn = req.user?.linkedinUrn;
-    if (fixedCompanyId && fixedCompanyId !== 'null' && fixedCompanyId !== 'undefined') {
-      // Fetch team account credentials
-      const { rows: teamAccountRows } = await pool.query(
-        `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE team_id = $1 AND active = true LIMIT 1`,
-        [fixedCompanyId]
-      );
-      if (teamAccountRows.length > 0) {
-        linkedinAccessToken = teamAccountRows[0].access_token;
-        authorUrn = `urn:li:person:${teamAccountRows[0].linkedin_user_id}`;
-      }
-    }
-    // Enqueue job with correct credentials
-    const job = await scheduleQueue.add('publish', {
+
+    logger.info('[ScheduleController] Scheduled post created', {
       scheduledPostId: scheduledPost.id,
-      linkedinAccessToken,
-      authorUrn,
-      postContent: post_content,
-      mediaUrls: media_urls,
-      postType: post_type,
-      companyId: fixedCompanyId
-    }, {
-      delay: Math.max(0, DateTime.fromISO(scheduledTimeUtc).toMillis() - Date.now()),
-      attempts: 3
-    });
-    console.log('[ScheduleController] Scheduled job created:', {
-      jobId: job.id,
-      scheduledPostId: scheduledPost.id,
-      scheduledTimeUtc,
-      queue: 'linkedin-schedule'
+      scheduledTimeUtc
     });
     res.json({ success: true, scheduledPost });
   } catch (error) {
-    console.error('[schedulePost] Error:', error);
+    logger.error('[schedulePost] Error', error);
     res.status(500).json({ error: error.message });
   }
 }
@@ -93,14 +112,21 @@ export async function getScheduledPosts(req, res) {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     const { status, limit, offset } = req.query;
+    const selectedAccountId = req.headers['x-selected-account-id'];
+    const teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId);
+    const companyIds = teamAccount
+      ? [String(teamAccount.team_id), String(teamAccount.id)]
+      : undefined;
+
     const posts = await findByUser(userId, {
       status,
       limit: limit ? parseInt(limit) : 20,
-      offset: offset ? parseInt(offset) : 0
+      offset: offset ? parseInt(offset) : 0,
+      companyIds
     });
     res.json({ posts });
   } catch (error) {
-    console.error('[getScheduledPosts] Error:', error);
+    logger.error('[getScheduledPosts] Error', error);
     res.status(500).json({ error: error.message });
   }
 }
@@ -110,14 +136,142 @@ export async function cancelScheduledPost(req, res) {
   try {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-    const id = req.params.id;
+    const id = req.params.id || req.body?.id;
     const post = await findById(id);
     if (!post || post.user_id !== userId) return res.status(404).json({ error: 'Scheduled post not found' });
     await updateStatus(id, 'cancelled');
+    res.json({ success: true });
+  } catch (error) {
+    logger.error('[cancelScheduledPost] Error', error);
+    res.status(500).json({ error: error.message });
+  }
+}
+
+// Delete a scheduled LinkedIn post
+export async function deleteScheduledPost(req, res) {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const id = req.params.id;
+    const post = await findById(id);
+    if (!post || post.user_id !== userId) return res.status(404).json({ error: 'Scheduled post not found' });
     await deleteById(id, userId);
     res.json({ success: true });
   } catch (error) {
-    console.error('[cancelScheduledPost] Error:', error);
+    logger.error('[deleteScheduledPost] Error', error);
+    res.status(500).json({ error: error.message });
+  }
+}
+
+// Retry a failed scheduled LinkedIn post
+export async function retryFailedScheduledPost(req, res) {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const id = req.params.id || req.body?.id;
+    if (!id) return res.status(400).json({ error: 'Scheduled post id is required' });
+
+    const post = await findById(id);
+    if (!post || post.user_id !== userId) return res.status(404).json({ error: 'Scheduled post not found' });
+
+    if (post.status !== 'failed') {
+      return res.status(400).json({ error: 'Only failed scheduled posts can be retried' });
+    }
+
+    let updatedRow = null;
+    try {
+      const { rows } = await pool.query(
+        `UPDATE scheduled_linkedin_posts
+         SET status = 'scheduled',
+             error_message = NULL,
+             retry_count = 0,
+             next_retry_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1 AND user_id = $2
+         RETURNING *`,
+        [id, userId]
+      );
+      updatedRow = rows[0] || null;
+    } catch (error) {
+      if (error?.code !== '42703') {
+        throw error;
+      }
+
+      // Backward compatibility before retry columns migration.
+      const { rows } = await pool.query(
+        `UPDATE scheduled_linkedin_posts
+         SET status = 'scheduled',
+             error_message = NULL,
+             updated_at = NOW()
+         WHERE id = $1 AND user_id = $2
+         RETURNING *`,
+        [id, userId]
+      );
+      updatedRow = rows[0] || null;
+    }
+
+    res.json({ success: true, post: updatedRow });
+  } catch (error) {
+    logger.error('[retryFailedScheduledPost] Error', error);
+    res.status(500).json({ error: error.message });
+  }
+}
+
+// Scheduler runtime status for debugging
+export async function getSchedulerStatus(req, res) {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const scheduler = getLinkedinSchedulerStatus();
+
+    let countsByStatus = {};
+    const { rows: statusRows } = await pool.query(
+      `SELECT status, COUNT(*)::int AS count
+       FROM scheduled_linkedin_posts
+       WHERE user_id = $1
+       GROUP BY status`,
+      [userId]
+    );
+    countsByStatus = statusRows.reduce((acc, row) => {
+      acc[row.status] = row.count;
+      return acc;
+    }, {});
+
+    let dueNowCount = 0;
+    try {
+      const { rows: dueRows } = await pool.query(
+        `SELECT COUNT(*)::int AS count
+         FROM scheduled_linkedin_posts
+         WHERE user_id = $1
+           AND status = 'scheduled'
+           AND COALESCE(next_retry_at, scheduled_time) <= NOW()`,
+        [userId]
+      );
+      dueNowCount = dueRows[0]?.count || 0;
+    } catch (error) {
+      if (error?.code !== '42703') throw error;
+      const { rows: fallbackRows } = await pool.query(
+        `SELECT COUNT(*)::int AS count
+         FROM scheduled_linkedin_posts
+         WHERE user_id = $1
+           AND status = 'scheduled'
+           AND scheduled_time <= NOW()`,
+        [userId]
+      );
+      dueNowCount = fallbackRows[0]?.count || 0;
+    }
+
+    res.json({
+      scheduler,
+      userQueue: {
+        countsByStatus,
+        dueNowCount
+      }
+    });
+  } catch (error) {
+    logger.error('[getSchedulerStatus] Error', error);
     res.status(500).json({ error: error.message });
   }
 }
@@ -128,10 +282,27 @@ export async function bulkSchedulePosts(req, res) {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     
-    const { items, frequency, startDate, postsPerDay = 1, dailyTimes = ['09:00'], daysOfWeek, images, timezone = 'UTC' } = req.body;
+    const { items, frequency, startDate, postsPerDay = 1, dailyTimes = ['09:00'], daysOfWeek, images, timezone = 'UTC', account_id } = req.body;
     
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'No items to schedule' });
+    }
+
+    const selectedAccountId = account_id || req.headers['x-selected-account-id'];
+    const teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId);
+
+    if (isMeaningfulAccountId(selectedAccountId) && !teamAccount) {
+      return res.status(403).json({ error: 'Selected LinkedIn team account not found or access denied' });
+    }
+
+    const linkedinAccessToken = teamAccount?.access_token || req.user?.linkedinAccessToken;
+    const authorUrn = teamAccount
+      ? `urn:li:person:${teamAccount.linkedin_user_id}`
+      : req.user?.linkedinUrn;
+    const companyId = teamAccount ? teamAccount.team_id : null;
+
+    if (!linkedinAccessToken || !authorUrn) {
+      return res.status(400).json({ error: 'LinkedIn account not connected' });
     }
     
     const scheduled = [];
@@ -190,22 +361,9 @@ export async function bulkSchedulePosts(req, res) {
         post_content: content,
         media_urls: media,
         post_type: 'text',
+        company_id: companyId,
         scheduled_time: scheduledForUTC,
         status: 'scheduled'
-      });
-      
-      // Enqueue job
-      const delay = Math.max(0, DateTime.fromISO(scheduledForUTC).toMillis() - Date.now());
-      await scheduleQueue.add('publish', {
-        scheduledPostId: scheduledPost.id,
-        linkedinAccessToken: req.user?.linkedinAccessToken,
-        authorUrn: req.user?.linkedinUrn,
-        postContent: content,
-        mediaUrls: media,
-        postType: 'text'
-      }, {
-        delay,
-        attempts: 3
       });
       
       scheduled.push({
@@ -219,7 +377,7 @@ export async function bulkSchedulePosts(req, res) {
     
     res.json({ success: true, scheduled, count: scheduled.length });
   } catch (error) {
-    console.error('[bulkSchedulePosts] Error:', error);
+    logger.error('[bulkSchedulePosts] Error', error);
     res.status(500).json({ error: error.message });
   }
 }

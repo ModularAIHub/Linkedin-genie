@@ -5,22 +5,13 @@ import toast from 'react-hot-toast';
 import { linkedin } from '../utils/api';
 import { useAccount } from '../contexts/AccountContext';
 
-// Helper to fetch user info if LinkedIn account is missing
-async function fetchUserStatus() {
-  try {
-    const res = await fetch('/api/user/status');
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data && data.user ? data.user : null;
-  } catch {
-    return null;
-  }
-}
+const OAUTH_RESULT_KEY = 'linkedin_oauth_result';
 
 const LinkedInConnect = () => {
   const { accounts, loading: accountsLoading, refreshAccounts } = useAccount();
   const [connecting, setConnecting] = useState(false);
   const oauthMessageReceivedRef = useRef(false);
+  const popupPollRef = useRef(null);
 
   const refreshAccountsWithRetry = async () => {
     try {
@@ -31,6 +22,21 @@ const LinkedInConnect = () => {
     } catch {
       // Ignore and let normal UI fetch cycle continue
     }
+  };
+
+  const handleOAuthResult = async (result) => {
+    const status = result?.status || (result?.type === 'linkedin_auth_error' ? 'error' : 'success');
+    if (status === 'success' || result?.type === 'linkedin_auth_success') {
+      oauthMessageReceivedRef.current = true;
+      toast.success('LinkedIn account connected!');
+      setConnecting(false);
+      await refreshAccountsWithRetry();
+      return;
+    }
+
+    oauthMessageReceivedRef.current = true;
+    setConnecting(false);
+    toast.error('LinkedIn authentication failed.');
   };
 
   useEffect(() => {
@@ -47,40 +53,87 @@ const LinkedInConnect = () => {
     const handlePopupMessage = async (event) => {
       if (!allowedOrigins.has(event.origin)) return;
       if (event.data.type === 'linkedin_auth_success') {
-        oauthMessageReceivedRef.current = true;
-        toast.success('LinkedIn account connected!');
-        setConnecting(false);
-        await refreshAccountsWithRetry();
+        await handleOAuthResult(event.data);
       } else if (event.data.type === 'linkedin_auth_error') {
-        oauthMessageReceivedRef.current = true;
-        toast.error('LinkedIn authentication failed.');
-        setConnecting(false);
+        await handleOAuthResult(event.data);
       }
     };
+
+    const handleStorage = async (event) => {
+      if (event.key !== OAUTH_RESULT_KEY || !event.newValue) return;
+      try {
+        const parsed = JSON.parse(event.newValue);
+        if (!parsed || Date.now() - (parsed.timestamp || 0) > 15 * 60 * 1000) return;
+        await handleOAuthResult(parsed);
+        localStorage.removeItem(OAUTH_RESULT_KEY);
+      } catch {
+        // Ignore malformed data.
+      }
+    };
+
+    const consumePendingOAuthResult = async () => {
+      try {
+        const cached = localStorage.getItem(OAUTH_RESULT_KEY);
+        if (!cached) return;
+        const parsed = JSON.parse(cached);
+        if (!parsed || Date.now() - (parsed.timestamp || 0) > 15 * 60 * 1000) {
+          localStorage.removeItem(OAUTH_RESULT_KEY);
+          return;
+        }
+        await handleOAuthResult(parsed);
+        localStorage.removeItem(OAUTH_RESULT_KEY);
+      } catch {
+        // Ignore malformed data.
+      }
+    };
+
+    consumePendingOAuthResult();
     window.addEventListener('message', handlePopupMessage);
-    return () => window.removeEventListener('message', handlePopupMessage);
+    window.addEventListener('storage', handleStorage);
+
+    return () => {
+      window.removeEventListener('message', handlePopupMessage);
+      window.removeEventListener('storage', handleStorage);
+      if (popupPollRef.current) {
+        clearInterval(popupPollRef.current);
+        popupPollRef.current = null;
+      }
+    };
   }, [refreshAccounts]);
 
   const handleConnect = async () => {
     oauthMessageReceivedRef.current = false;
     setConnecting(true);
     try {
-      const response = await linkedin.connect();
+      const isMobileLike = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent || '');
+      const response = await linkedin.connect({ popup: !isMobileLike });
       const oauthUrl = response.data.url;
+
+      if (isMobileLike) {
+        window.location.assign(oauthUrl);
+        return;
+      }
+
       const popup = window.open(
         oauthUrl,
         'linkedin-oauth',
         'width=600,height=700,scrollbars=yes,resizable=yes,location=yes,menubar=no,toolbar=no,status=yes'
       );
       if (!popup) {
-        toast.error('Popup was blocked. Please allow popups and try again.');
-        setConnecting(false);
+        toast('Popup blocked. Opening LinkedIn in this tab...');
+        window.location.assign(oauthUrl);
         return;
       }
+
+      if (popupPollRef.current) {
+        clearInterval(popupPollRef.current);
+      }
+
       // Monitor popup for completion
-      const checkPopup = setInterval(() => {
+      popupPollRef.current = setInterval(() => {
         if (popup.closed) {
-          clearInterval(checkPopup);
+          clearInterval(popupPollRef.current);
+          popupPollRef.current = null;
           setConnecting(false);
           // Always refresh after popup closes so newly linked account appears
           refreshAccountsWithRetry();

@@ -1,6 +1,54 @@
 import { pool } from '../config/database.js';
 import * as linkedinService from '../services/linkedinService.js';
 
+const isMeaningfulAccountId = (value) =>
+  value !== undefined && value !== null && String(value) !== '' && String(value) !== 'null' && String(value) !== 'undefined';
+
+async function resolveTeamAccountForUser(userId, rawAccountId, options = {}) {
+  const allowedRoles = Array.isArray(options.allowedRoles) ? options.allowedRoles : null;
+  if (!isMeaningfulAccountId(rawAccountId)) {
+    return null;
+  }
+
+  const normalizedId = String(rawAccountId);
+  const isUUID = normalizedId.includes('-');
+
+  if (isUUID) {
+    const { rows } = await pool.query(
+      `SELECT lta.id, lta.team_id, lta.access_token, lta.linkedin_user_id, tm.role AS member_role
+       FROM linkedin_team_accounts lta
+       JOIN team_members tm ON tm.team_id = lta.team_id
+       WHERE lta.team_id::text = $1
+         AND lta.active = true
+         AND tm.user_id = $2
+         AND tm.status = 'active'
+       ORDER BY lta.updated_at DESC NULLS LAST, lta.id DESC
+       LIMIT 1`,
+      [normalizedId, userId]
+    );
+    const row = rows[0] || null;
+    if (!row) return null;
+    if (allowedRoles && !allowedRoles.includes(row.member_role)) return null;
+    return row;
+  }
+
+  const { rows } = await pool.query(
+    `SELECT lta.id, lta.team_id, lta.access_token, lta.linkedin_user_id, tm.role AS member_role
+     FROM linkedin_team_accounts lta
+     JOIN team_members tm ON tm.team_id = lta.team_id
+     WHERE lta.id = $1::int
+       AND lta.active = true
+       AND tm.user_id = $2
+       AND tm.status = 'active'
+     LIMIT 1`,
+    [normalizedId, userId]
+  );
+  const row = rows[0] || null;
+  if (!row) return null;
+  if (allowedRoles && !allowedRoles.includes(row.member_role)) return null;
+  return row;
+}
+
 // Create a LinkedIn post (with media, carousels, etc.)
 export async function createPost(req, res) {
   console.log('[CREATE POST] Route called, req.body:', req.body, 'headers:', req.headers);
@@ -13,36 +61,19 @@ export async function createPost(req, res) {
     
     // Get account_id from request (for team accounts)
     const accountId = req.body.account_id || req.headers['x-selected-account-id'];
+    const selectedTeamAccount = await resolveTeamAccountForUser(user.id, accountId);
     
     let accessToken, authorUrn, teamAccountResult;
     
-    // If account_id is provided and not null, fetch team account credentials
-    if (accountId && accountId !== 'null' && accountId !== 'undefined') {
-      // Check if accountId looks like a UUID (has hyphens) vs an integer
-      const isUUID = String(accountId).includes('-');
-      if (isUUID) {
-        // Query by team_id if it's a UUID
-        console.log('[CREATE POST] Account ID is UUID, querying by team_id:', accountId);
-        teamAccountResult = await pool.query(
-          `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE team_id = $1 AND active = true LIMIT 1`,
-          [accountId]
-        );
-      } else {
-        // Query by id if it's an integer
-        console.log('[CREATE POST] Account ID is integer, querying by id:', accountId);
-        teamAccountResult = await pool.query(
-          `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE id = $1 AND active = true`,
-          [accountId]
-        );
-      }
-      
-      if (teamAccountResult.rows.length === 0) {
-        console.error('[CREATE POST ERROR] Team account not found for', isUUID ? 'team_id' : 'id', ':', accountId);
-        return res.status(400).json({ error: 'LinkedIn team account not found' });
-      }
-      
-      accessToken = teamAccountResult.rows[0].access_token;
-      authorUrn = `urn:li:person:${teamAccountResult.rows[0].linkedin_user_id}`;
+    if (isMeaningfulAccountId(accountId) && !selectedTeamAccount) {
+      return res.status(403).json({ error: 'Selected LinkedIn team account not found or access denied' });
+    }
+    
+    // If account_id is provided and valid, use the validated team credentials
+    if (selectedTeamAccount) {
+      teamAccountResult = { rows: [selectedTeamAccount] };
+      accessToken = selectedTeamAccount.access_token;
+      authorUrn = `urn:li:person:${selectedTeamAccount.linkedin_user_id}`;
       console.log('[CREATE POST] Using team account credentials');
     } else {
       // Fallback to personal account
@@ -64,9 +95,8 @@ export async function createPost(req, res) {
     
     let { post_content, media_urls = [], post_type = 'single_post', company_id } = req.body;
     // If posting to a team account, set company_id to selectedAccountId
-    if (accountId && accountId !== 'null' && accountId !== 'undefined') {
-      // If posting as a company/team, ensure company_id is set and authorUrn is organization URN
-      company_id = accountId;
+    if (selectedTeamAccount) {
+      company_id = selectedTeamAccount.team_id;
     }
     if (!post_content) return res.status(400).json({ error: 'Post content is required' });
 
@@ -75,7 +105,7 @@ export async function createPost(req, res) {
 
     // Determine linkedin_user_id (the LinkedIn user who created the post)
     let linkedin_user_id = null;
-    if (accountId && accountId !== 'null' && accountId !== 'undefined') {
+    if (selectedTeamAccount) {
       // Team account: get from teamAccountResult
       linkedin_user_id = teamAccountResult.rows[0].linkedin_user_id;
     } else {
@@ -122,19 +152,20 @@ export async function getPosts(req, res) {
     const { page = 1, limit = 20, status } = req.query;
     const offset = (page - 1) * limit;
     const selectedAccountId = req.headers['x-selected-account-id'];
+    const selectedTeamAccount = await resolveTeamAccountForUser(req.user.id, selectedAccountId);
     let whereClause;
     let params = [];
-    if (selectedAccountId && selectedAccountId !== 'null' && selectedAccountId !== 'undefined') {
-      // Team account mode: fetch all posts for this account (use company_id)
-      whereClause = 'WHERE company_id = $1';
-      params = [selectedAccountId];
+    if (selectedTeamAccount) {
+      // Team account mode: only show posts created for this team account scope.
+      whereClause = 'WHERE company_id::text = ANY($1::text[])';
+      params = [[String(selectedTeamAccount.team_id), String(selectedTeamAccount.id)]];
     } else {
-      // Personal account mode: fetch only user's posts
+      // Personal fallback: always show user's posts (prevents stale browser headers from hiding data).
       whereClause = 'WHERE user_id = $1';
       params = [req.user.id];
     }
     if (status && status !== 'all') {
-      whereClause += ' AND status = $2';
+      whereClause += ` AND status = $${params.length + 1}`;
       params.push(status);
     }
     const sql = `SELECT * FROM linkedin_posts ${whereClause} ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
@@ -177,6 +208,7 @@ export async function deletePost(req, res) {
     
     // Get account_id from headers only (DELETE requests don't have body)
     const accountId = req.headers['x-selected-account-id'];
+    const selectedTeamAccount = await resolveTeamAccountForUser(userId, accountId, { allowedRoles: ['owner', 'admin'] });
     
     // Try to find post by user first
     let { rows } = await pool.query(
@@ -192,24 +224,13 @@ export async function deletePost(req, res) {
 
     // If not found, try to find post by company_id and check team membership/role (only owner/admin can delete)
     if (rows.length === 0) {
-      const teamAccountId = req.headers['x-selected-account-id'];
-      if (teamAccountId && teamAccountId !== 'null' && teamAccountId !== 'undefined') {
-        // Check role for this user in the team
-        const { rows: memberRows } = await pool.query(
-          `SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2 AND status = 'active'`,
-          [teamAccountId, userId]
-        );
-        if (memberRows.length > 0 && (memberRows[0].role === 'owner' || memberRows[0].role === 'admin')) {
-          // Only allow if user is owner or admin
-          rows = (await pool.query(
-            `SELECT p.* FROM linkedin_posts p
-             WHERE (p.id::text = $1::text OR p.linkedin_post_id::text = $1::text) AND p.company_id::text = $2::text`,
-            [id, teamAccountId]
-          )).rows;
-        } else {
-          // Not allowed
-          return res.status(403).json({ error: 'Only team owners and admins can delete posts for this team.' });
-        }
+      if (selectedTeamAccount) {
+        rows = (await pool.query(
+          `SELECT p.* FROM linkedin_posts p
+           WHERE (p.id::text = $1::text OR p.linkedin_post_id::text = $1::text)
+             AND p.company_id::text = ANY($2::text[])`,
+          [id, [String(selectedTeamAccount.team_id), String(selectedTeamAccount.id)]]
+        )).rows;
       }
     }
 

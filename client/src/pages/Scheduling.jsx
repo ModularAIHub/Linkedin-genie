@@ -1,24 +1,35 @@
 import React, { useState, useEffect } from 'react';
-import { Calendar, Clock, Edit3, Trash2, Play, Pause, CalendarCheck, AlertCircle, CheckCircle, XCircle, RefreshCw } from 'lucide-react';
-import api from '../utils/api';
+import { Calendar, Clock, Trash2, Pause, CalendarCheck, AlertCircle, CheckCircle, XCircle, RefreshCw, RotateCcw } from 'lucide-react';
 import LoadingSpinner from '../components/LoadingSpinner';
+import { useAccountAwareAPI } from '../hooks/useAccountAwareAPI';
 
 const Scheduling = () => {
+  const { fetchForCurrentAccount, accountId } = useAccountAwareAPI();
   const [scheduledPosts, setScheduledPosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('scheduled');
+  const [schedulerInfo, setSchedulerInfo] = useState(null);
 
   useEffect(() => {
     fetchScheduledPosts();
-  }, [filter]);
+  }, [filter, accountId]);
 
   const fetchScheduledPosts = async () => {
     try {
       setLoading(true);
-  const response = await api.get(`/api/schedule?status=${filter}`);
-  setScheduledPosts(response.data.posts || []);
-    } catch (error) {
-      // Optionally handle error
+      const response = await fetchForCurrentAccount(`/api/schedule?status=${encodeURIComponent(filter)}`);
+      const data = response.ok ? await response.json() : { posts: [] };
+      setScheduledPosts(data.posts || []);
+
+      try {
+        const schedulerResponse = await fetchForCurrentAccount('/api/schedule/status');
+        const schedulerData = schedulerResponse.ok ? await schedulerResponse.json() : null;
+        setSchedulerInfo(schedulerData);
+      } catch {
+        setSchedulerInfo(null);
+      }
+    } catch {
+      setScheduledPosts([]);
     } finally {
       setLoading(false);
     }
@@ -26,20 +37,37 @@ const Scheduling = () => {
 
   const handleCancel = async (scheduleId) => {
     try {
-      await api.post(`/api/schedule/cancel`, { id: scheduleId });
+      await fetchForCurrentAccount('/api/schedule/cancel', {
+        method: 'POST',
+        body: JSON.stringify({ id: scheduleId })
+      });
       fetchScheduledPosts();
-    } catch (error) {
-      // Optionally handle error
+    } catch {
+      // Keep page responsive even when cancel request fails.
     }
   };
 
   const handleDelete = async (scheduleId) => {
     if (!window.confirm('Are you sure you want to delete this scheduled post?')) return;
     try {
-      await api.delete(`/api/schedule/${scheduleId}`);
+      await fetchForCurrentAccount(`/api/schedule/${scheduleId}`, {
+        method: 'DELETE'
+      });
       fetchScheduledPosts();
-    } catch (error) {
-      // Optionally handle error
+    } catch {
+      // Keep page responsive even when delete request fails.
+    }
+  };
+
+  const handleRetry = async (scheduleId) => {
+    try {
+      await fetchForCurrentAccount('/api/schedule/retry', {
+        method: 'POST',
+        body: JSON.stringify({ id: scheduleId })
+      });
+      fetchScheduledPosts();
+    } catch {
+      // Keep page responsive even when retry request fails.
     }
   };
 
@@ -79,12 +107,34 @@ const Scheduling = () => {
     );
   };
 
+  const getMediaCount = (mediaUrls) => {
+    if (Array.isArray(mediaUrls)) {
+      return mediaUrls.length;
+    }
+    if (typeof mediaUrls === 'string' && mediaUrls.trim()) {
+      try {
+        const parsed = JSON.parse(mediaUrls);
+        return Array.isArray(parsed) ? parsed.length : 0;
+      } catch {
+        return 0;
+      }
+    }
+    return 0;
+  };
+
   const filterButtons = [
     { key: 'scheduled', label: 'Scheduled', icon: Clock, color: 'blue' },
     { key: 'completed', label: 'Posted', icon: CheckCircle, color: 'green' },
     { key: 'failed', label: 'Failed', icon: AlertCircle, color: 'red' },
     { key: 'cancelled', label: 'Cancelled', icon: XCircle, color: 'gray' }
   ];
+
+  const activeFilterClasses = {
+    blue: 'bg-blue-100 text-blue-700 ring-2 ring-blue-500 ring-offset-1',
+    green: 'bg-green-100 text-green-700 ring-2 ring-green-500 ring-offset-1',
+    red: 'bg-red-100 text-red-700 ring-2 ring-red-500 ring-offset-1',
+    gray: 'bg-gray-200 text-gray-700 ring-2 ring-gray-400 ring-offset-1'
+  };
 
   if (loading) {
     return (
@@ -114,6 +164,23 @@ const Scheduling = () => {
         </button>
       </div>
 
+      {schedulerInfo?.scheduler && (
+        <div className="bg-blue-50 border border-blue-100 rounded-lg p-3 text-sm text-blue-800">
+          <span className="font-medium">Scheduler:</span>{' '}
+          {schedulerInfo.scheduler.started ? 'running' : 'stopped'}
+          {' · '}
+          <span>Last tick: {schedulerInfo.scheduler.lastTick?.status || 'unknown'}</span>
+          {' · '}
+          <span>Due now: {schedulerInfo.userQueue?.dueNowCount ?? 0}</span>
+          {schedulerInfo.scheduler.nextRunInMs !== null && (
+            <>
+              {' · '}
+              <span>Next run in {Math.ceil((schedulerInfo.scheduler.nextRunInMs || 0) / 1000)}s</span>
+            </>
+          )}
+        </div>
+      )}
+
       {/* Filter Tabs */}
       <div className="flex flex-wrap gap-2">
         {filterButtons.map(({ key, label, icon: Icon, color }) => (
@@ -122,7 +189,7 @@ const Scheduling = () => {
             onClick={() => setFilter(key)}
             className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all
               ${filter === key 
-                ? `bg-${color}-100 text-${color}-700 ring-2 ring-${color}-500 ring-offset-1` 
+                ? activeFilterClasses[color]
                 : 'bg-white text-gray-600 hover:bg-gray-50 border border-gray-200'
               }`}
           >
@@ -170,16 +237,18 @@ const Scheduling = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {scheduledPosts.map(post => (
+                {scheduledPosts.map((post) => {
+                  const mediaCount = getMediaCount(post.media_urls);
+                  return (
                   <tr key={post.id} className="hover:bg-gray-50 transition-colors">
                     <td className="px-6 py-4">
                       <div className="max-w-md">
                         <p className="text-sm text-gray-900 line-clamp-2" title={post.post_content}>
                           {post.post_content}
                         </p>
-                        {post.media_urls && post.media_urls.length > 0 && (
+                        {mediaCount > 0 && (
                           <span className="inline-flex items-center gap-1 mt-1 text-xs text-gray-500">
-                            📷 {post.media_urls.length} media
+                            {mediaCount} media
                           </span>
                         )}
                       </div>
@@ -204,6 +273,15 @@ const Scheduling = () => {
                             Cancel
                           </button>
                         )}
+                        {post.status === 'failed' && (
+                          <button
+                            onClick={() => handleRetry(post.id)}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 rounded-lg hover:bg-blue-100 transition-colors"
+                          >
+                            <RotateCcw size={14} />
+                            Retry
+                          </button>
+                        )}
                         <button 
                           onClick={() => handleDelete(post.id)}
                           className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
@@ -214,7 +292,8 @@ const Scheduling = () => {
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

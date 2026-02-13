@@ -4,7 +4,7 @@
 // Usage: node test-byok-integration.js
 
 import dotenv from 'dotenv';
-dotenv.config();
+dotenv.config({ quiet: true });
 
 import aiService from './services/aiService.js';
 import imageGenerationService from './services/imageGenerationService.js';

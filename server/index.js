@@ -16,8 +16,9 @@ import cleanupRoutes from './routes/cleanup.js';
 // Middleware imports
 import { requirePlatformLogin } from './middleware/requirePlatformLogin.js';
 import errorHandler from './middleware/errorHandler.js';
+import { logger } from './utils/logger.js';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 // Honeybadger configuration
 Honeybadger.configure({
@@ -57,10 +58,10 @@ app.use(cors({
     if (!origin) return callback(null, true);
     
     if (allowedOrigins.indexOf(origin) !== -1) {
-      console.log('[CORS] Allowed origin:', origin);
+      logger.debug('[CORS] Allowed origin', { origin });
       return callback(null, true);
     } else {
-      console.log('[CORS] Blocked origin:', origin);
+      logger.warn('[CORS] Blocked origin', { origin });
       return callback(new Error('Not allowed by CORS'));
     }
   },
@@ -132,9 +133,21 @@ export default app;
 // Only start server if not in serverless environment
 if (!process.env.VERCEL) {
   app.listen(PORT, () => {
-    console.log(`LinkedIn Genie backend listening on port ${PORT}`);
+    logger.info('LinkedIn Genie backend listening', { port: PORT });
   });
 }
 
-// Start BullMQ worker for scheduled LinkedIn posts
-import './workers/linkedinScheduler.js';
+const runSchedulerInApi = process.env.LINKEDIN_RUN_SCHEDULER_IN_API !== 'false';
+
+if (!process.env.VERCEL) {
+  if (runSchedulerInApi) {
+    const { startLinkedinScheduler } = await import('./workers/linkedinScheduler.js');
+    startLinkedinScheduler({ enabled: true }).catch((error) => {
+      logger.error('[LinkedIn Scheduler] Failed to start embedded scheduler in API process', error);
+    });
+  } else {
+    logger.info('[LinkedIn Scheduler] Embedded scheduler disabled in API process', {
+      hint: 'Run `npm run start:scheduler` in Linkedin-genie/server'
+    });
+  }
+}

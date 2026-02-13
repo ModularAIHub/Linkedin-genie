@@ -85,14 +85,14 @@ export const useAccountAwareAPI = () => {
    * Get scheduled posts for the currently selected account
    */
   const getScheduledPosts = async () => {
-    return fetchForCurrentAccount('/api/scheduling/scheduled');
+    return fetchForCurrentAccount('/api/schedule');
   };
 
   /**
    * Get post history for the currently selected account
    */
   const getPostHistory = async (page = 1, limit = 20) => {
-    return fetchForCurrentAccount(`/api/posts/history?page=${page}&limit=${limit}`);
+    return fetchForCurrentAccount(`/api/posts?page=${page}&limit=${limit}`);
   };
 
   /**
@@ -106,7 +106,7 @@ export const useAccountAwareAPI = () => {
    * Schedule a post using the currently selected account
    */
   const schedulePost = async (postData) => {
-    return postForCurrentAccount('/api/scheduling/schedule', postData);
+    return postForCurrentAccount('/api/schedule', postData);
   };
 
   return {

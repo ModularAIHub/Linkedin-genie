@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { History as HistoryIcon, MessageCircle, Heart, Share2, Eye, Calendar, Filter, Trash2, ExternalLink, RefreshCw } from 'lucide-react';
-import api, { posts, scheduling } from '../utils/api';
+import { History as HistoryIcon, MessageCircle, Calendar, Filter, Trash2, ExternalLink } from 'lucide-react';
+import { scheduling } from '../utils/api';
 import LoadingSpinner from '../components/LoadingSpinner';
 import toast from 'react-hot-toast';
 import { saveFilters, loadFilters, showError } from '../utils/filterUtils';
@@ -129,8 +129,9 @@ const History = () => {
       let fetchedPosts = data.posts || [];
       
       // Only fetch and merge completed/posted scheduled posts
-      const scheduledRes = await api.get('/api/schedule?status=completed');
-      const scheduledPosts = (scheduledRes.data.posts || [])
+      const scheduledRes = await fetchForCurrentAccount('/api/schedule?status=completed');
+      const scheduledData = scheduledRes.ok ? await scheduledRes.json() : { posts: [] };
+      const scheduledPosts = (scheduledData.posts || [])
         .filter(sp => sp.status === 'posted' || sp.status === 'completed')
         .map(sp => ({
           ...sp,
@@ -211,16 +212,6 @@ const History = () => {
     return null;
   };
 
-
-  // DEBUG: Log selectedAccount and accounts for troubleshooting
-  useEffect(() => {
-    if (selectedAccount && accounts) {
-      // eslint-disable-next-line no-console
-      console.log('[History] selectedAccount:', selectedAccount);
-      // eslint-disable-next-line no-console
-      console.log('[History] accounts:', accounts);
-    }
-  }, [selectedAccount, accounts]);
 
   // Improved: Only show disconnected if selectedAccount is not found by id or account_id in accounts
   // Improved: Match by id, account_id, or username for all account types
