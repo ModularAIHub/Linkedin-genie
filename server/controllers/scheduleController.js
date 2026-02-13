@@ -4,47 +4,43 @@ import { create, findByUser, findById, updateStatus, deleteById } from '../model
 import { DateTime } from 'luxon';
 import { logger } from '../utils/logger.js';
 import { getLinkedinSchedulerStatus } from '../workers/linkedinScheduler.js';
+import {
+  getUserTeamHints,
+  isMeaningfulAccountId,
+  resolveDefaultTeamAccountForUser,
+  resolveTeamAccountForUser
+} from '../utils/teamAccountScope.js';
 // LinkedIn Genie Schedule Controller
 
-const isMeaningfulAccountId = (value) =>
-  value !== undefined && value !== null && String(value) !== '' && String(value) !== 'null' && String(value) !== 'undefined';
+async function resolveTeamAdminAccount(req, userId) {
+  const selectedAccountId =
+    req.headers['x-selected-account-id'] || req.body?.account_id || req.body?.company_id;
+  const preferredTeamIds = getUserTeamHints(req.user);
+  let teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId, {
+    allowedRoles: ['owner', 'admin']
+  });
 
-async function resolveTeamAccountForUser(userId, rawAccountId) {
-  if (!isMeaningfulAccountId(rawAccountId)) {
-    return null;
+  if (!teamAccount && !isMeaningfulAccountId(selectedAccountId)) {
+    teamAccount = await resolveDefaultTeamAccountForUser(userId, {
+      allowedRoles: ['owner', 'admin'],
+      preferredTeamIds
+    });
   }
 
-  const normalizedId = String(rawAccountId);
-  const isUUID = normalizedId.includes('-');
+  return teamAccount;
+}
 
-  if (isUUID) {
-    const { rows } = await pool.query(
-      `SELECT lta.id, lta.team_id, lta.access_token, lta.linkedin_user_id
-       FROM linkedin_team_accounts lta
-       JOIN team_members tm ON tm.team_id = lta.team_id
-       WHERE lta.team_id::text = $1
-         AND lta.active = true
-         AND tm.user_id = $2
-         AND tm.status = 'active'
-       ORDER BY lta.updated_at DESC NULLS LAST, lta.id DESC
-       LIMIT 1`,
-      [normalizedId, userId]
-    );
-    return rows[0] || null;
-  }
+function getScopedCompanyIds(teamAccount) {
+  if (!teamAccount) return [];
+  return [String(teamAccount.team_id), String(teamAccount.id)];
+}
 
-  const { rows } = await pool.query(
-    `SELECT lta.id, lta.team_id, lta.access_token, lta.linkedin_user_id
-     FROM linkedin_team_accounts lta
-     JOIN team_members tm ON tm.team_id = lta.team_id
-     WHERE lta.id = $1::int
-       AND lta.active = true
-       AND tm.user_id = $2
-       AND tm.status = 'active'
-     LIMIT 1`,
-    [normalizedId, userId]
-  );
-  return rows[0] || null;
+function canManageScheduledPost(post, userId, teamAccount) {
+  if (!post) return false;
+  if (post.user_id === userId) return true;
+  if (!teamAccount || !post.company_id) return false;
+  const scopedCompanyIds = getScopedCompanyIds(teamAccount);
+  return scopedCompanyIds.includes(String(post.company_id));
 }
 
 
@@ -57,7 +53,11 @@ export async function schedulePost(req, res) {
     if (!post_content || !scheduled_time) return res.status(400).json({ error: 'Missing post content or scheduled time' });
 
     const selectedAccountId = account_id || req.headers['x-selected-account-id'] || company_id;
-    const teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId);
+    const preferredTeamIds = getUserTeamHints(req.user);
+    let teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId);
+    if (!teamAccount && !isMeaningfulAccountId(selectedAccountId)) {
+      teamAccount = await resolveDefaultTeamAccountForUser(userId, { preferredTeamIds });
+    }
 
     if (isMeaningfulAccountId(selectedAccountId) && !teamAccount) {
       return res.status(403).json({ error: 'Selected LinkedIn team account not found or access denied' });
@@ -113,7 +113,11 @@ export async function getScheduledPosts(req, res) {
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     const { status, limit, offset } = req.query;
     const selectedAccountId = req.headers['x-selected-account-id'];
-    const teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId);
+    const preferredTeamIds = getUserTeamHints(req.user);
+    let teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId);
+    if (!teamAccount) {
+      teamAccount = await resolveDefaultTeamAccountForUser(userId, { preferredTeamIds });
+    }
     const companyIds = teamAccount
       ? [String(teamAccount.team_id), String(teamAccount.id)]
       : undefined;
@@ -137,8 +141,15 @@ export async function cancelScheduledPost(req, res) {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     const id = req.params.id || req.body?.id;
+    if (!id) return res.status(400).json({ error: 'Scheduled post id is required' });
     const post = await findById(id);
-    if (!post || post.user_id !== userId) return res.status(404).json({ error: 'Scheduled post not found' });
+    if (!post) return res.status(404).json({ error: 'Scheduled post not found' });
+
+    const teamAccount = await resolveTeamAdminAccount(req, userId);
+    if (!canManageScheduledPost(post, userId, teamAccount)) {
+      return res.status(403).json({ error: 'Access denied for this scheduled post' });
+    }
+
     await updateStatus(id, 'cancelled');
     res.json({ success: true });
   } catch (error) {
@@ -153,9 +164,26 @@ export async function deleteScheduledPost(req, res) {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     const id = req.params.id;
+    if (!id) return res.status(400).json({ error: 'Scheduled post id is required' });
     const post = await findById(id);
-    if (!post || post.user_id !== userId) return res.status(404).json({ error: 'Scheduled post not found' });
-    await deleteById(id, userId);
+    if (!post) return res.status(404).json({ error: 'Scheduled post not found' });
+
+    const teamAccount = await resolveTeamAdminAccount(req, userId);
+    if (!canManageScheduledPost(post, userId, teamAccount)) {
+      return res.status(403).json({ error: 'Access denied for this scheduled post' });
+    }
+
+    if (post.user_id === userId) {
+      await deleteById(id, userId);
+    } else {
+      const scopedCompanyIds = getScopedCompanyIds(teamAccount);
+      await pool.query(
+        `DELETE FROM scheduled_linkedin_posts
+         WHERE id = $1
+           AND company_id::text = ANY($2::text[])`,
+        [id, scopedCompanyIds]
+      );
+    }
     res.json({ success: true });
   } catch (error) {
     logger.error('[deleteScheduledPost] Error', error);
@@ -173,25 +201,46 @@ export async function retryFailedScheduledPost(req, res) {
     if (!id) return res.status(400).json({ error: 'Scheduled post id is required' });
 
     const post = await findById(id);
-    if (!post || post.user_id !== userId) return res.status(404).json({ error: 'Scheduled post not found' });
+    if (!post) return res.status(404).json({ error: 'Scheduled post not found' });
+
+    const teamAccount = await resolveTeamAdminAccount(req, userId);
+    if (!canManageScheduledPost(post, userId, teamAccount)) {
+      return res.status(403).json({ error: 'Access denied for this scheduled post' });
+    }
 
     if (post.status !== 'failed') {
       return res.status(400).json({ error: 'Only failed scheduled posts can be retried' });
     }
 
+    const scopedCompanyIds = getScopedCompanyIds(teamAccount);
+    const canUseTeamScope = post.user_id !== userId && scopedCompanyIds.length > 0;
+
     let updatedRow = null;
     try {
-      const { rows } = await pool.query(
-        `UPDATE scheduled_linkedin_posts
-         SET status = 'scheduled',
-             error_message = NULL,
-             retry_count = 0,
-             next_retry_at = NOW(),
-             updated_at = NOW()
-         WHERE id = $1 AND user_id = $2
-         RETURNING *`,
-        [id, userId]
-      );
+      const { rows } = canUseTeamScope
+        ? await pool.query(
+            `UPDATE scheduled_linkedin_posts
+             SET status = 'scheduled',
+                 error_message = NULL,
+                 retry_count = 0,
+                 next_retry_at = NOW(),
+                 updated_at = NOW()
+             WHERE id = $1
+               AND company_id::text = ANY($2::text[])
+             RETURNING *`,
+            [id, scopedCompanyIds]
+          )
+        : await pool.query(
+            `UPDATE scheduled_linkedin_posts
+             SET status = 'scheduled',
+                 error_message = NULL,
+                 retry_count = 0,
+                 next_retry_at = NOW(),
+                 updated_at = NOW()
+             WHERE id = $1 AND user_id = $2
+             RETURNING *`,
+            [id, userId]
+          );
       updatedRow = rows[0] || null;
     } catch (error) {
       if (error?.code !== '42703') {
@@ -199,15 +248,26 @@ export async function retryFailedScheduledPost(req, res) {
       }
 
       // Backward compatibility before retry columns migration.
-      const { rows } = await pool.query(
-        `UPDATE scheduled_linkedin_posts
-         SET status = 'scheduled',
-             error_message = NULL,
-             updated_at = NOW()
-         WHERE id = $1 AND user_id = $2
-         RETURNING *`,
-        [id, userId]
-      );
+      const { rows } = canUseTeamScope
+        ? await pool.query(
+            `UPDATE scheduled_linkedin_posts
+             SET status = 'scheduled',
+                 error_message = NULL,
+                 updated_at = NOW()
+             WHERE id = $1
+               AND company_id::text = ANY($2::text[])
+             RETURNING *`,
+            [id, scopedCompanyIds]
+          )
+        : await pool.query(
+            `UPDATE scheduled_linkedin_posts
+             SET status = 'scheduled',
+                 error_message = NULL,
+                 updated_at = NOW()
+             WHERE id = $1 AND user_id = $2
+             RETURNING *`,
+            [id, userId]
+          );
       updatedRow = rows[0] || null;
     }
 
@@ -225,15 +285,32 @@ export async function getSchedulerStatus(req, res) {
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
     const scheduler = getLinkedinSchedulerStatus();
+    const selectedAccountId = req.headers['x-selected-account-id'];
+    const preferredTeamIds = getUserTeamHints(req.user);
+    let teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId);
+    if (!teamAccount) {
+      teamAccount = await resolveDefaultTeamAccountForUser(userId, { preferredTeamIds });
+    }
+    const companyIds = teamAccount
+      ? [String(teamAccount.team_id), String(teamAccount.id)]
+      : undefined;
 
     let countsByStatus = {};
-    const { rows: statusRows } = await pool.query(
-      `SELECT status, COUNT(*)::int AS count
-       FROM scheduled_linkedin_posts
-       WHERE user_id = $1
-       GROUP BY status`,
-      [userId]
-    );
+    const { rows: statusRows } = companyIds
+      ? await pool.query(
+          `SELECT status, COUNT(*)::int AS count
+           FROM scheduled_linkedin_posts
+           WHERE company_id::text = ANY($1::text[])
+           GROUP BY status`,
+          [companyIds]
+        )
+      : await pool.query(
+          `SELECT status, COUNT(*)::int AS count
+           FROM scheduled_linkedin_posts
+           WHERE user_id = $1
+           GROUP BY status`,
+          [userId]
+        );
     countsByStatus = statusRows.reduce((acc, row) => {
       acc[row.status] = row.count;
       return acc;
@@ -241,25 +318,43 @@ export async function getSchedulerStatus(req, res) {
 
     let dueNowCount = 0;
     try {
-      const { rows: dueRows } = await pool.query(
-        `SELECT COUNT(*)::int AS count
-         FROM scheduled_linkedin_posts
-         WHERE user_id = $1
-           AND status = 'scheduled'
-           AND COALESCE(next_retry_at, scheduled_time) <= NOW()`,
-        [userId]
-      );
+      const { rows: dueRows } = companyIds
+        ? await pool.query(
+            `SELECT COUNT(*)::int AS count
+             FROM scheduled_linkedin_posts
+             WHERE company_id::text = ANY($1::text[])
+               AND status = 'scheduled'
+               AND COALESCE(next_retry_at, scheduled_time) <= NOW()`,
+            [companyIds]
+          )
+        : await pool.query(
+            `SELECT COUNT(*)::int AS count
+             FROM scheduled_linkedin_posts
+             WHERE user_id = $1
+               AND status = 'scheduled'
+               AND COALESCE(next_retry_at, scheduled_time) <= NOW()`,
+            [userId]
+          );
       dueNowCount = dueRows[0]?.count || 0;
     } catch (error) {
       if (error?.code !== '42703') throw error;
-      const { rows: fallbackRows } = await pool.query(
-        `SELECT COUNT(*)::int AS count
-         FROM scheduled_linkedin_posts
-         WHERE user_id = $1
-           AND status = 'scheduled'
-           AND scheduled_time <= NOW()`,
-        [userId]
-      );
+      const { rows: fallbackRows } = companyIds
+        ? await pool.query(
+            `SELECT COUNT(*)::int AS count
+             FROM scheduled_linkedin_posts
+             WHERE company_id::text = ANY($1::text[])
+               AND status = 'scheduled'
+               AND scheduled_time <= NOW()`,
+            [companyIds]
+          )
+        : await pool.query(
+            `SELECT COUNT(*)::int AS count
+             FROM scheduled_linkedin_posts
+             WHERE user_id = $1
+               AND status = 'scheduled'
+               AND scheduled_time <= NOW()`,
+            [userId]
+          );
       dueNowCount = fallbackRows[0]?.count || 0;
     }
 
@@ -289,7 +384,11 @@ export async function bulkSchedulePosts(req, res) {
     }
 
     const selectedAccountId = account_id || req.headers['x-selected-account-id'];
-    const teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId);
+    const preferredTeamIds = getUserTeamHints(req.user);
+    let teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId);
+    if (!teamAccount && !isMeaningfulAccountId(selectedAccountId)) {
+      teamAccount = await resolveDefaultTeamAccountForUser(userId, { preferredTeamIds });
+    }
 
     if (isMeaningfulAccountId(selectedAccountId) && !teamAccount) {
       return res.status(403).json({ error: 'Selected LinkedIn team account not found or access denied' });

@@ -94,7 +94,11 @@ const TeamLinkedInSettings = () => {
       const returnUrl = `${window.location.origin}/team-accounts`;
       
       // Redirect to LinkedIn OAuth for team connection
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3004';
+      const apiUrl = import.meta.env.VITE_API_URL || (
+        import.meta.env.MODE === 'production'
+          ? 'https://apilinkedin.suitegenie.in'
+          : 'http://localhost:3004'
+      );
       const oauthUrl = `${apiUrl}/api/oauth/linkedin/team-connect?teamId=${selectedTeam.id}&userId=${userId}&returnUrl=${encodeURIComponent(returnUrl)}`;
       
       console.log('Redirecting to LinkedIn OAuth for team connection:', oauthUrl);
