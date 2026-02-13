@@ -3,7 +3,28 @@ import jwt from 'jsonwebtoken';
 import axios from 'axios';
 import { pool } from '../config/database.js';
 import dotenv from 'dotenv';
-dotenv.config();
+dotenv.config({ quiet: true });
+
+const AUTH_CACHE_TTL_MS = Number(process.env.AUTH_CACHE_TTL_MS || 30000);
+const platformUserCache = new Map();
+const linkedinAuthCache = new Map();
+
+const getCacheValue = (cache, key) => {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    cache.delete(key);
+    return null;
+  }
+  return entry.value;
+};
+
+const setCacheValue = (cache, key, value) => {
+  cache.set(key, {
+    value,
+    expiresAt: Date.now() + AUTH_CACHE_TTL_MS
+  });
+};
 
 export async function requirePlatformLogin(req, res, next) {
   // Helper: detect API/XHR request
@@ -180,34 +201,59 @@ export async function requirePlatformLogin(req, res, next) {
     }
 
     // 5. Get user info from platform
-    try {
-      const response = await axios.get(`${process.env.NEW_PLATFORM_API_URL || 'http://localhost:3000/api'}/auth/me`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
+    const platformCacheKey = `${decoded.userId}:${decoded.email || ''}`;
+    const cachedPlatformUser = getCacheValue(platformUserCache, platformCacheKey);
+
+    if (cachedPlatformUser) {
       req.user = {
         id: decoded.userId,
         email: decoded.email,
-        ...response.data
+        ...cachedPlatformUser
       };
-    } catch (platformError) {
-      req.user = {
-        id: decoded.userId,
-        email: decoded.email
-      };
+    } else {
+      try {
+        const response = await axios.get(`${process.env.NEW_PLATFORM_API_URL || 'http://localhost:3000/api'}/auth/me`, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          },
+          timeout: 8000
+        });
+
+        const userPayload = response.data || {};
+        setCacheValue(platformUserCache, platformCacheKey, userPayload);
+        req.user = {
+          id: decoded.userId,
+          email: decoded.email,
+          ...userPayload
+        };
+      } catch {
+        req.user = {
+          id: decoded.userId,
+          email: decoded.email
+        };
+      }
     }
 
     // Attach LinkedIn access token and URN if user is authenticated
     if (req.user && req.user.id) {
       try {
-        const { rows } = await pool.query(
-          `SELECT access_token, linkedin_user_id FROM linkedin_auth WHERE user_id = $1`,
-          [req.user.id]
-        );
-        if (rows.length > 0) {
-          req.user.linkedinAccessToken = rows[0].access_token;
-          req.user.linkedinUrn = `urn:li:person:${rows[0].linkedin_user_id}`;
+        const linkedinCacheKey = req.user.id;
+        const cachedLinkedinAuth = getCacheValue(linkedinAuthCache, linkedinCacheKey);
+        let linkedinAuth = cachedLinkedinAuth;
+
+        if (!linkedinAuth) {
+          const { rows } = await pool.query(
+            `SELECT access_token, linkedin_user_id FROM linkedin_auth WHERE user_id = $1`,
+            [req.user.id]
+          );
+          linkedinAuth = rows[0] || null;
+          setCacheValue(linkedinAuthCache, linkedinCacheKey, linkedinAuth);
+        }
+
+        if (linkedinAuth?.access_token && linkedinAuth?.linkedin_user_id) {
+          req.user.linkedinAccessToken = linkedinAuth.access_token;
+          req.user.linkedinUrn = `urn:li:person:${linkedinAuth.linkedin_user_id}`;
+          req.user.linkedinUserId = linkedinAuth.linkedin_user_id;
         }
       } catch (err) {
         console.error('[requirePlatformLogin] Failed to fetch LinkedIn token/URN:', err);

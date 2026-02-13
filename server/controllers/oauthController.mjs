@@ -14,11 +14,37 @@ const newPlatformPool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
 });
 
-function sendPopupResult(res, messageType, payload = {}, message = 'Authentication complete. You can close this window.') {
+function getClientCallbackUrl({ status = 'success', reason = null, message = null } = {}) {
+  const clientUrl = process.env.CLIENT_URL || 'http://localhost:5175';
+  const params = new URLSearchParams({
+    provider: 'linkedin',
+    status
+  });
+
+  if (reason) {
+    params.set('reason', reason);
+  }
+  if (message) {
+    params.set('message', message);
+  }
+
+  return `${clientUrl}/auth/callback?${params.toString()}`;
+}
+
+function sendPopupResult(
+  res,
+  messageType,
+  payload = {},
+  message = 'Authentication complete. You can close this window.',
+  fallbackRedirectUrl = null
+) {
   const eventData = JSON.stringify({ type: messageType, ...payload })
     .replace(/</g, '\\u003c')
     .replace(/>/g, '\\u003e');
   const safeMessage = String(message).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const safeFallbackUrl = fallbackRedirectUrl
+    ? JSON.stringify(String(fallbackRedirectUrl).replace(/</g, '\\u003c').replace(/>/g, '\\u003e'))
+    : 'null';
 
   // Helmet default CSP/COOP can block inline script and sever opener for popup callbacks.
   // Override only for this tiny callback page.
@@ -29,6 +55,7 @@ function sendPopupResult(res, messageType, payload = {}, message = 'Authenticati
     <html>
       <body>
         <script>
+          var fallbackUrl = ${safeFallbackUrl};
           try {
             if (window.opener) {
               window.opener.postMessage(${eventData}, '*');
@@ -39,7 +66,14 @@ function sendPopupResult(res, messageType, payload = {}, message = 'Authenticati
           setTimeout(function () {
             try { window.open('', '_self'); } catch (e) {}
             try { window.close(); } catch (e) {}
-          }, 20);
+            if (fallbackUrl) {
+              try {
+                window.location.replace(fallbackUrl);
+              } catch (e) {
+                window.location.href = fallbackUrl;
+              }
+            }
+          }, 120);
         </script>
         <p>${safeMessage}</p>
       </body>
@@ -49,9 +83,6 @@ function sendPopupResult(res, messageType, payload = {}, message = 'Authenticati
 
 // Start LinkedIn OAuth: return LinkedIn OAuth URL for popup
 export function startOAuth(req, res) {
-  // Debug log to check env values
-  console.log('DEBUG LINKEDIN_CLIENT_ID:', config.getLinkedInClientId());
-  console.log('DEBUG LINKEDIN_REDIRECT_URI:', config.getLinkedInRedirectUri());
   const popup = String(req.query.popup || '').toLowerCase() === 'true';
   const state = `personal_${Math.random().toString(36).substring(2, 15)}`;
   stateStore.set(state, {
@@ -76,12 +107,20 @@ export function startOAuth(req, res) {
 // Handle LinkedIn OAuth callback: exchange code for access token
 export async function handleOAuthCallback(req, res) {
   const { code, state } = req.query;
-  if (!code) return res.status(400).send('Missing code');
   
   // Check if this is a team connection (state starts with 'team_')
   const isTeamConnection = state && state.startsWith('team_');
   const stateData = state ? stateStore.get(state) : null;
   const isPopupFlow = !isTeamConnection && !!stateData?.popup;
+  if (!code) {
+    if (!isTeamConnection) {
+      return res.redirect(getClientCallbackUrl({ status: 'error', reason: 'missing_code' }));
+    }
+    if (isTeamConnection && stateData?.returnUrl) {
+      return res.redirect(`${stateData.returnUrl}?error=missing_code`);
+    }
+    return res.status(400).send('Missing code');
+  }
   if (state && !isTeamConnection) {
     stateStore.delete(state);
   }
@@ -394,22 +433,22 @@ export async function handleOAuthCallback(req, res) {
       
       // If user has organizations, redirect to selection page
       if (organizations.length > 0) {
-        if (isPopupFlow) {
-          return sendPopupResult(
-            res,
-            'linkedin_auth_success',
-            { organizations, selectAccount: true },
-            'LinkedIn connected. Please continue in the original tab.'
-          );
-        }
-        const clientUrl = process.env.CLIENT_URL || 'http://localhost:5175';
+          if (isPopupFlow) {
+            return sendPopupResult(
+              res,
+              'linkedin_auth_success',
+              { organizations, selectAccount: true },
+              'LinkedIn connected. Please continue in the original tab.',
+              getClientCallbackUrl({ status: 'success' })
+            );
+          }
+          const clientUrl = process.env.CLIENT_URL || 'http://localhost:5175';
         const orgsParam = encodeURIComponent(JSON.stringify(organizations));
         return res.redirect(`${clientUrl}/settings?linkedin_connected=true&select_account=true&organizations=${orgsParam}`);
       }
     }
 
     // If user is in a team and personal account is not shown, show a popup message and log it
-    const clientUrl = process.env.CLIENT_URL || 'http://localhost:5175';
     if (userInfo && userInfo.email && req.user && req.user.team_id) {
       console.log('[OAuth] User is in a team, personal account will not be shown:', {
         userId: req.user.id,
@@ -420,15 +459,22 @@ export async function handleOAuthCallback(req, res) {
         res,
         'linkedin_auth_error',
         { reason: 'in_team' },
-        'Personal LinkedIn account not available for this workspace.'
+        'Personal LinkedIn account not available for this workspace.',
+        getClientCallbackUrl({ status: 'error', reason: 'in_team' })
       );
     }
-    return sendPopupResult(
-      res,
-      'linkedin_auth_success',
-      {},
-      'LinkedIn account connected! You can close this window.'
-    );
+
+    if (isPopupFlow) {
+      return sendPopupResult(
+        res,
+        'linkedin_auth_success',
+        {},
+        'LinkedIn account connected! You can close this window.',
+        getClientCallbackUrl({ status: 'success' })
+      );
+    }
+
+    return res.redirect(getClientCallbackUrl({ status: 'success' }));
   } catch (error) {
     console.error('OAuth callback error:', error?.response?.data || error.message, error.stack);
     if (isPopupFlow) {
@@ -436,11 +482,11 @@ export async function handleOAuthCallback(req, res) {
         res,
         'linkedin_auth_error',
         { reason: 'oauth_failed', message: error.message },
-        `LinkedIn authentication failed: ${error.message}`
+        `LinkedIn authentication failed: ${error.message}`,
+        getClientCallbackUrl({ status: 'error', reason: 'oauth_failed', message: error.message })
       );
     }
-    const clientUrl = process.env.CLIENT_URL || 'http://localhost:5175';
-    return res.redirect(`${clientUrl}/settings?error=oauth_failed&message=${encodeURIComponent(error.message)}`);
+    return res.redirect(getClientCallbackUrl({ status: 'error', reason: 'oauth_failed', message: error.message }));
   }
 }
 

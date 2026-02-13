@@ -50,8 +50,9 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     if (!isAuthenticated) return;
     const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       refreshTokenIfNeeded();
-    }, 12 * 60 * 1000); // 12 minutes
+    }, 20 * 60 * 1000); // 20 minutes
     return () => clearInterval(interval);
   }, [isAuthenticated]);
 

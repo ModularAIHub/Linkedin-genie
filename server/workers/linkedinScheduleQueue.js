@@ -1,12 +1,3 @@
-import { Queue } from 'bullmq';
-import { createClient } from 'redis';
-import dotenv from 'dotenv';
-dotenv.config();
-
-const connection = createClient({
-  url: process.env.REDIS_URL,
-});
-
-export const linkedinScheduleQueue = new Queue('linkedin-schedule', {
-  connection,
-});
+// BullMQ has been replaced by DB-backed scheduler polling.
+// This module remains only for backward compatibility with old imports.
+export const linkedinScheduleQueue = null;

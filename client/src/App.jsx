@@ -4,26 +4,31 @@ import { AuthProvider } from "./contexts/AuthContext";
 import { AccountProvider } from "./contexts/AccountContext";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import Layout from "./components/Layout";
+import LoadingSpinner from "./components/LoadingSpinner";
 
-// Pages
-import Dashboard from "./pages/Dashboard";
-import LinkedInPostComposer from "./pages/LinkedInPostComposer";
-import BulkGeneration from "./pages/BulkGeneration";
-import Scheduling from "./pages/Scheduling";
-import History from "./pages/History";
-import LinkedInAnalytics from "./pages/LinkedInAnalytics";
-import Settings from "./pages/Settings";
-import AuthCallback from "./pages/AuthCallback";
-// Add Login page (placeholder)
+// Pages (lazy loaded to reduce initial bundle size)
+const Dashboard = React.lazy(() => import('./pages/Dashboard'));
+const LinkedInPostComposer = React.lazy(() => import('./pages/LinkedInPostComposer'));
+const BulkGeneration = React.lazy(() => import('./pages/BulkGeneration'));
+const Scheduling = React.lazy(() => import('./pages/Scheduling'));
+const History = React.lazy(() => import('./pages/History'));
+const LinkedInAnalytics = React.lazy(() => import('./pages/LinkedInAnalytics'));
+const Settings = React.lazy(() => import('./pages/Settings'));
+const AuthCallback = React.lazy(() => import('./pages/AuthCallback'));
 const Login = React.lazy(() => import('./pages/Login'));
 
+const PageFallback = () => (
+  <div className="min-h-[40vh] flex items-center justify-center">
+    <LoadingSpinner size="lg" />
+  </div>
+);
 
 function App() {
   return (
     <AuthProvider>
       <AccountProvider>
         <div className="min-h-screen bg-[#f3f6f8]"> {/* LinkedIn blue background tint */}
-          <React.Suspense fallback={<div>Loading...</div>}>
+          <React.Suspense fallback={<PageFallback />}>
             <Routes>
               {/* Auth callback from LinkedIn */}
               <Route path="/auth/callback" element={<AuthCallback />} />

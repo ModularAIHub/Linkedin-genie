@@ -26,6 +26,7 @@ const Layout = ({ children }) => {
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [creditBalance, setCreditBalance] = useState(null);
   const [loadingCredits, setLoadingCredits] = useState(true);
+  const CREDITS_REFRESH_MS = 5 * 60 * 1000;
 
   const navigation = [
     { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
@@ -57,17 +58,30 @@ const Layout = ({ children }) => {
     }
   }, [user]);
 
-  // Refresh credits periodically (every 30 seconds)
+  // Refresh credits periodically (every 5 minutes) and when tab becomes active.
   useEffect(() => {
-    const interval = setInterval(async () => {
-      if (user) {
-        try {
-          const response = await credits.getBalance();
-          setCreditBalance(response.data.balance);
-        } catch (error) {}
+    if (!user) return undefined;
+
+    const refreshCredits = async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      try {
+        const response = await credits.getBalance();
+        setCreditBalance(response.data.balance);
+      } catch (error) {}
+    };
+
+    const interval = setInterval(refreshCredits, CREDITS_REFRESH_MS);
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        refreshCredits();
       }
-    }, 30000); // 30 seconds
-    return () => clearInterval(interval);
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, [user]);
 
   return (
