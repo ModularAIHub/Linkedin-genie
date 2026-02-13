@@ -1,53 +1,11 @@
 import { pool } from '../config/database.js';
 import * as linkedinService from '../services/linkedinService.js';
-
-const isMeaningfulAccountId = (value) =>
-  value !== undefined && value !== null && String(value) !== '' && String(value) !== 'null' && String(value) !== 'undefined';
-
-async function resolveTeamAccountForUser(userId, rawAccountId, options = {}) {
-  const allowedRoles = Array.isArray(options.allowedRoles) ? options.allowedRoles : null;
-  if (!isMeaningfulAccountId(rawAccountId)) {
-    return null;
-  }
-
-  const normalizedId = String(rawAccountId);
-  const isUUID = normalizedId.includes('-');
-
-  if (isUUID) {
-    const { rows } = await pool.query(
-      `SELECT lta.id, lta.team_id, lta.access_token, lta.linkedin_user_id, tm.role AS member_role
-       FROM linkedin_team_accounts lta
-       JOIN team_members tm ON tm.team_id = lta.team_id
-       WHERE lta.team_id::text = $1
-         AND lta.active = true
-         AND tm.user_id = $2
-         AND tm.status = 'active'
-       ORDER BY lta.updated_at DESC NULLS LAST, lta.id DESC
-       LIMIT 1`,
-      [normalizedId, userId]
-    );
-    const row = rows[0] || null;
-    if (!row) return null;
-    if (allowedRoles && !allowedRoles.includes(row.member_role)) return null;
-    return row;
-  }
-
-  const { rows } = await pool.query(
-    `SELECT lta.id, lta.team_id, lta.access_token, lta.linkedin_user_id, tm.role AS member_role
-     FROM linkedin_team_accounts lta
-     JOIN team_members tm ON tm.team_id = lta.team_id
-     WHERE lta.id = $1::int
-       AND lta.active = true
-       AND tm.user_id = $2
-       AND tm.status = 'active'
-     LIMIT 1`,
-    [normalizedId, userId]
-  );
-  const row = rows[0] || null;
-  if (!row) return null;
-  if (allowedRoles && !allowedRoles.includes(row.member_role)) return null;
-  return row;
-}
+import {
+  getUserTeamHints,
+  isMeaningfulAccountId,
+  resolveDefaultTeamAccountForUser,
+  resolveTeamAccountForUser
+} from '../utils/teamAccountScope.js';
 
 // Create a LinkedIn post (with media, carousels, etc.)
 export async function createPost(req, res) {
@@ -61,7 +19,12 @@ export async function createPost(req, res) {
     
     // Get account_id from request (for team accounts)
     const accountId = req.body.account_id || req.headers['x-selected-account-id'];
-    const selectedTeamAccount = await resolveTeamAccountForUser(user.id, accountId);
+    const preferredTeamIds = getUserTeamHints(req.user);
+    let selectedTeamAccount = await resolveTeamAccountForUser(user.id, accountId);
+
+    if (!selectedTeamAccount && !isMeaningfulAccountId(accountId)) {
+      selectedTeamAccount = await resolveDefaultTeamAccountForUser(user.id, { preferredTeamIds });
+    }
     
     let accessToken, authorUrn, teamAccountResult;
     
@@ -152,7 +115,11 @@ export async function getPosts(req, res) {
     const { page = 1, limit = 20, status } = req.query;
     const offset = (page - 1) * limit;
     const selectedAccountId = req.headers['x-selected-account-id'];
-    const selectedTeamAccount = await resolveTeamAccountForUser(req.user.id, selectedAccountId);
+    const preferredTeamIds = getUserTeamHints(req.user);
+    let selectedTeamAccount = await resolveTeamAccountForUser(req.user.id, selectedAccountId);
+    if (!selectedTeamAccount) {
+      selectedTeamAccount = await resolveDefaultTeamAccountForUser(req.user.id, { preferredTeamIds });
+    }
     let whereClause;
     let params = [];
     if (selectedTeamAccount) {
@@ -208,7 +175,14 @@ export async function deletePost(req, res) {
     
     // Get account_id from headers only (DELETE requests don't have body)
     const accountId = req.headers['x-selected-account-id'];
-    const selectedTeamAccount = await resolveTeamAccountForUser(userId, accountId, { allowedRoles: ['owner', 'admin'] });
+    const preferredTeamIds = getUserTeamHints(req.user);
+    let selectedTeamAccount = await resolveTeamAccountForUser(userId, accountId, { allowedRoles: ['owner', 'admin'] });
+    if (!selectedTeamAccount && !isMeaningfulAccountId(accountId)) {
+      selectedTeamAccount = await resolveDefaultTeamAccountForUser(userId, {
+        allowedRoles: ['owner', 'admin'],
+        preferredTeamIds
+      });
+    }
     
     // Try to find post by user first
     let { rows } = await pool.query(

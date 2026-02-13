@@ -14,16 +14,24 @@ export async function create({ user_id, post_content, media_urls, post_type, com
 
 // Find scheduled posts by user
 export async function findByUser(user_id, { limit = 20, offset = 0, status, companyIds } = {}) {
-  let where = 'WHERE user_id = $1';
-  const params = [user_id];
-  if (status) {
-    where += ' AND status = $2';
-    params.push(status);
-  }
+  const params = [];
+  const filters = [];
+
   if (Array.isArray(companyIds) && companyIds.length > 0) {
     params.push(companyIds.map(String));
-    where += ` AND company_id::text = ANY($${params.length}::text[])`;
+    filters.push(`company_id::text = ANY($${params.length}::text[])`);
+  } else {
+    params.push(user_id);
+    filters.push(`user_id = $${params.length}`);
   }
+
+  if (status) {
+    params.push(status);
+    filters.push(`status = $${params.length}`);
+  }
+
+  const where = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
+
   const { rows } = await pool.query(
     `SELECT * FROM scheduled_linkedin_posts ${where} ORDER BY scheduled_time DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
     [...params, limit, offset]
