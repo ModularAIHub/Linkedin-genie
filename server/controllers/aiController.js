@@ -2,6 +2,8 @@
 import aiService from '../services/aiService.js';
 import creditService from '../services/creditService.js';
 
+const MAX_BULK_PROMPTS = 30;
+
 export async function generateContent(req, res) {
   try {
     const { prompt, style = 'casual', isThread = false, schedule = false, scheduleOptions = {} } = req.body;
@@ -139,6 +141,11 @@ export async function bulkGenerate(req, res) {
     const { prompts, options = [] } = req.body;
     if (!Array.isArray(prompts) || prompts.length === 0) {
       return res.status(400).json({ error: 'No prompts provided' });
+    }
+    if (prompts.length > MAX_BULK_PROMPTS) {
+      return res.status(400).json({
+        error: `Bulk generation is limited to ${MAX_BULK_PROMPTS} prompts per run.`,
+      });
     }
     let token = req.cookies?.accessToken;
     if (!token) {
