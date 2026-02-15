@@ -5,8 +5,15 @@ import SelectionTextEditor from '../components/SelectionTextEditor';
 import { ai, scheduling } from '../utils/api';
 import dayjs from 'dayjs';
 import moment from 'moment-timezone';
+import { useAccount } from '../contexts/AccountContext';
+
+const MAX_BULK_PROMPTS = 30;
+const MAX_SCHEDULING_WINDOW_DAYS = 15;
+const RECOMMENDED_SCHEDULING_WINDOW_DAYS = 14;
+const PROMPT_LIMIT_WARNING = `Only the first ${MAX_BULK_PROMPTS} prompts will be used.`;
 
 const BulkGeneration = () => {
+  const { selectedAccount } = useAccount();
   const [prompts, setPrompts] = useState('');
   const [promptList, setPromptList] = useState([]);
   const [outputs, setOutputs] = useState({});
@@ -72,6 +79,11 @@ const BulkGeneration = () => {
         alert('No posts to schedule.');
         return;
       }
+      if (toSchedule.length > MAX_BULK_PROMPTS) {
+        setSchedulingStatus('error');
+        alert(`You can schedule up to ${MAX_BULK_PROMPTS} prompts at a time.`);
+        return;
+      }
       const timezone = moment.tz.guess();
       let scheduledTimes = [];
       let current = dayjs(startDate);
@@ -112,6 +124,14 @@ const BulkGeneration = () => {
         }
       }
 
+      const maxSchedulingTime = dayjs().add(MAX_SCHEDULING_WINDOW_DAYS, 'day');
+      const exceedsWindow = scheduledTimes.some((time) => dayjs(time).isAfter(maxSchedulingTime));
+      if (exceedsWindow) {
+        setSchedulingStatus('error');
+        alert(`Scheduling is limited to ${MAX_SCHEDULING_WINDOW_DAYS} days ahead. For best results, plan up to ${RECOMMENDED_SCHEDULING_WINDOW_DAYS} days and then revisit strategy.`);
+        return;
+      }
+
       const items = [];
       const mediaMap = {};
       
@@ -148,6 +168,11 @@ const BulkGeneration = () => {
         }
       }
 
+      const selectedTeamAccountId =
+        selectedAccount && (selectedAccount.isTeamAccount || selectedAccount.account_type === 'team')
+          ? (selectedAccount.account_id || selectedAccount.id)
+          : null;
+
       const bulkPayload = {
         items,
         frequency,
@@ -156,7 +181,8 @@ const BulkGeneration = () => {
         dailyTimes,
         daysOfWeek,
         images: mediaMap,
-        timezone
+        timezone,
+        account_id: selectedTeamAccountId
       };
 
       try {
@@ -179,9 +205,16 @@ const BulkGeneration = () => {
   };
 
   const handlePromptsChange = (e) => {
-    setPrompts(e.target.value);
-    const lines = e.target.value.split('\n').map(p => p.trim()).filter(Boolean);
-    setPromptList(lines.map((prompt, idx) => ({ prompt, id: idx })));
+    const rawValue = e.target.value.replace(/\r\n/g, '\n');
+    const lines = rawValue.split('\n').map((p) => p.trim()).filter(Boolean);
+    const cappedLines = lines.slice(0, MAX_BULK_PROMPTS);
+    setPrompts(rawValue);
+    if (lines.length > MAX_BULK_PROMPTS) {
+      setError(PROMPT_LIMIT_WARNING);
+    } else {
+      setError((prev) => (prev === PROMPT_LIMIT_WARNING ? '' : prev));
+    }
+    setPromptList(cappedLines.map((prompt, idx) => ({ prompt, id: idx })));
   };
 
   const updateText = (idx, value) => {
@@ -224,6 +257,10 @@ const BulkGeneration = () => {
     setError('');
     setOutputs({});
     try {
+      if (promptList.length > MAX_BULK_PROMPTS) {
+        setError(`Bulk generation is limited to ${MAX_BULK_PROMPTS} prompts.`);
+        return;
+      }
       const newOutputs = {};
       for (let idx = 0; idx < promptList.length; idx++) {
         const { prompt } = promptList[idx];
@@ -295,10 +332,14 @@ const BulkGeneration = () => {
             Prompts (one per line)
           </label>
           <div className="absolute right-4 bottom-3 text-xs text-blue-400 select-none">
-            {prompts.split('\n').filter(Boolean).length} lines
+            {Math.min(prompts.split('\n').map((line) => line.trim()).filter(Boolean).length, MAX_BULK_PROMPTS)}/{MAX_BULK_PROMPTS} prompts
           </div>
         </div>
-        <div className="text-xs text-blue-500 mb-4">Tip: Paste or type multiple prompts, one per line. Each line will generate a LinkedIn post. You can edit or discard results after generation.</div>
+        <div className="text-xs text-blue-500 mb-2">Tip: Paste or type multiple prompts, one per line. Each line will generate a LinkedIn post. You can edit or discard results after generation.</div>
+        <div className="text-xs text-blue-600 mb-2">Use <b>Space</b> for normal typing and press <b>Enter</b> for a new prompt line.</div>
+        <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
+          Limit: up to {MAX_BULK_PROMPTS} prompts per run. Recommendation: plan bulk content for up to {RECOMMENDED_SCHEDULING_WINDOW_DAYS} days, then revisit your strategy before generating the next batch.
+        </div>
         
         {promptList.length > 0 && (
           <div className="mt-4 space-y-2">
@@ -339,7 +380,17 @@ const BulkGeneration = () => {
                 </div>
                 <div className="mb-4">
                   <label className="block font-semibold mb-1">Start Date:</label>
-                  <input type="date" className="border rounded px-3 py-2 w-full" value={startDate} onChange={e => setStartDate(e.target.value)} />
+                  <input
+                    type="date"
+                    className="border rounded px-3 py-2 w-full"
+                    value={startDate}
+                    min={dayjs().format('YYYY-MM-DD')}
+                    max={dayjs().add(MAX_SCHEDULING_WINDOW_DAYS, 'day').format('YYYY-MM-DD')}
+                    onChange={e => setStartDate(e.target.value)}
+                  />
+                  <p className="mt-1 text-xs text-amber-700">
+                    Hard limit: {MAX_SCHEDULING_WINDOW_DAYS} days ahead. Best practice: schedule up to {RECOMMENDED_SCHEDULING_WINDOW_DAYS} days, review strategy, then generate next batch.
+                  </p>
                 </div>
                 <div className="mb-4">
                   <label className="block font-semibold mb-1">Posts per Day:</label>

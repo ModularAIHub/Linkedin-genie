@@ -12,6 +12,9 @@ import {
 } from '../utils/teamAccountScope.js';
 // LinkedIn Genie Schedule Controller
 
+const MAX_BULK_SCHEDULE_ITEMS = 30;
+const MAX_SCHEDULING_WINDOW_DAYS = 15;
+
 async function resolveTeamAdminAccount(req, userId) {
   const selectedAccountId =
     req.headers['x-selected-account-id'] || req.body?.account_id || req.body?.company_id;
@@ -69,6 +72,16 @@ export async function schedulePost(req, res) {
       scheduledTimeUtc = DateTime.fromISO(scheduled_time, { zone: user_timezone }).toUTC().toISO();
     } else {
       scheduledTimeUtc = DateTime.fromISO(scheduled_time).toUTC().toISO();
+    }
+    const scheduledDateTimeUtc = DateTime.fromISO(scheduledTimeUtc, { zone: 'utc' });
+    if (!scheduledDateTimeUtc.isValid) {
+      return res.status(400).json({ error: 'Invalid scheduled time' });
+    }
+    const maxSchedulingUtc = DateTime.utc().plus({ days: MAX_SCHEDULING_WINDOW_DAYS });
+    if (scheduledDateTimeUtc > maxSchedulingUtc) {
+      return res.status(400).json({
+        error: `Scheduling is limited to ${MAX_SCHEDULING_WINDOW_DAYS} days ahead.`,
+      });
     }
 
     let linkedinAccessToken = req.user?.linkedinAccessToken;
@@ -382,6 +395,11 @@ export async function bulkSchedulePosts(req, res) {
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'No items to schedule' });
     }
+    if (items.length > MAX_BULK_SCHEDULE_ITEMS) {
+      return res.status(400).json({
+        error: `Bulk scheduling is limited to ${MAX_BULK_SCHEDULE_ITEMS} prompts at a time.`,
+      });
+    }
 
     const selectedAccountId = account_id || req.headers['x-selected-account-id'];
     const preferredTeamIds = getUserTeamHints(req.user);
@@ -407,6 +425,10 @@ export async function bulkSchedulePosts(req, res) {
     const scheduled = [];
     let scheduledCount = 0;
     let current = DateTime.fromISO(startDate, { zone: timezone });
+    if (!current.isValid) {
+      return res.status(400).json({ error: 'Invalid start date or timezone' });
+    }
+    const maxSchedulingUtc = DateTime.utc().plus({ days: MAX_SCHEDULING_WINDOW_DAYS });
     
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
@@ -452,7 +474,17 @@ export async function bulkSchedulePosts(req, res) {
         scheduledForLocal = current.plus({ days: scheduledCount }).set({ hour, minute, second: 0, millisecond: 0 });
       }
       
-      const scheduledForUTC = scheduledForLocal.toUTC().toISO();
+      const scheduledForUtcDateTime = scheduledForLocal.toUTC();
+      if (!scheduledForUtcDateTime.isValid) {
+        return res.status(400).json({ error: 'Invalid scheduling parameters' });
+      }
+      if (scheduledForUtcDateTime > maxSchedulingUtc) {
+        return res.status(400).json({
+          error: `Scheduling is limited to ${MAX_SCHEDULING_WINDOW_DAYS} days ahead.`,
+        });
+      }
+
+      const scheduledForUTC = scheduledForUtcDateTime.toISO();
       
       // Save to DB
       const scheduledPost = await create({
