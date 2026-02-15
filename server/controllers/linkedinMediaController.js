@@ -15,23 +15,24 @@ export async function uploadImageBase64(req, res) {
     // If account_id is provided and not null, fetch team account credentials
     if (accountId && accountId !== 'null' && accountId !== 'undefined') {
       const { pool } = await import('../config/database.js');
-      // Check if accountId looks like a UUID (has hyphens) vs an integer
-      const isUUID = accountId.includes('-');
+      // Ensure accountId is a string before calling includes
+      const accountIdStr = typeof accountId === 'string' ? accountId : String(accountId);
+      const isUUID = accountIdStr.includes('-');
       let teamAccountResult;
       
       if (isUUID) {
         // Query by team_id if it's a UUID
-        console.log('[UPLOAD IMAGE BASE64] Account ID is UUID, querying by team_id:', accountId);
+        console.log('[UPLOAD IMAGE BASE64] Account ID is UUID, querying by team_id:', accountIdStr);
         teamAccountResult = await pool.query(
           `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE team_id = $1 AND active = true LIMIT 1`,
-          [accountId]
+          [accountIdStr]
         );
       } else {
         // Query by id if it's an integer
-        console.log('[UPLOAD IMAGE BASE64] Account ID is integer, querying by id:', accountId);
+        console.log('[UPLOAD IMAGE BASE64] Account ID is integer, querying by id:', accountIdStr);
         teamAccountResult = await pool.query(
           `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE id = $1 AND active = true`,
-          [accountId]
+          [accountIdStr]
         );
       }
       
