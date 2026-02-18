@@ -15,7 +15,7 @@ export async function generateContent(req, res) {
     }
 
     // Validate style parameter
-    const allowedStyles = ['casual', 'professional', 'humorous', 'inspirational', 'informative'];
+    const allowedStyles = ['casual', 'professional', 'humorous', 'witty', 'inspirational', 'informative'];
     if (!allowedStyles.includes(style)) {
       return res.status(400).json({
         success: false,
