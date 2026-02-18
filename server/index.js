@@ -1,4 +1,3 @@
-
 import express from 'express';
 import Honeybadger from '@honeybadger-io/js';
 import cors from 'cors';
@@ -12,17 +11,19 @@ import authRoutes from './routes/auth.js';
 import apiRoutes from './routes/index.js';
 import adminRoutes from './routes/admin.js';
 import cleanupRoutes from './routes/cleanup.js';
+import crossPostRoutes from './routes/crossPost.js';
 
 // Middleware imports
 import { requirePlatformLogin } from './middleware/requirePlatformLogin.js';
 import errorHandler from './middleware/errorHandler.js';
 import { logger } from './utils/logger.js';
+import internalAuth from './middleware/internalAuth.js';
 
 dotenv.config({ quiet: true });
 
 // Honeybadger configuration
 Honeybadger.configure({
-  apiKey: 'hbp_A8vjKimYh8OnyV8J3djwKrpqc4OniI3a4MJg', // Replace with your real key
+  apiKey: process.env.HONEYBADGER_API_KEY || process.env.HONEYBADGER_KEY || '',
   environment: process.env.NODE_ENV || 'development'
 });
 
@@ -35,7 +36,7 @@ const PORT = process.env.PORT || 3004;
 // Basic middleware
 app.use(helmet());
 
-// CORS configuration with both production and development origins
+// CORS configuration
 const allowedOrigins = [
   'https://suitegenie.in',
   'https://platform.suitegenie.in',
@@ -54,9 +55,7 @@ if (process.env.NODE_ENV === 'development' || !process.env.NODE_ENV) {
 }
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
-    
     if (allowedOrigins.indexOf(origin) !== -1) {
       logger.debug('[CORS] Allowed origin', { origin });
       return callback(null, true);
@@ -81,7 +80,7 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', service: 'LinkedIn Genie' });
 });
 
-// CSRF token endpoint (simplified like Tweet Genie)
+// CSRF token endpoint
 app.get('/api/csrf-token', (req, res) => {
   res.json({ 
     csrfToken: 'dummy-csrf-token',
@@ -93,17 +92,23 @@ app.get('/api/csrf-token', (req, res) => {
 app.use('/api/oauth', oauthRoutes);
 // Platform auth routes (callback, validate, refresh, logout)
 app.use('/auth', authRoutes);
-// Admin routes (for migrations and maintenance)
+// Admin routes
 app.use('/api/admin', adminRoutes);
-// Cleanup routes (for deleting user/team data)
+// Cleanup routes
 app.use('/api/cleanup', cleanupRoutes);
 
-// Protect all API routes by default
+// Internal auth runs first on all remaining requests
+app.use(internalAuth);
+
+// Internal-only routes — protected by internalAuth, bypass requirePlatformLogin
+// Tweet Genie calls this to cross-post tweets to LinkedIn
+app.use('/api/internal', crossPostRoutes);
+
+// All other API routes require platform login
 app.use(requirePlatformLogin);
 app.use('/api', apiRoutes);
 
-
-// Health check route
+// Root health check
 app.get('/', (req, res) => {
   res.json({ 
     message: 'LinkedIn Genie backend is running.',
@@ -112,18 +117,16 @@ app.get('/', (req, res) => {
   });
 });
 
-
-// Honeybadger error handler (must be after all routes/middleware)
+// Honeybadger error handler
 app.use(Honeybadger.errorHandler);
-// Error handling with CORS headers like Tweet Genie
+
+// Error handling with CORS headers
 app.use((err, req, res, next) => {
-  // Add CORS headers even on errors
   const origin = req.headers.origin;
   if (origin && allowedOrigins.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
-  // Delegate to the original error handler
   errorHandler(err, req, res, next);
 });
 

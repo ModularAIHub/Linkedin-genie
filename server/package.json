@@ -11,7 +11,8 @@
     "migrate": "node run-migration.mjs",
     "dev": "nodemon index.js",
     "dev:api": "nodemon index.js",
-    "dev:scheduler": "nodemon scheduler.js"
+    "dev:scheduler": "nodemon scheduler.js",
+    "clean:logs": "node ./scripts/clean-logs.js"
   },
   "dependencies": {
     "@honeybadger-io/js": "^6.12.3",

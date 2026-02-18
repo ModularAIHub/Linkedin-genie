@@ -27,6 +27,11 @@ const setCacheValue = (cache, key, value) => {
 };
 
 export async function requirePlatformLogin(req, res, next) {
+  // Allow internal service requests authenticated by `internalAuth` middleware to pass through.
+  if (req.isInternal) {
+    // Internal callers may supply `x-platform-user-id` for user-scoped lookups.
+    return next();
+  }
   // Helper: detect API/XHR request
   function isApiRequest(req) {
     const accept = req.headers['accept'] || '';

@@ -4,8 +4,18 @@ import * as oauthController from './oauthController.mjs';
 // GET /api/linkedin/status - Returns connected LinkedIn account info
 export async function getStatus(req, res) {
   try {
-    const userId = req.user?.id;
-    console.log('[DEBUG] /api/linkedin/status userId:', userId);
+    // Allow internal services to pass a platform user id via header when using x-internal-api-key.
+    // internalAuth middleware sets `req.isInternal` for such requests.
+    let userId = req.user?.id;
+    if (!userId && req.isInternal) {
+      const headerId = req.headers['x-platform-user-id'] || req.headers['x-platform-user-id'.toLowerCase()];
+      if (headerId) userId = headerId;
+    }
+    console.log('[DEBUG] /api/linkedin/status userId:', userId, 'isInternal:', !!req.isInternal);
+    if (req.isInternal) {
+      const headerId = req.headers['x-platform-user-id'] || req.headers['x-platform-user-id'.toLowerCase()];
+      console.log('[DEBUG] /api/linkedin/status internal header x-platform-user-id:', headerId || '(none)');
+    }
     if (!userId) {
       return res.status(401).json({ error: 'Not authenticated' });
     }

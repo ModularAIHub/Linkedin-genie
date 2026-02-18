@@ -369,7 +369,10 @@ async function schedulerTick() {
     if (!duePosts.length) {
       schedulerStats.noopTicks += 1;
       lastTickSummary.status = 'noop';
-      logger.debug('[LinkedIn Scheduler] Tick noop', { tickId });
+      // Only log noop ticks when explicitly enabled to avoid noisy logs in development
+      if (process.env.LINKEDIN_SCHEDULER_LOG_NOOP === 'true') {
+        logger.debug('[LinkedIn Scheduler] Tick noop', { tickId });
+      }
       return;
     }
 
