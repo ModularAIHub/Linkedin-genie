@@ -167,5 +167,21 @@ export const ai = {
   bulkGenerate: (prompts, options) => api.post('/api/ai/bulk-generate', { prompts, options }),
 };
 
+// Strategy Builder endpoints
+export const strategy = {
+  getCurrent: () => api.get('/api/strategy/current'),
+  getById: (id) => api.get(`/api/strategy/${id}`),
+  list: () => api.get('/api/strategy/list'),
+  create: (data) => api.post('/api/strategy', data),
+  chat: (message, strategyId, currentStep) =>
+    api.post('/api/strategy/chat', { message, strategyId, currentStep }),
+  addOn: (strategyId, data) => api.post(`/api/strategy/${strategyId}/add-on`, data),
+  generatePrompts: (strategyId) => api.post(`/api/strategy/${strategyId}/generate-prompts`),
+  getPrompts: (strategyId, params) => api.get(`/api/strategy/${strategyId}/prompts`, { params }),
+  toggleFavorite: (promptId) => api.post(`/api/strategy/prompts/${promptId}/favorite`),
+  update: (strategyId, data) => api.patch(`/api/strategy/${strategyId}`, data),
+  delete: (strategyId) => api.delete(`/api/strategy/${strategyId}`),
+};
+
 export default api;
 // ...existing code for new Tweet Genie parity version only...

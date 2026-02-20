@@ -26,18 +26,32 @@ const useLinkedInPostComposer = () => {
   const [isLoadingScheduled, setIsLoadingScheduled] = useState(false);
   const [characterCount, setCharacterCount] = useState(0);
 
-  // Image upload for single post (uploads as base64 to backend, stores LinkedIn URL)
+  // Image/PDF upload for single post (uploads as base64 to backend, stores LinkedIn URL)
   const handleImageUpload = async (event) => {
     const files = Array.from(event.target.files);
-    const validFiles = files.filter(file => file.type.startsWith('image/') && file.size <= 5 * 1024 * 1024);
+    const validFiles = files.filter(file => {
+      const isImage = file.type.startsWith('image/');
+      const isPDF = file.type === 'application/pdf';
+      const sizeLimit = isPDF ? 100 * 1024 * 1024 : 5 * 1024 * 1024; // 100MB for PDF, 5MB for images
+      return (isImage || isPDF) && file.size <= sizeLimit;
+    });
+    
+    if (validFiles.length < files.length) {
+      const rejected = files.length - validFiles.length;
+      toast.error(`${rejected} file(s) rejected. Images max 5MB, PDFs max 100MB.`);
+    }
+    
     if (selectedImages.length + validFiles.length > 9) {
-      toast.error('Maximum 9 images allowed per post');
+      toast.error('Maximum 9 files allowed per post');
       return;
     }
+    
     setIsUploadingImages(true);
     try {
       const uploadedImages = [];
       for (const file of validFiles) {
+        const isPDF = file.type === 'application/pdf';
+        
         // Read file as base64
         const base64 = await new Promise((resolve, reject) => {
           const reader = new FileReader();
@@ -45,10 +59,12 @@ const useLinkedInPostComposer = () => {
           reader.onerror = reject;
           reader.readAsDataURL(file);
         });
+        
         // Upload to backend using account-aware API
         let data;
         try {
-          const res = await postForCurrentAccount('/api/linkedin/upload-image-base64', {
+          const endpoint = isPDF ? '/api/linkedin/upload-document-base64' : '/api/linkedin/upload-image-base64';
+          const res = await postForCurrentAccount(endpoint, {
             base64,
             mimetype: file.type,
             filename: file.name
@@ -61,21 +77,26 @@ const useLinkedInPostComposer = () => {
           
           data = await res.json();
         } catch (uploadErr) {
-          console.error('Image upload error:', uploadErr);
-          toast.error('Image upload failed: ' + uploadErr.message);
+          console.error('File upload error:', uploadErr);
+          toast.error(`${isPDF ? 'PDF' : 'Image'} upload failed: ` + uploadErr.message);
           continue;
         }
+        
         uploadedImages.push({
           file,
-          preview: URL.createObjectURL(file),
+          preview: isPDF ? null : URL.createObjectURL(file),
           url: data.url,
           id: Math.random().toString(36).substr(2, 9),
+          type: file.type,
+          name: file.name,
+          isPDF
         });
       }
       setSelectedImages(prev => [...prev, ...uploadedImages]);
+      toast.success(`${uploadedImages.length} file(s) uploaded successfully!`);
     } catch (err) {
-      console.error('Image upload unexpected error:', err);
-      toast.error('Failed to upload image(s): ' + (err?.message || 'Unknown error'));
+      console.error('File upload unexpected error:', err);
+      toast.error('Failed to upload file(s): ' + (err?.message || 'Unknown error'));
     } finally {
       setIsUploadingImages(false);
     }

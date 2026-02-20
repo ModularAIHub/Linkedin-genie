@@ -1,5 +1,10 @@
 import { default as axios } from 'axios';
 import { pool } from '../config/database.js';
+import { hasProPlanAccess, resolveRequestPlanType } from '../middleware/planAccess.js';
+
+const FREE_ANALYTICS_DAYS = 7;
+const FREE_TOP_POSTS_LIMIT = 5;
+const PRO_TOP_POSTS_LIMIT = 20;
 
 // Helper: Get LinkedIn access token for user
 async function getLinkedInAuthForUser(userId) {
@@ -212,8 +217,14 @@ export async function getAnalytics(req, res) {
   try {
     const userId = req.user.id;
     const { days = 30, account_id, account_type } = req.query;
+    const parsedDays = Number.parseInt(days, 10);
+    const requestedDays = Number.isFinite(parsedDays) && parsedDays > 0 ? parsedDays : 30;
+    const planType = await resolveRequestPlanType(req);
+    const isProPlan = hasProPlanAccess(planType);
+    const effectiveDays = isProPlan ? requestedDays : FREE_ANALYTICS_DAYS;
+    const topPostsLimit = isProPlan ? PRO_TOP_POSTS_LIMIT : FREE_TOP_POSTS_LIMIT;
     const startDate = new Date();
-    startDate.setDate(startDate.getDate() - parseInt(days));
+    startDate.setDate(startDate.getDate() - effectiveDays);
 
     let filterField = 'user_id';
     let filterValue = userId;
@@ -222,9 +233,8 @@ export async function getAnalytics(req, res) {
       filterValue = account_id;
     }
 
-    // Overview metrics — exclude deleted posts
     const { rows: overview } = await pool.query(
-      `SELECT 
+      `SELECT
         COUNT(*) as total_posts,
         COALESCE(SUM(views), 0) as total_views,
         COALESCE(SUM(likes), 0) as total_likes,
@@ -234,94 +244,119 @@ export async function getAnalytics(req, res) {
         COALESCE(AVG(NULLIF(likes, 0)), 0) as avg_likes,
         COALESCE(AVG(NULLIF(comments, 0)), 0) as avg_comments,
         COALESCE(AVG(NULLIF(shares, 0)), 0) as avg_shares
-       FROM linkedin_posts 
-       WHERE ${filterField} = $1 
-         AND created_at >= $2 
+       FROM linkedin_posts
+       WHERE ${filterField} = $1
+         AND created_at >= $2
          AND status = 'posted'`,
       [filterValue, startDate]
     );
-    console.log('[Analytics] Overview:', overview[0]);
 
-    // Daily metrics for chart — exclude deleted
-    const { rows: daily } = await pool.query(
-      `SELECT 
-        DATE(created_at) as date,
-        COUNT(*) as posts_count,
-        COALESCE(SUM(views), 0) as views,
-        COALESCE(SUM(likes), 0) as likes,
-        COALESCE(SUM(comments), 0) as comments,
-        COALESCE(SUM(shares), 0) as shares
-       FROM linkedin_posts 
-       WHERE ${filterField} = $1 
-         AND created_at >= $2 
-         AND status = 'posted'
-       GROUP BY DATE(created_at)
-       ORDER BY date DESC
-       LIMIT 30`,
-      [filterValue, startDate]
-    );
+    let daily = [];
+    if (isProPlan) {
+      const { rows } = await pool.query(
+        `SELECT
+          DATE(created_at) as date,
+          COUNT(*) as posts_count,
+          COALESCE(SUM(views), 0) as views,
+          COALESCE(SUM(likes), 0) as likes,
+          COALESCE(SUM(comments), 0) as comments,
+          COALESCE(SUM(shares), 0) as shares
+         FROM linkedin_posts
+         WHERE ${filterField} = $1
+           AND created_at >= $2
+           AND status = 'posted'
+         GROUP BY DATE(created_at)
+         ORDER BY date DESC
+         LIMIT $3`,
+        [filterValue, startDate, effectiveDays]
+      );
+      daily = rows;
+    }
 
-    // Top posts by engagement — exclude deleted
     const { rows: topPosts } = await pool.query(
-      `SELECT 
+      `SELECT
         id, linkedin_post_id, post_content, views, likes, comments, shares, created_at,
         (COALESCE(likes, 0) + COALESCE(comments, 0) + COALESCE(shares, 0)) as total_engagement
-       FROM linkedin_posts 
-       WHERE ${filterField} = $1 
-         AND created_at >= $2 
+       FROM linkedin_posts
+       WHERE ${filterField} = $1
+         AND created_at >= $2
          AND status = 'posted'
        ORDER BY total_engagement DESC, views DESC
-       LIMIT 10`,
-      [filterValue, startDate]
+       LIMIT $3`,
+      [filterValue, startDate, topPostsLimit]
     );
 
-    // Timing analysis - day of week and hour of day performance
-    const { rows: timingByDayOfWeek } = await pool.query(
-      `SELECT 
-        EXTRACT(DOW FROM created_at) as day_of_week,
-        COUNT(*) as posts_count,
-        COALESCE(AVG(likes), 0) as avg_likes,
-        COALESCE(AVG(comments), 0) as avg_comments,
-        COALESCE(AVG(shares), 0) as avg_shares,
-        COALESCE(AVG(likes + comments + shares), 0) as avg_engagement
-       FROM linkedin_posts 
-       WHERE ${filterField} = $1 
-         AND created_at >= $2 
-         AND status = 'posted'
-       GROUP BY EXTRACT(DOW FROM created_at)
-       ORDER BY day_of_week`,
-      [filterValue, startDate]
-    );
+    let timingByDayOfWeek = [];
+    let timingByHour = [];
+    if (isProPlan) {
+      const [timingByDayResult, timingByHourResult] = await Promise.all([
+        pool.query(
+          `SELECT
+            EXTRACT(DOW FROM created_at) as day_of_week,
+            COUNT(*) as posts_count,
+            COALESCE(AVG(likes), 0) as avg_likes,
+            COALESCE(AVG(comments), 0) as avg_comments,
+            COALESCE(AVG(shares), 0) as avg_shares,
+            COALESCE(AVG(likes + comments + shares), 0) as avg_engagement
+           FROM linkedin_posts
+           WHERE ${filterField} = $1
+             AND created_at >= $2
+             AND status = 'posted'
+           GROUP BY EXTRACT(DOW FROM created_at)
+           ORDER BY day_of_week`,
+          [filterValue, startDate]
+        ),
+        pool.query(
+          `SELECT
+            EXTRACT(HOUR FROM created_at) as hour_of_day,
+            COUNT(*) as posts_count,
+            COALESCE(AVG(likes), 0) as avg_likes,
+            COALESCE(AVG(comments), 0) as avg_comments,
+            COALESCE(AVG(shares), 0) as avg_shares,
+            COALESCE(AVG(likes + comments + shares), 0) as avg_engagement
+           FROM linkedin_posts
+           WHERE ${filterField} = $1
+             AND created_at >= $2
+             AND status = 'posted'
+           GROUP BY EXTRACT(HOUR FROM created_at)
+           ORDER BY hour_of_day`,
+          [filterValue, startDate]
+        )
+      ]);
 
-    const { rows: timingByHour } = await pool.query(
-      `SELECT 
-        EXTRACT(HOUR FROM created_at) as hour_of_day,
-        COUNT(*) as posts_count,
-        COALESCE(AVG(likes), 0) as avg_likes,
-        COALESCE(AVG(comments), 0) as avg_comments,
-        COALESCE(AVG(shares), 0) as avg_shares,
-        COALESCE(AVG(likes + comments + shares), 0) as avg_engagement
-       FROM linkedin_posts 
-       WHERE ${filterField} = $1 
-         AND created_at >= $2 
-         AND status = 'posted'
-       GROUP BY EXTRACT(HOUR FROM created_at)
-       ORDER BY hour_of_day`,
-      [filterValue, startDate]
-    );
+      timingByDayOfWeek = timingByDayResult.rows;
+      timingByHour = timingByHourResult.rows;
+    }
 
-    res.json({
+    return res.json({
       overview: overview[0] || {},
       daily,
       topPosts,
       timing: {
         byDayOfWeek: timingByDayOfWeek,
         byHour: timingByHour
+      },
+      plan: {
+        planType,
+        pro: isProPlan,
+        days: effectiveDays,
+        topPostsLimit,
+        lockedFeatures: isProPlan
+          ? []
+          : [
+              'time_ranges_30_90_365',
+              'daily_trend_charts',
+              'engagement_breakdown_pie',
+              'ai_insights',
+              'content_strategy',
+              'optimal_timing',
+              'recommendations',
+              'sync_latest'
+            ]
       }
     });
-
   } catch (error) {
     console.error('[Analytics] Error:', error);
-    res.status(500).json({ error: 'Failed to fetch LinkedIn analytics' });
+    return res.status(500).json({ error: 'Failed to fetch LinkedIn analytics' });
   }
 }

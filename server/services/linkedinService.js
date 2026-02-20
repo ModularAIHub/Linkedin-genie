@@ -1,3 +1,5 @@
+import axios from 'axios';
+
 // Upload image to LinkedIn and return media URL
 export async function uploadImageToLinkedIn(accessToken, authorUrn, file) {
   // 1. Register upload with LinkedIn
@@ -40,7 +42,47 @@ export async function uploadImageToLinkedIn(accessToken, authorUrn, file) {
   return asset;
 }
 
-import axios from 'axios';
+// Upload document (PDF) to LinkedIn and return media URL
+export async function uploadDocumentToLinkedIn(accessToken, authorUrn, file) {
+  // 1. Register upload with LinkedIn for document
+  const registerUrl = 'https://api.linkedin.com/v2/assets?action=registerUpload';
+  const registerBody = {
+    registerUploadRequest: {
+      owner: authorUrn,
+      recipes: ['urn:li:digitalmediaRecipe:feedshare-document'],
+      serviceRelationships: [
+        {
+          identifier: 'urn:li:userGeneratedContent',
+          relationshipType: 'OWNER',
+        },
+      ],
+      supportedUploadMechanism: ['SYNCHRONOUS_UPLOAD']
+    }
+  };
+  const registerRes = await axios.post(registerUrl, registerBody, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'X-Restli-Protocol-Version': '2.0.0',
+    },
+  });
+  const uploadUrl = registerRes.data.value.uploadMechanism['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest'].uploadUrl;
+  const asset = registerRes.data.value.asset;
+
+  // 2. Upload document binary to LinkedIn
+  await axios.post(uploadUrl, file.buffer, {
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': file.mimetype,
+      'Content-Length': file.size,
+    },
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+  });
+
+  // 3. Return asset URN (to be used as media URL in post)
+  return asset;
+}
 
 // Exchange code for access token
 export async function exchangeCodeForToken(code, redirectUri, clientId, clientSecret) {

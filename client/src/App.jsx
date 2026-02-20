@@ -10,6 +10,7 @@ import LoadingSpinner from "./components/LoadingSpinner";
 const Dashboard = React.lazy(() => import('./pages/Dashboard'));
 const LinkedInPostComposer = React.lazy(() => import('./pages/LinkedInPostComposer'));
 const BulkGeneration = React.lazy(() => import('./pages/BulkGeneration'));
+const StrategyBuilder = React.lazy(() => import('./pages/StrategyBuilder'));
 const Scheduling = React.lazy(() => import('./pages/Scheduling'));
 const History = React.lazy(() => import('./pages/History'));
 const LinkedInAnalytics = React.lazy(() => import('./pages/LinkedInAnalytics'));
@@ -44,6 +45,8 @@ function App() {
                         <Route path="/" element={<Navigate to="/dashboard" replace />} />
                         <Route path="/dashboard" element={<Dashboard />} />
                         <Route path="/compose" element={<LinkedInPostComposer />} />
+                        <Route path="/strategy" element={<StrategyBuilder />} />
+                        <Route path="/strategy-builder" element={<Navigate to="/strategy" replace />} />
                         <Route path="/bulk-generation" element={<BulkGeneration />} />
                         <Route path="/scheduling" element={<Scheduling />} />
                         <Route path="/history" element={<History />} />

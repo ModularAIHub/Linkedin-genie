@@ -6,6 +6,9 @@ const router = express.Router();
 // POST /api/linkedin/upload-image-base64 - Upload image as base64 in JSON
 router.post('/upload-image-base64', linkedinMediaController.uploadImageBase64);
 
+// POST /api/linkedin/upload-document-base64 - Upload document (PDF) as base64 in JSON
+router.post('/upload-document-base64', linkedinMediaController.uploadDocumentBase64);
+
 // (Optional) Keep the old multipart route for compatibility
 // (Removed old multipart upload route; only base64 JSON upload is supported)
 

@@ -3,6 +3,7 @@ import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useAccount } from '../contexts/AccountContext';
 import { credits } from '../utils/api';
+import { hasProPlanAccess } from '../utils/planAccess';
 import AccountSwitcher from './AccountSwitcher';
 import {
   LayoutDashboard,
@@ -16,6 +17,8 @@ import {
   ChevronDown,
   CreditCard,
   History,
+  Sparkles,
+  Lock,
 } from 'lucide-react';
 
 const Layout = ({ children }) => {
@@ -27,11 +30,13 @@ const Layout = ({ children }) => {
   const [creditBalance, setCreditBalance] = useState(null);
   const [loadingCredits, setLoadingCredits] = useState(true);
   const CREDITS_REFRESH_MS = 5 * 60 * 1000;
+  const hasProAccess = hasProPlanAccess(user);
 
   const navigation = [
     { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     { name: 'Compose', href: '/compose', icon: Edit3 },
-    { name: 'Bulk Generation', href: '/bulk-generation', icon: BarChart3 },
+    { name: 'Strategy Builder', href: '/strategy', icon: Sparkles, badge: 'New', proOnly: true },
+    { name: 'Bulk Generation', href: '/bulk-generation', icon: BarChart3, proOnly: true },
     { name: 'Scheduling', href: '/scheduling', icon: Calendar },
     { name: 'History', href: '/history', icon: History },
     { name: 'Analytics', href: '/analytics', icon: BarChart3 },
@@ -114,19 +119,41 @@ const Layout = ({ children }) => {
           <ul className="space-y-2">
             {navigation.map((item) => {
               const Icon = item.icon;
+              const isProLocked = Boolean(item.proOnly && !hasProAccess);
               return (
                 <li key={item.name}>
                   <Link
                     to={item.href}
-                    className={`flex items-center px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
+                    className={`flex items-center justify-between px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
                       isActive(item.href)
                         ? 'bg-blue-50 text-[#0077B5] border-r-2 border-[#0077B5]'
                         : 'text-blue-700 hover:bg-blue-50 hover:text-[#0077B5]'
                     }`}
                     onClick={() => setIsSidebarOpen(false)}
                   >
-                    <Icon className="mr-3 h-5 w-5" />
-                    {item.name}
+                    <div className="flex items-center">
+                      <Icon className="mr-3 h-5 w-5" />
+                      {item.name}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {item.badge && (
+                        <span className="px-2 py-0.5 text-xs font-semibold bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-full">
+                          {item.badge}
+                        </span>
+                      )}
+                      {item.proOnly && (
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-full ${
+                            isProLocked
+                              ? 'bg-amber-100 text-amber-800 border border-amber-200'
+                              : 'bg-emerald-100 text-emerald-700 border border-emerald-200'
+                          }`}
+                        >
+                          {isProLocked && <Lock className="h-3 w-3" />}
+                          Pro
+                        </span>
+                      )}
+                    </div>
                   </Link>
                 </li>
               );

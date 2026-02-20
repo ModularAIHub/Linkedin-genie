@@ -2,6 +2,7 @@ import express from 'express';
 import axios from 'axios';
 import jwt from 'jsonwebtoken';
 import { requirePlatformLogin } from '../middleware/requirePlatformLogin.js';
+import { resolveRequestPlanType } from '../middleware/planAccess.js';
 import { setAuthCookies, clearAuthCookies } from '../utils/cookieUtils.js';
 
 const router = express.Router();
@@ -42,14 +43,31 @@ router.get('/callback', async (req, res) => {
 });
 
 // Validate authentication and attempt refresh if needed
-router.get('/validate', requirePlatformLogin, (req, res) => {
+router.get('/validate', requirePlatformLogin, async (req, res) => {
   if (!req.user || !req.user.id) {
     console.error('[auth/validate] Missing or invalid user object:', req.user);
     return res.status(401).json({ success: false, error: 'User not authenticated', user: null });
   }
+
+  const resolvedPlanType = await resolveRequestPlanType(req);
+  const baseUser =
+    req.user?.user && typeof req.user.user === 'object'
+      ? { ...req.user.user }
+      : { ...(req.user || {}) };
+
+  const normalizedUser = {
+    ...baseUser,
+    id: baseUser.id || req.user?.id || null,
+    userId: baseUser.userId || req.user?.userId || req.user?.id || null,
+    email: baseUser.email || req.user?.email || null,
+    name: baseUser.name || req.user?.name || '',
+    plan_type: resolvedPlanType,
+    planType: resolvedPlanType,
+  };
+
   res.json({
     success: true,
-    user: req.user
+    user: normalizedUser
   });
 });
 
