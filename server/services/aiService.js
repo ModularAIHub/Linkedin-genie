@@ -187,6 +187,7 @@ class AIService {
 
     // Try each provider
     let lastError = null;
+    const authFailures = [];
     for (const provider of providers) {
       try {
         if (userId) {
@@ -214,11 +215,20 @@ class AIService {
         };
       } catch (error) {
         console.error(`❌ ${provider.name} generation failed:`, error.message);
+        // Detect authorization/expired-token errors and collect them
+        const isAuthError = /unauthoriz|token expired|Unauthorized/i.test(error.message || '');
+        if (isAuthError) {
+          authFailures.push(`${provider.name} (${provider.keyType}): ${error.message}`);
+        }
         lastError = error;
         continue;
       }
     }
     
+    if (authFailures.length > 0) {
+      throw new Error(`Authorization failures for AI providers: ${authFailures.join(' ; ')}`);
+    }
+
     throw new Error(`All AI providers failed. Last error: ${lastError?.message || 'Unknown error'}`);
   }
 
@@ -304,8 +314,22 @@ Generate the post now:`;
 
       return content;
     } catch (error) {
-      if (error.response?.status === 400) {
+      const status = error.response?.status;
+      if (status === 400) {
         throw new Error(`Perplexity API Error: ${error.response.data?.error?.message || 'Bad Request'}`);
+      }
+      if (status === 401 || status === 403) {
+        const msg = error.response?.data?.error?.message || error.response?.data?.message || 'Unauthorized or token expired';
+        throw new Error(`Perplexity API Unauthorized (${status}): ${msg}`);
+      }
+      // Attach response body to the error message for easier debugging when possible
+      if (error.response?.data) {
+        try {
+          const debugMsg = typeof error.response.data === 'string' ? error.response.data : JSON.stringify(error.response.data);
+          error.message = `${error.message} | Perplexity response: ${debugMsg}`;
+        } catch (e) {
+          // ignore JSON stringify errors
+        }
       }
       throw error;
     }
@@ -338,9 +362,9 @@ Requirements:
 Generate the post now:`;
 
     try {
-      // FIXED: Updated to use gemini-2.0-flash (stable 2026 model)
+      // Updated to test gemini-2.5-flash for quota differences
       const response = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${keyToUse}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${keyToUse}`,
         {
           contents: [{
             parts: [{ text: systemPrompt }]

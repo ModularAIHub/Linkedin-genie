@@ -87,18 +87,12 @@ export async function createPost(req, res) {
       linkedin_user_id
     });
 
-    // Generate initial analytics (realistic starting values)
-    const initialViews = Math.floor(Math.random() * 50) + 10; // 10-60 initial views
-    const initialLikes = Math.floor(initialViews * 0.08); // ~8% like rate
-    const initialComments = Math.floor(initialViews * 0.02); // ~2% comment rate
-    const initialShares = Math.floor(initialViews * 0.01); // ~1% share rate
-
-    // Save to DB with initial metrics, including linkedin_user_id
+    // Save to DB without initial metrics - will be populated by real analytics sync
     const { rows } = await pool.query(
       `INSERT INTO linkedin_posts (user_id, linkedin_post_id, post_content, media_urls, post_type, company_id, linkedin_user_id, status, views, likes, comments, shares, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'posted', $8, $9, $10, $11, NOW(), NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'posted', 0, 0, 0, 0, NOW(), NOW())
        RETURNING *`,
-      [req.user.id, result.id || result.urn, post_content, JSON.stringify(media_urls), post_type, company_id, linkedin_user_id, initialViews, initialLikes, initialComments, initialShares]
+      [req.user.id, result.id || result.urn, post_content, JSON.stringify(media_urls), post_type, company_id, linkedin_user_id]
     );
     console.log('[CREATE POST] Inserted into linkedin_posts:', rows[0]);
 

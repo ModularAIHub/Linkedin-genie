@@ -109,33 +109,43 @@ const LinkedInPostComposer = () => {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50">
       {/* BYOK/platform mode indicator & Account Selector */}
-      <div className="w-full flex flex-col items-center pt-4 pb-2 gap-2">
-        <span className={`inline-block px-4 py-2 rounded-full text-sm font-semibold shadow ${
-          apiKeyMode === 'byok' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-[#0077B5]'
+      <div className="w-full flex flex-col items-center pt-6 pb-4 gap-3">
+        <span className={`inline-block px-5 py-2.5 rounded-full text-sm font-semibold shadow-md transition-all hover:shadow-lg ${
+          apiKeyMode === 'byok' ? 'bg-gradient-to-r from-green-100 to-emerald-100 text-green-700' : 'bg-gradient-to-r from-blue-100 to-cyan-100 text-[#0077B5]'
         }`}>
           {apiKeyMode === 'byok' ? '🔑 Using Your Own API Key (BYOK)' : '🏢 Using Platform API Key'}
         </span>
         {apiKeyPreference?.locked && apiKeyPreference?.byok_locked_until && (
-          <span className="text-xs text-yellow-600 bg-yellow-50 px-2 py-1 rounded">
+          <span className="text-xs text-yellow-700 bg-yellow-100 px-3 py-1.5 rounded-full shadow-sm">
             🔒 Locked until {new Date(apiKeyPreference.byok_locked_until).toLocaleDateString()}
           </span>
         )}
       </div>
-  <div className="max-w-4xl mx-auto px-2 sm:px-4 lg:px-16 py-4 sm:py-8">
+      
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-10">
         {/* LinkedIn Account Info */}
-        <LinkedInAccountInfo />
+        <div className="mb-6">
+          <LinkedInAccountInfo />
+        </div>
 
         {/* Composer Card - Modern UI */}
-  <div className="bg-white rounded-2xl shadow-xl p-3 sm:p-6 md:p-10 border border-gray-100 mt-4 sm:mt-6 max-w-full sm:max-w-3xl mx-auto">
+        <div className="bg-white rounded-3xl shadow-2xl p-6 sm:p-8 md:p-12 border border-gray-200 backdrop-blur-sm">
           {/* Card Header */}
-          <div className="flex items-center mb-4">
-            <h2 className="text-xl md:text-2xl font-bold text-gray-900">Compose LinkedIn Post</h2>
+          <div className="flex items-center justify-between mb-6 pb-4 border-b border-gray-100">
+            <h2 className="text-2xl md:text-3xl font-bold bg-gradient-to-r from-[#0077B5] to-blue-600 bg-clip-text text-transparent">
+              Compose LinkedIn Post
+            </h2>
+            <div className="flex items-center gap-2">
+              <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-[#0077B5] to-blue-600 flex items-center justify-center shadow-lg">
+                <span className="text-white font-bold text-lg">in</span>
+              </div>
+            </div>
           </div>
 
           {/* Content Editor */}
-          <div className="mb-4">
+          <div className="mb-6">
             <LinkedInPostContentEditor
               content={content}
               setContent={setContent}

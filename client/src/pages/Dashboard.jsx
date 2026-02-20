@@ -21,8 +21,6 @@ import toast from 'react-hot-toast';
 const Dashboard = () => {
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const [analyticsData, setAnalyticsData] = useState(null);
-  const [postsLoading, setPostsLoading] = useState(true);
-  const [recentPosts, setRecentPosts] = useState([]);
   const [creditsLoading, setCreditsLoading] = useState(true);
   const [creditBalance, setCreditBalance] = useState(null);
   const [byokLoading, setByokLoading] = useState(true);
@@ -38,16 +36,6 @@ const Dashboard = () => {
         console.error('Analytics API error:', err);
       })
       .finally(() => setAnalyticsLoading(false));
-
-    posts.list({ limit: 5 })
-      .then(res => {
-        setRecentPosts(res.data.posts || []);
-      })
-      .catch(err => {
-        toast.error('Failed to load recent posts');
-        console.error('Posts API error:', err);
-      })
-      .finally(() => setPostsLoading(false));
 
     credits.getBalance()
       .then(res => {
@@ -72,7 +60,7 @@ const Dashboard = () => {
 
 
   // Optionally, show a global spinner if all are loading (first load)
-  if (analyticsLoading && postsLoading && creditsLoading && byokLoading) {
+  if (analyticsLoading && creditsLoading && byokLoading) {
     return (
       <div className="flex items-center justify-center min-h-96">
         <div className="text-center">
@@ -83,33 +71,33 @@ const Dashboard = () => {
     );
   }
 
-  // Always show '—' for all stats if analytics is not available (warning is shown)
-  const analyticsUnavailable = true; // Force unavailable until real LinkedIn analytics is implemented
+  // Use real analytics data
+  const analyticsUnavailable = false;
   const stats = [
     {
       name: 'Total Posts',
-      value: '—',
+      value: analyticsData?.overview?.total_posts || 0,
       icon: MessageCircle,
       color: 'text-blue-600',
       bgColor: 'bg-blue-50',
     },
     {
       name: 'Total Views',
-      value: '—',
+      value: analyticsData?.overview?.total_views || 0,
       icon: Eye,
       color: 'text-green-600',
       bgColor: 'bg-green-50',
     },
     {
       name: 'Total Likes',
-      value: '—',
+      value: analyticsData?.overview?.total_likes || 0,
       icon: Heart,
       color: 'text-pink-600',
       bgColor: 'bg-pink-50',
     },
     {
       name: 'Total Shares',
-      value: '—',
+      value: analyticsData?.overview?.total_shares || 0,
       icon: Share2,
       color: 'text-purple-600',
       bgColor: 'bg-purple-50',
@@ -145,14 +133,16 @@ const Dashboard = () => {
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
-          <p className="mt-2 text-gray-600">
+          <h1 className="text-4xl font-bold bg-gradient-to-r from-[#0077B5] to-blue-600 bg-clip-text text-transparent">
+            Dashboard
+          </h1>
+          <p className="mt-2 text-gray-600 text-lg">
             Welcome back! Here's an overview of your LinkedIn activity.
           </p>
         </div>
         <Link
           to="/compose"
-          className="btn btn-primary btn-lg w-full sm:w-auto"
+          className="btn btn-primary btn-lg w-full sm:w-auto shadow-lg hover:shadow-xl transition-all transform hover:scale-105"
         >
           <Plus className="h-5 w-5 mr-2" />
           New Post
@@ -162,10 +152,6 @@ const Dashboard = () => {
 
       {/* Stats Grid */}
       <div className="space-y-4">
-        <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 rounded-lg p-4 text-center">
-          <strong>Analytics is under progress and not available yet.</strong><br />
-          We do not have the required LinkedIn API scope for analytics at this time.
-        </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           {analyticsLoading
             ? Array(4).fill(0).map((_, i) => (
@@ -182,9 +168,9 @@ const Dashboard = () => {
             : stats.map((stat) => {
                 const Icon = stat.icon;
                 return (
-                  <div key={stat.name} className="card">
+                  <div key={stat.name} className="card hover:shadow-xl transition-all transform hover:scale-105">
                     <div className="flex items-center">
-                      <div className={`p-3 rounded-lg ${stat.bgColor}`}>
+                      <div className={`p-3 rounded-xl ${stat.bgColor} shadow-md`}>
                         <Icon className={`h-6 w-6 ${stat.color}`} />
                       </div>
                       <div className="ml-4">
@@ -265,79 +251,8 @@ const Dashboard = () => {
           );
         })}
       </div>
-
-      {/* Recent Posts */}
-      <div className="card mt-6">
-        <div className="flex items-center justify-between mb-6">
-          <h3 className="text-lg font-semibold text-gray-900">Recent Posts</h3>
-          <Link
-            to="/compose"
-            className="text-primary-600 hover:text-primary-700 text-sm font-medium"
-          >
-            View all
-          </Link>
-        </div>
-
-        {recentPosts.length > 0 ? (
-          <div className="space-y-4">
-            {recentPosts.map((post) => (
-              <div
-                key={post.linkedin_post_id}
-                className="flex items-start space-x-4 p-4 bg-gray-50 rounded-lg"
-              >
-                <div className="flex-shrink-0">
-                  <div className="h-10 w-10 bg-blue-500 rounded-full flex items-center justify-center">
-                    <MessageCircle className="h-5 w-5 text-white" />
-                  </div>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center space-x-2">
-                    <p className="text-sm font-medium text-gray-900">
-                      {post.author_name || 'You'}
-                    </p>
-                    <span className={`badge ${
-                      post.status === 'posted' ? 'badge-success' :
-                      post.status === 'scheduled' ? 'badge-info' :
-                      'badge-warning'
-                    }`}>
-                      {post.status}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-gray-700 line-clamp-2">
-                    {post.post_content}
-                  </p>
-                  <div className="mt-2 flex items-center space-x-4 text-sm text-gray-500">
-                    <span className="flex items-center">
-                      <Heart className="h-4 w-4 mr-1" />
-                      {post.likes || 0}
-                    </span>
-                    <span className="flex items-center">
-                      <Share2 className="h-4 w-4 mr-1" />
-                      {post.shares || 0}
-                    </span>
-                    <span className="flex items-center">
-                      <Eye className="h-4 w-4 mr-1" />
-                      {post.views || 0}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="text-center py-8">
-            <Edit3 className="h-12 w-12 text-gray-400 mx-auto mb-4" />
-            <p className="text-gray-600">No posts yet</p>
-            <p className="text-sm text-gray-500 mt-2">
-              Start creating content to see your posts here
-            </p>
-          </div>
-        )}
-      </div>
     </div>
   );
 };
 
 export default Dashboard;
-// ...existing code for new Tweet Genie parity version only...
-// ...existing code for new Tweet Genie parity version only...

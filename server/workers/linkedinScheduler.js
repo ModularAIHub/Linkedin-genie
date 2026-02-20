@@ -197,10 +197,6 @@ async function resolvePublishingContext(post) {
 
 async function addPostedEntry(post, linkedinResult, linkedinUserId) {
   const linkedinPostId = linkedinResult?.id || linkedinResult?.urn || null;
-  const initialViews = Math.floor(Math.random() * 50) + 10;
-  const initialLikes = Math.floor(initialViews * 0.08);
-  const initialComments = Math.floor(initialViews * 0.02);
-  const initialShares = Math.floor(initialViews * 0.01);
 
   await pool.query(
     `INSERT INTO linkedin_posts (
@@ -220,7 +216,7 @@ async function addPostedEntry(post, linkedinResult, linkedinUserId) {
        updated_at,
        posted_at
      ) VALUES (
-       $1, $2, $3, $4, $5, $6, $7, 'posted', $8, $9, $10, $11, NOW(), NOW(), NOW()
+       $1, $2, $3, $4, $5, $6, $7, 'posted', 0, 0, 0, 0, NOW(), NOW(), NOW()
      )`,
     [
       post.user_id,
@@ -230,9 +226,6 @@ async function addPostedEntry(post, linkedinResult, linkedinUserId) {
       post.post_type,
       post.company_id,
       linkedinUserId,
-      initialViews,
-      initialLikes,
-      initialComments,
       initialShares
     ]
   );
