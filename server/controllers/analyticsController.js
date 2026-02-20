@@ -275,10 +275,49 @@ export async function getAnalytics(req, res) {
       [filterValue, startDate]
     );
 
+    // Timing analysis - day of week and hour of day performance
+    const { rows: timingByDayOfWeek } = await pool.query(
+      `SELECT 
+        EXTRACT(DOW FROM created_at) as day_of_week,
+        COUNT(*) as posts_count,
+        COALESCE(AVG(likes), 0) as avg_likes,
+        COALESCE(AVG(comments), 0) as avg_comments,
+        COALESCE(AVG(shares), 0) as avg_shares,
+        COALESCE(AVG(likes + comments + shares), 0) as avg_engagement
+       FROM linkedin_posts 
+       WHERE ${filterField} = $1 
+         AND created_at >= $2 
+         AND status = 'posted'
+       GROUP BY EXTRACT(DOW FROM created_at)
+       ORDER BY day_of_week`,
+      [filterValue, startDate]
+    );
+
+    const { rows: timingByHour } = await pool.query(
+      `SELECT 
+        EXTRACT(HOUR FROM created_at) as hour_of_day,
+        COUNT(*) as posts_count,
+        COALESCE(AVG(likes), 0) as avg_likes,
+        COALESCE(AVG(comments), 0) as avg_comments,
+        COALESCE(AVG(shares), 0) as avg_shares,
+        COALESCE(AVG(likes + comments + shares), 0) as avg_engagement
+       FROM linkedin_posts 
+       WHERE ${filterField} = $1 
+         AND created_at >= $2 
+         AND status = 'posted'
+       GROUP BY EXTRACT(HOUR FROM created_at)
+       ORDER BY hour_of_day`,
+      [filterValue, startDate]
+    );
+
     res.json({
       overview: overview[0] || {},
       daily,
-      topPosts
+      topPosts,
+      timing: {
+        byDayOfWeek: timingByDayOfWeek,
+        byHour: timingByHour
+      }
     });
 
   } catch (error) {
