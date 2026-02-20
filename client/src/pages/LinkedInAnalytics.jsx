@@ -138,6 +138,168 @@ const LinkedInAnalytics = () => {
   
   const performance = getPerformanceLevel();
 
+  // Generate smart recommendations based on actual data
+  const generateRecommendations = () => {
+    const recommendations = [];
+    const daysInPeriod = parseInt(timeframe);
+    const postsPerWeek = totalPosts > 0 ? (totalPosts / daysInPeriod * 7).toFixed(1) : 0;
+    const commentsRatio = totalEngagement > 0 ? (totalComments / totalEngagement * 100).toFixed(0) : 0;
+    const sharesRatio = totalEngagement > 0 ? (totalShares / totalEngagement * 100).toFixed(0) : 0;
+    const bestPost = topPosts[0];
+
+    // 1. Posting Frequency
+    if (totalPosts === 0) {
+      recommendations.push({
+        icon: MessageCircle,
+        title: 'Start Posting',
+        message: 'Begin with 2-3 posts per week to build momentum.',
+        color: 'red'
+      });
+    } else if (postsPerWeek < 2) {
+      recommendations.push({
+        icon: Calendar,
+        title: 'Increase Frequency',
+        message: `You're posting ${postsPerWeek}x/week. Aim for 3-5 posts weekly.`,
+        color: 'yellow'
+      });
+    } else if (postsPerWeek > 10) {
+      recommendations.push({
+        icon: Clock,
+        title: 'Quality Over Quantity',
+        message: `${postsPerWeek} posts/week is high. Focus on quality to avoid fatigue.`,
+        color: 'blue'
+      });
+    } else {
+      recommendations.push({
+        icon: CheckCircle,
+        title: 'Great Cadence',
+        message: `${postsPerWeek} posts/week is optimal. Keep it up!`,
+        color: 'green'
+      });
+    }
+
+    // 2. Engagement Quality
+    if (totalPosts > 0 && parseFloat(avgEngagement) < 3) {
+      recommendations.push({
+        icon: Target,
+        title: 'Boost Engagement',
+        message: `${avgEngagement} avg engagement is low. Try questions and personal stories.`,
+        color: 'orange'
+      });
+    } else if (parseFloat(avgEngagement) >= 15) {
+      recommendations.push({
+        icon: Award,
+        title: 'Outstanding!',
+        message: `${avgEngagement} avg engagement is excellent!`,
+        color: 'green'
+      });
+    }
+
+    // 3. Comments
+    if (totalPosts > 0 && totalComments === 0) {
+      recommendations.push({
+        icon: MessageCircle,
+        title: 'Spark Conversations',
+        message: 'End posts with questions to encourage discussions.',
+        color: 'orange'
+      });
+    } else if (commentsRatio >= 20) {
+      recommendations.push({
+        icon: MessageCircle,
+        title: 'Great Discussions!',
+        message: `${commentsRatio}% of engagement is comments!`,
+        color: 'green'
+      });
+    }
+
+    // 4. Shares
+    if (totalPosts > 0 && totalShares === 0) {
+      recommendations.push({
+        icon: Share2,
+        title: 'Make Content Shareable',
+        message: 'Create data-driven insights people want to share.',
+        color: 'purple'
+      });
+    } else if (sharesRatio >= 15) {
+      recommendations.push({
+        icon: Share2,
+        title: 'Highly Shareable!',
+        message: `${sharesRatio}% of engagement is shares!`,
+        color: 'green'
+      });
+    }
+
+    // 5. Best Post
+    if (bestPost && totalPosts > 1) {
+      const bestEng = (parseInt(bestPost.likes) || 0) + (parseInt(bestPost.comments) || 0) + (parseInt(bestPost.shares) || 0);
+      if (bestEng > avgEngagement * 2) {
+        recommendations.push({
+          icon: Lightbulb,
+          title: 'Replicate Success',
+          message: `Your top post got ${bestEng} engagements (${(bestEng / avgEngagement).toFixed(1)}x average).`,
+          color: 'blue',
+          preview: bestPost.post_content?.substring(0, 80)
+        });
+      }
+    }
+
+    // 6. Consistency
+    if (dailyMetrics.length >= 7) {
+      const recentWeek = dailyMetrics.slice(0, 7);
+      if (recentWeek.filter(d => d.posts_count > 0).length === 0) {
+        recommendations.push({
+          icon: AlertCircle,
+          title: 'Post Regularly',
+          message: 'No posts in 7 days. Consistency is key.',
+          color: 'red'
+        });
+      }
+    }
+
+    // 7. Trend
+    if (dailyMetrics.length >= 14) {
+      const mid = Math.floor(dailyMetrics.length / 2);
+      const recentAvg = dailyMetrics.slice(0, mid).reduce((sum, d) => sum + (parseInt(d.likes) || 0) + (parseInt(d.comments) || 0) + (parseInt(d.shares) || 0), 0) / mid;
+      const olderAvg = dailyMetrics.slice(mid).reduce((sum, d) => sum + (parseInt(d.likes) || 0) + (parseInt(d.comments) || 0) + (parseInt(d.shares) || 0), 0) / (dailyMetrics.length - mid);
+      
+      if (recentAvg > olderAvg * 1.3) {
+        recommendations.push({
+          icon: TrendingUp,
+          title: 'Growing!',
+          message: `Recent posts: +${((recentAvg / olderAvg - 1) * 100).toFixed(0)}% engagement.`,
+          color: 'green'
+        });
+      } else if (recentAvg < olderAvg * 0.7 && olderAvg > 0) {
+        recommendations.push({
+          icon: TrendingUp,
+          title: 'Declining',
+          message: `Recent engagement: -${((1 - recentAvg / olderAvg) * 100).toFixed(0)}%. Refresh strategy.`,
+          color: 'yellow'
+        });
+      }
+    }
+
+    // Defaults
+    if (recommendations.length < 4) {
+      recommendations.push({
+        icon: Lightbulb,
+        title: 'Content Mix',
+        message: '60% educational, 30% personal, 10% promotional.',
+        color: 'blue'
+      });
+      recommendations.push({
+        icon: Clock,
+        title: 'Best Times',
+        message: 'Post Tue-Thu, 8-10 AM for max reach.',
+        color: 'green'
+      });
+    }
+
+    return recommendations.slice(0, 6);
+  };
+
+  const smartRecommendations = generateRecommendations();
+
   const enhancedStats = [
     { 
       name: 'Total Posts', 
@@ -671,107 +833,85 @@ const LinkedInAnalytics = () => {
       {/* RECOMMENDATIONS TAB */}
       {activeTab === 'recommendations' && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div className="bg-white rounded-lg shadow-md p-6">
-              <div className="flex items-center mb-6">
-                <Target className="h-6 w-6 text-red-500 mr-3" />
-                <h3 className="text-xl font-semibold text-gray-900">Immediate Actions</h3>
-              </div>
-              <div className="space-y-4">
-                {parseFloat(avgEngagement) < 5 && totalPosts > 0 && (
-                  <div className="p-4 bg-yellow-50 rounded-lg border-l-4 border-yellow-400">
-                    <div className="flex items-start">
-                      <Hash className="h-5 w-5 text-yellow-500 mt-0.5 mr-3" />
-                      <div className="flex-1">
-                        <h4 className="font-medium text-yellow-900">Boost Engagement</h4>
-                        <p className="text-sm text-yellow-700 mt-1">Your {avgEngagement} avg engagements per post can improve. Try asking questions, sharing personal experiences, or providing actionable tips.</p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-                {totalComments === 0 && totalPosts > 0 && (
-                  <div className="p-4 bg-orange-50 rounded-lg border-l-4 border-orange-400">
-                    <div className="flex items-start">
-                      <MessageCircle className="h-5 w-5 text-orange-500 mt-0.5 mr-3" />
-                      <div className="flex-1">
-                        <h4 className="font-medium text-orange-900">Encourage Conversations</h4>
-                        <p className="text-sm text-orange-700 mt-1">No comments yet. End posts with questions or calls-to-action to spark discussions.</p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-                {totalShares === 0 && totalPosts > 0 && (
-                  <div className="p-4 bg-purple-50 rounded-lg border-l-4 border-purple-400">
-                    <div className="flex items-start">
-                      <Share2 className="h-5 w-5 text-purple-500 mt-0.5 mr-3" />
-                      <div className="flex-1">
-                        <h4 className="font-medium text-purple-900">Increase Shareability</h4>
-                        <p className="text-sm text-purple-700 mt-1">Create content worth sharing: industry insights, data-driven posts, or helpful resources.</p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-                <div className="p-4 bg-blue-50 rounded-lg border-l-4 border-blue-400">
-                  <div className="flex items-start">
-                    <Lightbulb className="h-5 w-5 text-blue-500 mt-0.5 mr-3" />
-                    <div className="flex-1">
-                      <h4 className="font-medium text-blue-900">Content Strategy</h4>
-                      <p className="text-sm text-blue-700 mt-1">Share industry insights, thought leadership, and professional experiences. Mix educational content with personal stories.</p>
-                    </div>
-                  </div>
-                </div>
-                <div className="p-4 bg-green-50 rounded-lg border-l-4 border-green-400">
-                  <div className="flex items-start">
-                    <Clock className="h-5 w-5 text-green-500 mt-0.5 mr-3" />
-                    <div className="flex-1">
-                      <h4 className="font-medium text-green-900">Optimal Posting</h4>
-                      <p className="text-sm text-green-700 mt-1">Post Tuesday-Thursday between 8-10 AM for maximum reach. Maintain consistency with 3-5 posts per week.</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
+          <div className="bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg shadow-md p-6 border-l-4 border-blue-500">
+            <div className="flex items-center mb-2">
+              <Brain className="h-6 w-6 text-blue-600 mr-3" />
+              <h3 className="text-xl font-semibold text-gray-900">Smart Recommendations</h3>
             </div>
+            <p className="text-sm text-gray-600">Personalized insights based on your {timeframe}-day performance</p>
+          </div>
 
-            <div className="bg-white rounded-lg shadow-md p-6">
-              <div className="flex items-center mb-6">
-                <Brain className="h-6 w-6 text-purple-500 mr-3" />
-                <h3 className="text-xl font-semibold text-gray-900">AI Success Tips</h3>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {smartRecommendations.map((rec, idx) => {
+              const Icon = rec.icon;
+              const colors = {
+                red: { bg: 'bg-red-50', border: 'border-red-400', text: 'text-red-900', sub: 'text-red-700', icon: 'text-red-500' },
+                yellow: { bg: 'bg-yellow-50', border: 'border-yellow-400', text: 'text-yellow-900', sub: 'text-yellow-700', icon: 'text-yellow-500' },
+                orange: { bg: 'bg-orange-50', border: 'border-orange-400', text: 'text-orange-900', sub: 'text-orange-700', icon: 'text-orange-500' },
+                blue: { bg: 'bg-blue-50', border: 'border-blue-400', text: 'text-blue-900', sub: 'text-blue-700', icon: 'text-blue-500' },
+                green: { bg: 'bg-green-50', border: 'border-green-400', text: 'text-green-900', sub: 'text-green-700', icon: 'text-green-500' },
+                purple: { bg: 'bg-purple-50', border: 'border-purple-400', text: 'text-purple-900', sub: 'text-purple-700', icon: 'text-purple-500' }
+              };
+              const c = colors[rec.color] || colors.blue;
+
+              return (
+                <div key={idx} className={`${c.bg} rounded-lg border-l-4 ${c.border} p-5 shadow-sm hover:shadow-md transition-shadow`}>
+                  <div className="flex items-start">
+                    <Icon className={`h-6 w-6 ${c.icon} mt-0.5 mr-3 flex-shrink-0`} />
+                    <div className="flex-1">
+                      <h4 className={`font-semibold ${c.text} mb-1`}>{rec.title}</h4>
+                      <p className={`text-sm ${c.sub} leading-relaxed`}>{rec.message}</p>
+                      {rec.preview && (
+                        <p className="text-xs text-gray-500 mt-2 italic border-l-2 border-gray-300 pl-2">
+                          "{rec.preview}..."
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="bg-white rounded-lg shadow-md p-6">
+            <div className="flex items-center mb-6">
+              <Star className="h-6 w-6 text-yellow-500 mr-3" />
+              <h3 className="text-xl font-semibold text-gray-900">LinkedIn Best Practices</h3>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="p-4 bg-purple-50 rounded-lg">
+                <div className="flex items-start">
+                  <Star className="h-4 w-4 text-purple-500 mt-1 mr-2 flex-shrink-0" />
+                  <div>
+                    <div className="font-medium text-purple-900">Be Authentic</div>
+                    <div className="text-sm text-purple-700">Share personal experiences and lessons</div>
+                  </div>
+                </div>
               </div>
-              <div className="space-y-3">
-                <div className="p-3 bg-purple-50 rounded-lg">
-                  <div className="flex items-start">
-                    <Star className="h-4 w-4 text-purple-500 mt-1 mr-2 flex-shrink-0" />
-                    <div>
-                      <div className="font-medium text-purple-900">Be Consistent</div>
-                      <div className="text-sm text-purple-700">Post 3–5 times per week for optimal growth</div>
-                    </div>
+              <div className="p-4 bg-blue-50 rounded-lg">
+                <div className="flex items-start">
+                  <Star className="h-4 w-4 text-blue-500 mt-1 mr-2 flex-shrink-0" />
+                  <div>
+                    <div className="font-medium text-blue-900">Add Value First</div>
+                    <div className="text-sm text-blue-700">Share knowledge before promoting</div>
                   </div>
                 </div>
-                <div className="p-3 bg-blue-50 rounded-lg">
-                  <div className="flex items-start">
-                    <Star className="h-4 w-4 text-blue-500 mt-1 mr-2 flex-shrink-0" />
-                    <div>
-                      <div className="font-medium text-blue-900">Add Value First</div>
-                      <div className="text-sm text-blue-700">Share knowledge before promoting products</div>
-                    </div>
+              </div>
+              <div className="p-4 bg-green-50 rounded-lg">
+                <div className="flex items-start">
+                  <Star className="h-4 w-4 text-green-500 mt-1 mr-2 flex-shrink-0" />
+                  <div>
+                    <div className="font-medium text-green-900">Use Native Documents</div>
+                    <div className="text-sm text-green-700">PDFs get 3x more impressions</div>
                   </div>
                 </div>
-                <div className="p-3 bg-green-50 rounded-lg">
-                  <div className="flex items-start">
-                    <Star className="h-4 w-4 text-green-500 mt-1 mr-2 flex-shrink-0" />
-                    <div>
-                      <div className="font-medium text-green-900">Use Native Documents</div>
-                      <div className="text-sm text-green-700">PDF carousels get 3x more impressions than images</div>
-                    </div>
-                  </div>
-                </div>
-                <div className="p-3 bg-orange-50 rounded-lg">
-                  <div className="flex items-start">
-                    <Star className="h-4 w-4 text-orange-500 mt-1 mr-2 flex-shrink-0" />
-                    <div>
-                      <div className="font-medium text-orange-900">Engage Back</div>
-                      <div className="text-sm text-orange-700">Reply to every comment within 2 hours to boost reach</div>
-                    </div>
+              </div>
+              <div className="p-4 bg-orange-50 rounded-lg">
+                <div className="flex items-start">
+                  <Star className="h-4 w-4 text-orange-500 mt-1 mr-2 flex-shrink-0" />
+                  <div>
+                    <div className="font-medium text-orange-900">Engage Back</div>
+                    <div className="text-sm text-orange-700">Reply within 2 hours to boost reach</div>
                   </div>
                 </div>
               </div>
