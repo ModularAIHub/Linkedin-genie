@@ -175,28 +175,42 @@ const History = () => {
 
   const formatDate = (dateString) => {
     const date = new Date(dateString);
+    if (Number.isNaN(date.getTime())) {
+      return 'Unknown time';
+    }
+
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
     const diffInMinutes = Math.floor(diffMs / (1000 * 60));
-    const diffInHours = diffMs / (1000 * 60 * 60);
+    const diffInHours = Math.floor(diffMs / (1000 * 60 * 60));
+    const diffInDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
     const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
     
     if (diffInMinutes < 1) {
       return 'just now';
-    } else if (diffInHours < 1) {
-      return `${diffInMinutes}m ago`;
-    } else if (diffInHours < 24) {
-      return `${Math.floor(diffInHours)}h ago`;
-    } else {
-      return date.toLocaleString(undefined, {
-        hour: '2-digit',
-        minute: '2-digit',
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        timeZone: userTimezone
-      });
     }
+
+    if (diffInMinutes < 60) {
+      return rtf.format(-diffInMinutes, 'minute');
+    }
+
+    if (diffInHours < 24) {
+      return rtf.format(-diffInHours, 'hour');
+    }
+
+    if (diffInDays < 7) {
+      return rtf.format(-diffInDays, 'day');
+    }
+
+    return date.toLocaleString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      timeZone: userTimezone
+    });
   };
 
   const getEngagementRate = (post) => {

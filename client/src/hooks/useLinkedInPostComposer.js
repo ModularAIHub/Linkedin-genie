@@ -29,11 +29,23 @@ const useLinkedInPostComposer = () => {
   // Image/PDF upload for single post (uploads as base64 to backend, stores LinkedIn URL)
   const handleImageUpload = async (event) => {
     const files = Array.from(event.target.files);
+    console.log('[PDF UPLOAD] Files selected:', files.map(f => ({ name: f.name, type: f.type, size: f.size })));
+    
     const validFiles = files.filter(file => {
       const isImage = file.type.startsWith('image/');
       const isPDF = file.type === 'application/pdf';
       const sizeLimit = isPDF ? 100 * 1024 * 1024 : 5 * 1024 * 1024; // 100MB for PDF, 5MB for images
-      return (isImage || isPDF) && file.size <= sizeLimit;
+      const isValid = (isImage || isPDF) && file.size <= sizeLimit;
+      console.log('[PDF UPLOAD] File validation:', { 
+        name: file.name, 
+        type: file.type, 
+        isImage, 
+        isPDF, 
+        size: file.size, 
+        sizeLimit, 
+        isValid 
+      });
+      return isValid;
     });
     
     if (validFiles.length < files.length) {
@@ -51,6 +63,7 @@ const useLinkedInPostComposer = () => {
       const uploadedImages = [];
       for (const file of validFiles) {
         const isPDF = file.type === 'application/pdf';
+        console.log('[PDF UPLOAD] Processing file:', { name: file.name, isPDF, type: file.type });
         
         // Read file as base64
         const base64 = await new Promise((resolve, reject) => {
@@ -60,24 +73,32 @@ const useLinkedInPostComposer = () => {
           reader.readAsDataURL(file);
         });
         
+        console.log('[PDF UPLOAD] Base64 encoded, length:', base64.length);
+        
         // Upload to backend using account-aware API
         let data;
         try {
           const endpoint = isPDF ? '/api/linkedin/upload-document-base64' : '/api/linkedin/upload-image-base64';
+          console.log('[PDF UPLOAD] Uploading to endpoint:', endpoint);
+          
           const res = await postForCurrentAccount(endpoint, {
             base64,
             mimetype: file.type,
             filename: file.name
           });
           
+          console.log('[PDF UPLOAD] Response status:', res.status, res.ok);
+          
           if (!res.ok) {
             const errorData = await res.json();
+            console.error('[PDF UPLOAD] Upload failed:', errorData);
             throw new Error(errorData.error || 'Upload failed');
           }
           
           data = await res.json();
+          console.log('[PDF UPLOAD] Upload successful:', data);
         } catch (uploadErr) {
-          console.error('File upload error:', uploadErr);
+          console.error('[PDF UPLOAD] File upload error:', uploadErr);
           toast.error(`${isPDF ? 'PDF' : 'Image'} upload failed: ` + uploadErr.message);
           continue;
         }
@@ -95,7 +116,7 @@ const useLinkedInPostComposer = () => {
       setSelectedImages(prev => [...prev, ...uploadedImages]);
       toast.success(`${uploadedImages.length} file(s) uploaded successfully!`);
     } catch (err) {
-      console.error('File upload unexpected error:', err);
+      console.error('[PDF UPLOAD] File upload unexpected error:', err);
       toast.error('Failed to upload file(s): ' + (err?.message || 'Unknown error'));
     } finally {
       setIsUploadingImages(false);
@@ -144,7 +165,21 @@ const useLinkedInPostComposer = () => {
   const handleAIButtonClick = () => setShowAIPrompt(v => !v);
 
   // Post handler (single post only)
-  const handlePost = async () => {
+  const handlePost = async (crossPostInput = false) => {
+    const normalizedCrossPost =
+      crossPostInput && typeof crossPostInput === 'object' && !Array.isArray(crossPostInput)
+        ? {
+            x: Boolean(crossPostInput.x),
+            threads: Boolean(crossPostInput.threads),
+            optimizeCrossPost: crossPostInput.optimizeCrossPost !== false,
+          }
+        : {
+            x: false,
+            threads: false,
+            optimizeCrossPost: true,
+          };
+    const hasAnyCrossPostTarget = normalizedCrossPost.x || normalizedCrossPost.threads;
+
     if (!content.trim() && selectedImages.length === 0) {
       toast.error('Please enter some content or add images');
       return;
@@ -157,17 +192,79 @@ const useLinkedInPostComposer = () => {
       const media_urls = selectedImages.map(img => img.url || img.file?.name || '');
       
       // Use account-aware API to post with selected account
-      await postForCurrentAccount('/api/posts', {
+      const response = await postForCurrentAccount('/api/posts', {
         post_content: unicodeContent,
-        media_urls
+        media_urls,
+        ...(normalizedCrossPost.x && { postToTwitter: true }),
+        ...(hasAnyCrossPostTarget && {
+          crossPostTargets: {
+            x: normalizedCrossPost.x,
+            threads: normalizedCrossPost.threads,
+          },
+          optimizeCrossPost: normalizedCrossPost.optimizeCrossPost,
+        }),
       });
+
+      const responseData = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(responseData?.error || 'Failed to post to LinkedIn');
+      }
       
       const accountInfo = selectedAccount?.linkedin_display_name || selectedAccount?.linkedin_username || 'LinkedIn';
-      toast.success(`Posted to ${accountInfo}!`);
+
+      const crossPost = responseData?.crossPost;
+      if (crossPost && typeof crossPost === 'object' && hasAnyCrossPostTarget) {
+        const selectedPlatforms = [];
+        if (normalizedCrossPost.x) selectedPlatforms.push({ label: 'X', result: crossPost.x || null });
+        if (normalizedCrossPost.threads) selectedPlatforms.push({ label: 'Threads', result: crossPost.threads || null });
+
+        const successful = [];
+        const issues = [];
+        let mediaFallbackShown = false;
+
+        for (const platform of selectedPlatforms) {
+          const status = String(platform?.result?.status || '').trim();
+          if (status === 'posted') {
+            successful.push(platform.label);
+            if (platform?.result?.mediaDetected && platform?.result?.mediaStatus === 'text_only_phase1') {
+              mediaFallbackShown = true;
+            }
+            continue;
+          }
+
+          const statusMessages = {
+            not_connected: `${platform.label} not connected - LinkedIn post succeeded.`,
+            timeout: `${platform.label} cross-post timed out - LinkedIn post succeeded.`,
+            skipped_individual_only: `${platform.label} cross-post is available only for personal LinkedIn accounts right now.`,
+            skipped_not_configured: `${platform.label} cross-post is not configured yet.`,
+            skipped: `${platform.label} cross-post was skipped.`,
+            failed_too_long: `${platform.label} cross-post failed because the LinkedIn post is too long for X.`,
+            failed: `${platform.label} cross-post failed - LinkedIn post succeeded.`,
+            disabled: null,
+            '': null,
+          };
+          const issue = statusMessages[status] ?? `${platform.label} cross-post did not complete (${status}). LinkedIn post succeeded.`;
+          if (issue) issues.push(issue);
+        }
+
+        if (successful.length > 0 && issues.length === 0) {
+          toast.success(`Posted to ${accountInfo} and cross-posted to ${successful.join(' + ')}!`);
+        } else {
+          toast.success(`Posted to ${accountInfo}!`);
+          issues.forEach((message) => toast(message, { icon: '⚠️' }));
+        }
+
+        if (mediaFallbackShown) {
+          toast('Images were posted to LinkedIn only. Cross-posts used text-only content (Phase 1).', { icon: 'ℹ️' });
+        }
+      } else {
+        toast.success(`Posted to ${accountInfo}!`);
+      }
+
       setContent('');
       setSelectedImages([]);
     } catch (err) {
-      toast.error('Failed to post to LinkedIn');
+      toast.error(err?.message || 'Failed to post to LinkedIn');
     } finally {
       setIsPosting(false);
     }

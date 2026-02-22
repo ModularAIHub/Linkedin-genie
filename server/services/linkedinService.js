@@ -44,44 +44,73 @@ export async function uploadImageToLinkedIn(accessToken, authorUrn, file) {
 
 // Upload document (PDF) to LinkedIn and return media URL
 export async function uploadDocumentToLinkedIn(accessToken, authorUrn, file) {
-  // 1. Register upload with LinkedIn for document
-  const registerUrl = 'https://api.linkedin.com/v2/assets?action=registerUpload';
-  const registerBody = {
-    registerUploadRequest: {
-      owner: authorUrn,
-      recipes: ['urn:li:digitalmediaRecipe:feedshare-document'],
-      serviceRelationships: [
-        {
-          identifier: 'urn:li:userGeneratedContent',
-          relationshipType: 'OWNER',
-        },
-      ],
-      supportedUploadMechanism: ['SYNCHRONOUS_UPLOAD']
-    }
-  };
-  const registerRes = await axios.post(registerUrl, registerBody, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-      'X-Restli-Protocol-Version': '2.0.0',
-    },
+  console.log('[LINKEDIN SERVICE] uploadDocumentToLinkedIn called', {
+    hasAccessToken: !!accessToken,
+    authorUrn,
+    fileSize: file.size,
+    fileMimetype: file.mimetype,
+    fileName: file.originalname
   });
-  const uploadUrl = registerRes.data.value.uploadMechanism['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest'].uploadUrl;
-  const asset = registerRes.data.value.asset;
+  
+  try {
+    // 1. Register upload with LinkedIn for document
+    const registerUrl = 'https://api.linkedin.com/v2/assets?action=registerUpload';
+    const registerBody = {
+      registerUploadRequest: {
+        recipes: ['urn:li:digitalmediaRecipe:feedshare-document'],
+        owner: authorUrn,
+        serviceRelationships: [
+          {
+            relationshipType: 'OWNER',
+            identifier: 'urn:li:userGeneratedContent'
+          }
+        ]
+      }
+    };
+    
+    console.log('[LINKEDIN SERVICE] Registering upload with LinkedIn...', { registerUrl, registerBody: JSON.stringify(registerBody, null, 2) });
+    
+    const registerRes = await axios.post(registerUrl, registerBody, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'X-Restli-Protocol-Version': '2.0.0',
+      },
+    });
+    
+    console.log('[LINKEDIN SERVICE] Register response:', registerRes.data);
+    
+    const uploadUrl = registerRes.data.value.uploadMechanism['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest'].uploadUrl;
+    const asset = registerRes.data.value.asset;
+    
+    console.log('[LINKEDIN SERVICE] Upload URL obtained:', uploadUrl);
+    console.log('[LINKEDIN SERVICE] Asset URN:', asset);
 
-  // 2. Upload document binary to LinkedIn
-  await axios.post(uploadUrl, file.buffer, {
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': file.mimetype,
-      'Content-Length': file.size,
-    },
-    maxContentLength: Infinity,
-    maxBodyLength: Infinity,
-  });
+    // 2. Upload document binary to LinkedIn
+    console.log('[LINKEDIN SERVICE] Uploading document binary to LinkedIn...');
+    
+    await axios.put(uploadUrl, file.buffer, {
+      headers: {
+        'Content-Type': file.mimetype,
+      },
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
+    
+    console.log('[LINKEDIN SERVICE] Document binary uploaded successfully');
 
-  // 3. Return asset URN (to be used as media URL in post)
-  return asset;
+    // 3. Return asset URN (to be used as media URL in post)
+    console.log('[LINKEDIN SERVICE] Returning asset URN:', asset);
+    return asset;
+  } catch (error) {
+    console.error('[LINKEDIN SERVICE] Error in uploadDocumentToLinkedIn:', {
+      message: error.message,
+      response: error.response?.data,
+      status: error.response?.status,
+      stack: error.stack
+    });
+    throw error;
+  }
 }
 
 // Exchange code for access token
@@ -97,6 +126,34 @@ export async function exchangeCodeForToken(code, redirectUri, clientId, clientSe
   const response = await axios.post(url, params.toString(), {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
   });
+  return response.data;
+}
+
+// Refresh LinkedIn access token using stored refresh token
+export async function refreshLinkedInAccessToken(refreshToken) {
+  const safeRefreshToken = String(refreshToken || '').trim();
+  if (!safeRefreshToken) {
+    throw new Error('LinkedIn refresh token is missing');
+  }
+
+  const clientId = String(process.env.LINKEDIN_CLIENT_ID || '').trim();
+  const clientSecret = String(process.env.LINKEDIN_CLIENT_SECRET || '').trim();
+  if (!clientId || !clientSecret) {
+    throw new Error('LinkedIn client credentials are not configured');
+  }
+
+  const url = 'https://www.linkedin.com/oauth/v2/accessToken';
+  const params = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: safeRefreshToken,
+    client_id: clientId,
+    client_secret: clientSecret,
+  });
+
+  const response = await axios.post(url, params.toString(), {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  });
+
   return response.data;
 }
 

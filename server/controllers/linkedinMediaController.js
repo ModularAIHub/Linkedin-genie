@@ -170,6 +170,7 @@ export async function uploadImage(req, res) {
 
 // POST /api/linkedin/upload-document-base64
 export async function uploadDocumentBase64(req, res) {
+  console.log('[UPLOAD DOCUMENT BASE64] Request received');
   try {
     const user = req.user;
     if (!user) {
@@ -177,8 +178,11 @@ export async function uploadDocumentBase64(req, res) {
       return res.status(401).json({ error: 'Not authenticated' });
     }
     
+    console.log('[UPLOAD DOCUMENT BASE64] User authenticated:', user.id);
+    
     // Get account_id from request (for team accounts)
     const accountId = req.body.account_id || req.headers['x-selected-account-id'];
+    console.log('[UPLOAD DOCUMENT BASE64] Account ID:', accountId);
     
     let accessToken, authorUrn;
     
@@ -230,6 +234,13 @@ export async function uploadDocumentBase64(req, res) {
     }
     
     const { base64, mimetype, filename } = req.body;
+    console.log('[UPLOAD DOCUMENT BASE64] Request body:', { 
+      hasBase64: !!base64, 
+      base64Length: base64?.length, 
+      mimetype, 
+      filename 
+    });
+    
     if (!base64 || !mimetype) {
       console.error('[UPLOAD DOCUMENT BASE64 ERROR] Missing base64 or mimetype', req.body);
       return res.status(400).json({ error: 'Missing base64 or mimetype' });
@@ -239,6 +250,7 @@ export async function uploadDocumentBase64(req, res) {
     let buffer;
     try {
       buffer = Buffer.from(base64, 'base64');
+      console.log('[UPLOAD DOCUMENT BASE64] Buffer created, size:', buffer.length);
     } catch (err) {
       console.error('[UPLOAD DOCUMENT BASE64 ERROR] Failed to decode base64', err);
       return res.status(400).json({ error: 'Invalid base64 encoding' });
@@ -251,16 +263,24 @@ export async function uploadDocumentBase64(req, res) {
     
     // Create a file-like object
     const file = { buffer, mimetype, size: buffer.length, originalname: filename || 'document.pdf' };
+    console.log('[UPLOAD DOCUMENT BASE64] File object created:', { 
+      size: file.size, 
+      mimetype: file.mimetype, 
+      originalname: file.originalname 
+    });
     
     // Upload document to LinkedIn and get media URL
     let mediaUrl;
     try {
+      console.log('[UPLOAD DOCUMENT BASE64] Calling uploadDocumentToLinkedIn...');
       mediaUrl = await linkedinService.uploadDocumentToLinkedIn(accessToken, authorUrn, file);
+      console.log('[UPLOAD DOCUMENT BASE64] Upload successful, mediaUrl:', mediaUrl);
     } catch (err) {
       console.error('[UPLOAD DOCUMENT BASE64 ERROR] LinkedIn upload failed', err && (err.response?.data || err.message || err));
       return res.status(500).json({ error: 'LinkedIn upload failed', details: err.response?.data || err.message || err });
     }
     
+    console.log('[UPLOAD DOCUMENT BASE64] Sending success response');
     res.json({ url: mediaUrl });
   } catch (error) {
     console.error('[UPLOAD DOCUMENT BASE64 ERROR] Unexpected error', error);

@@ -1132,7 +1132,7 @@ const LinkedInAnalytics = () => {
               <h3 className="text-lg font-semibold text-gray-900 mb-2">No Timing Data Yet</h3>
               <p className="text-gray-600 mb-4">
                 Post content and sync analytics to see your best posting times and patterns.
-              </p>
+x``              </p>
               <button
                 onClick={syncAnalytics}
                 disabled={syncing}

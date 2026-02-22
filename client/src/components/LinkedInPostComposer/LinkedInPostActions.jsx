@@ -1,5 +1,5 @@
 import React from 'react';
-import { Send } from 'lucide-react';
+import { Send, Calendar } from 'lucide-react';
 
 const LinkedInPostActions = ({
   isCarousel,
@@ -7,7 +7,8 @@ const LinkedInPostActions = ({
   carouselSlides,
   selectedImages,
   isPosting,
-  onPost
+  onPost,
+  onSchedule
 }) => {
   const hasContent = isCarousel 
     ? carouselSlides.some(slide => slide.trim().length > 0)
@@ -15,11 +16,11 @@ const LinkedInPostActions = ({
   const canPost = hasContent || selectedImages.length > 0;
 
   return (
-    <div className="flex w-full">
+    <div className="flex gap-3 w-full">
       <button
         onClick={onPost}
         disabled={!canPost || isPosting}
-        className="w-full flex items-center justify-center px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-md font-semibold text-base transition-all"
+        className="flex-1 flex items-center justify-center px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-md font-semibold text-base transition-all"
       >
         {isPosting ? (
           <>
@@ -32,6 +33,15 @@ const LinkedInPostActions = ({
             {isCarousel ? 'Post Carousel Now' : 'Post Now'}
           </>
         )}
+      </button>
+      
+      <button
+        onClick={onSchedule}
+        disabled={!canPost}
+        className="flex-1 flex items-center justify-center px-6 py-3 bg-white text-blue-600 border-2 border-blue-600 rounded-lg hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed shadow-md font-semibold text-base transition-all"
+      >
+        <Calendar className="h-5 w-5 mr-2" />
+        Schedule
       </button>
     </div>
   );

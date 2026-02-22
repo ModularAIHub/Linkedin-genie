@@ -1,11 +1,337 @@
 import { pool } from '../config/database.js';
 import * as linkedinService from '../services/linkedinService.js';
+import { logger } from '../utils/logger.js';
+import { buildCrossPostPayloads, detectCrossPostMedia } from '../utils/crossPostOptimizer.js';
 import {
   getUserTeamHints,
   isMeaningfulAccountId,
   resolveDefaultTeamAccountForUser,
   resolveTeamAccountForUser
 } from '../utils/teamAccountScope.js';
+
+const X_CROSSPOST_TIMEOUT_MS = Number.parseInt(process.env.X_CROSSPOST_TIMEOUT_MS || '10000', 10);
+const THREADS_CROSSPOST_TIMEOUT_MS = Number.parseInt(process.env.THREADS_CROSSPOST_TIMEOUT_MS || '10000', 10);
+const INTERNAL_CALLER = 'linkedin-genie';
+
+const isLinkedInUnauthorizedError = (error) => {
+  const status = Number(error?.response?.status || error?.status || 0);
+  const apiCode = String(error?.response?.data?.code || error?.code || '').toUpperCase();
+  const serviceErrorCode = String(error?.response?.data?.serviceErrorCode || '');
+  const message = String(error?.response?.data?.message || error?.message || '').toUpperCase();
+
+  return (
+    status === 401 ||
+    apiCode === 'REVOKED_ACCESS_TOKEN' ||
+    serviceErrorCode === '65601' ||
+    message.includes('REVOKED') ||
+    message.includes('UNAUTHORIZED')
+  );
+};
+
+async function refreshLinkedInTokenForSource(tokenSource, userId) {
+  if (!tokenSource?.refreshToken) {
+    throw new Error('No refresh token available for LinkedIn account');
+  }
+
+  const refreshed = await linkedinService.refreshLinkedInAccessToken(tokenSource.refreshToken);
+  const newAccessToken = String(refreshed?.access_token || '').trim();
+  if (!newAccessToken) {
+    throw new Error('LinkedIn refresh did not return an access token');
+  }
+
+  const newRefreshToken = String(refreshed?.refresh_token || tokenSource.refreshToken || '').trim() || tokenSource.refreshToken;
+  const expiresIn = Number(refreshed?.expires_in || 0);
+  const newExpiry = Number.isFinite(expiresIn) && expiresIn > 0
+    ? new Date(Date.now() + expiresIn * 1000)
+    : null;
+
+  if (tokenSource.kind === 'team' && tokenSource.id) {
+    await pool.query(
+      `UPDATE linkedin_team_accounts
+       SET access_token = $1,
+           refresh_token = $2,
+           token_expires_at = $3,
+           updated_at = NOW()
+       WHERE id = $4`,
+      [newAccessToken, newRefreshToken, newExpiry, tokenSource.id]
+    );
+  } else {
+    await pool.query(
+      `UPDATE linkedin_auth
+       SET access_token = $1,
+           refresh_token = $2,
+           token_expires_at = $3,
+           updated_at = NOW()
+       WHERE user_id = $4`,
+      [newAccessToken, newRefreshToken, newExpiry, userId]
+    );
+  }
+
+  return {
+    ...tokenSource,
+    accessToken: newAccessToken,
+    refreshToken: newRefreshToken,
+    tokenExpiresAt: newExpiry,
+  };
+}
+
+const normalizeCrossPostTargets = ({ crossPostTargets = null, postToTwitter = false, postToX = false } = {}) => {
+  const raw =
+    crossPostTargets && typeof crossPostTargets === 'object' && !Array.isArray(crossPostTargets)
+      ? crossPostTargets
+      : {};
+
+  return {
+    x:
+      typeof raw.x === 'boolean'
+        ? raw.x
+        : (typeof raw.twitter === 'boolean' ? raw.twitter : Boolean(postToTwitter || postToX)),
+    threads: typeof raw.threads === 'boolean' ? raw.threads : false,
+  };
+};
+
+const buildCrossPostResultShape = ({ xEnabled = false, threadsEnabled = false, mediaDetected = false } = {}) => ({
+  x: {
+    enabled: Boolean(xEnabled),
+    status: xEnabled ? null : 'disabled',
+    mediaDetected: Boolean(mediaDetected),
+    mediaStatus: mediaDetected ? 'text_only_phase1' : 'none',
+  },
+  threads: {
+    enabled: Boolean(threadsEnabled),
+    status: threadsEnabled ? null : 'disabled',
+    mediaDetected: Boolean(mediaDetected),
+    mediaStatus: mediaDetected ? 'text_only_phase1' : 'none',
+  },
+});
+
+const buildInternalServiceHeaders = ({ userId, internalApiKey }) => ({
+  'Content-Type': 'application/json',
+  'x-internal-api-key': internalApiKey,
+  'x-internal-caller': INTERNAL_CALLER,
+  'x-platform-user-id': String(userId),
+});
+
+const buildInternalServiceEndpoint = (baseUrl, path) =>
+  `${String(baseUrl || '').trim().replace(/\/$/, '')}${path}`;
+
+async function postInternalJson({ endpoint, userId, internalApiKey, payload, timeoutMs = 0 }) {
+  const controller = Number.isFinite(timeoutMs) && timeoutMs > 0 ? new AbortController() : null;
+  let timeoutId = null;
+
+  try {
+    if (controller) {
+      timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    }
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: buildInternalServiceHeaders({ userId, internalApiKey }),
+      body: JSON.stringify(payload),
+      signal: controller?.signal,
+    });
+
+    const body = await response.json().catch(() => ({}));
+    return { response, body };
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+const buildPersonalTokenSourceFromRow = (row, userId) => ({
+  kind: 'personal',
+  userId,
+  accessToken: row?.access_token || null,
+  refreshToken: row?.refresh_token || null,
+  tokenExpiresAt: row?.token_expires_at || null,
+});
+
+const buildTeamTokenSourceFromRow = (row) => ({
+  kind: 'team',
+  id: row?.id || null,
+  accessToken: row?.access_token || null,
+  refreshToken: row?.refresh_token || null,
+  tokenExpiresAt: row?.token_expires_at || null,
+});
+
+async function resolvePersonalLinkedInTokenSource(userId, user) {
+  const personalTokenResult = await pool.query(
+    `SELECT access_token, refresh_token, token_expires_at
+     FROM linkedin_auth
+     WHERE user_id = $1
+     LIMIT 1`,
+    [userId]
+  );
+
+  if (personalTokenResult.rows.length > 0) {
+    return buildPersonalTokenSourceFromRow(personalTokenResult.rows[0], userId);
+  }
+
+  return {
+    kind: 'session',
+    userId,
+    accessToken: user?.linkedinAccessToken || null,
+    refreshToken: null,
+    tokenExpiresAt: null,
+  };
+}
+
+async function resolveDeleteLinkedInTokenSource({ post, userId, user }) {
+  if (post?.linkedin_user_id) {
+    const teamTokenResult = await pool.query(
+      `SELECT id, access_token, refresh_token, token_expires_at
+       FROM linkedin_team_accounts
+       WHERE linkedin_user_id = $1 AND active = true
+       ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC
+       LIMIT 1`,
+      [post.linkedin_user_id]
+    );
+
+    if (teamTokenResult.rows.length > 0) {
+      console.log('[DELETE POST] Using access token for linkedin_user_id:', post.linkedin_user_id);
+      return buildTeamTokenSourceFromRow(teamTokenResult.rows[0]);
+    }
+
+    console.log('[DELETE POST] Fallback to personal account for user:', userId);
+    return resolvePersonalLinkedInTokenSource(userId, user);
+  }
+
+  console.log('[DELETE POST] Using personal account for user:', userId);
+  return resolvePersonalLinkedInTokenSource(userId, user);
+}
+
+async function crossPostToX({ userId, content, mediaDetected = false }) {
+  const tweetGenieUrl = String(process.env.TWEET_GENIE_URL || '').trim();
+  const internalApiKey = String(process.env.INTERNAL_API_KEY || '').trim();
+
+  if (!tweetGenieUrl || !internalApiKey) {
+    logger.warn('[X Cross-post] Skipped: missing TWEET_GENIE_URL or INTERNAL_API_KEY');
+    return { status: 'skipped_not_configured' };
+  }
+
+  const endpoint = buildInternalServiceEndpoint(tweetGenieUrl, '/api/internal/twitter/cross-post');
+
+  try {
+    const { response, body } = await postInternalJson({
+      endpoint,
+      userId,
+      internalApiKey,
+      timeoutMs: X_CROSSPOST_TIMEOUT_MS,
+      payload: {
+        postMode: 'single',
+        content,
+        mediaDetected: Boolean(mediaDetected),
+        sourcePlatform: 'linkedin',
+      },
+    });
+
+    if (!response.ok) {
+      logger.warn('[X Cross-post] Failed', { status: response.status, code: body?.code });
+      if (response.status === 404 && String(body?.code || '').toUpperCase().includes('NOT_CONNECTED')) {
+        return { status: 'not_connected' };
+      }
+      if (response.status === 401 && String(body?.code || '').toUpperCase().includes('TOKEN_EXPIRED')) {
+        return { status: 'not_connected' };
+      }
+      if (response.status === 400 && String(body?.code || '').toUpperCase() === 'X_POST_TOO_LONG') {
+        return { status: 'failed_too_long' };
+      }
+      return { status: 'failed' };
+    }
+
+    return {
+      status: 'posted',
+      tweetId: body?.tweetId || null,
+      tweetUrl: body?.tweetUrl || null,
+    };
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      logger.warn('[X Cross-post] Timeout reached', { timeoutMs: X_CROSSPOST_TIMEOUT_MS, userId });
+      return { status: 'timeout' };
+    }
+    logger.error('[X Cross-post] Request error', { userId, error: error?.message || String(error) });
+    return { status: 'failed' };
+  }
+}
+
+async function saveToTweetHistory({ userId, content, tweetId = null, sourcePlatform = 'platform', mediaDetected = false }) {
+  const tweetGenieUrl = String(process.env.TWEET_GENIE_URL || '').trim();
+  const internalApiKey = String(process.env.INTERNAL_API_KEY || '').trim();
+
+  if (!tweetGenieUrl || !internalApiKey) {
+    return;
+  }
+
+  const endpoint = buildInternalServiceEndpoint(tweetGenieUrl, '/api/internal/twitter/save-to-history');
+
+  try {
+    await postInternalJson({
+      endpoint,
+      userId,
+      internalApiKey,
+      payload: {
+        content,
+        tweetId,
+        mediaDetected: Boolean(mediaDetected),
+        sourcePlatform,
+      },
+    });
+  } catch (error) {
+    logger.warn('[save-to-history] Failed silently', {
+      userId,
+      error: error?.message || String(error),
+    });
+  }
+}
+
+async function crossPostToThreads({ userId, content, mediaDetected = false, optimizeCrossPost = true }) {
+  const socialGenieUrl = String(process.env.SOCIAL_GENIE_URL || '').trim();
+  const internalApiKey = String(process.env.INTERNAL_API_KEY || '').trim();
+
+  if (!socialGenieUrl || !internalApiKey) {
+    logger.warn('[Threads Cross-post] Skipped: missing SOCIAL_GENIE_URL or INTERNAL_API_KEY');
+    return 'skipped_not_configured';
+  }
+
+  const endpoint = buildInternalServiceEndpoint(socialGenieUrl, '/api/internal/threads/cross-post');
+
+  try {
+    const { response, body } = await postInternalJson({
+      endpoint,
+      userId,
+      internalApiKey,
+      timeoutMs: THREADS_CROSSPOST_TIMEOUT_MS,
+      payload: {
+        postMode: 'single',
+        content,
+        threadParts: [],
+        sourcePlatform: 'linkedin',
+        optimizeCrossPost: optimizeCrossPost !== false,
+        mediaDetected: Boolean(mediaDetected),
+      },
+    });
+
+    if (!response.ok) {
+      logger.warn('[Threads Cross-post] Failed', { status: response.status, code: body?.code });
+      if (response.status === 404 && String(body?.code || '').toUpperCase().includes('NOT_CONNECTED')) {
+        return 'not_connected';
+      }
+      if (response.status === 401 && String(body?.code || '').toUpperCase().includes('TOKEN_EXPIRED')) {
+        return 'not_connected';
+      }
+      return 'failed';
+    }
+
+    return 'posted';
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      logger.warn('[Threads Cross-post] Timeout reached', { timeoutMs: THREADS_CROSSPOST_TIMEOUT_MS, userId });
+      return 'timeout';
+    }
+    logger.error('[Threads Cross-post] Request error', { userId, error: error?.message || String(error) });
+    return 'failed';
+  }
+}
 
 // Create a LinkedIn post (with media, carousels, etc.)
 export async function createPost(req, res) {
@@ -56,7 +382,17 @@ export async function createPost(req, res) {
       return res.status(400).json({ error: 'LinkedIn account not connected' });
     }
     
-    let { post_content, media_urls = [], post_type = 'single_post', company_id } = req.body;
+    let {
+      post_content,
+      media_urls = [],
+      post_type = 'single_post',
+      company_id,
+      crossPostTargets = null,
+      optimizeCrossPost = true,
+      postToTwitter = false,
+      postToX = false,
+    } = req.body;
+    const normalizedCrossPostTargets = normalizeCrossPostTargets({ crossPostTargets, postToTwitter, postToX });
     // If posting to a team account, set company_id to selectedAccountId
     if (selectedTeamAccount) {
       company_id = selectedTeamAccount.team_id;
@@ -96,7 +432,72 @@ export async function createPost(req, res) {
     );
     console.log('[CREATE POST] Inserted into linkedin_posts:', rows[0]);
 
-    res.json({ success: true, post: rows[0], linkedin: result });
+    const mediaDetected = detectCrossPostMedia({ mediaUrls: media_urls });
+    const crossPostResult = buildCrossPostResultShape({
+      xEnabled: normalizedCrossPostTargets.x,
+      threadsEnabled: normalizedCrossPostTargets.threads,
+      mediaDetected,
+    });
+
+    if (normalizedCrossPostTargets.x || normalizedCrossPostTargets.threads) {
+      if (selectedTeamAccount) {
+        if (normalizedCrossPostTargets.x) crossPostResult.x.status = 'skipped_individual_only';
+        if (normalizedCrossPostTargets.threads) crossPostResult.threads.status = 'skipped_individual_only';
+      } else {
+        const formattedCrossPost = buildCrossPostPayloads({
+          postContent: post_content,
+          optimizeCrossPost,
+        });
+
+        if (normalizedCrossPostTargets.x) {
+          try {
+            const xCrossPost = await crossPostToX({
+              userId: req.user.id,
+              content: formattedCrossPost.x.content,
+              mediaDetected,
+            });
+            crossPostResult.x.status = xCrossPost?.status || 'failed';
+
+            if (crossPostResult.x.status === 'posted') {
+              await saveToTweetHistory({
+                userId: req.user.id,
+                content: formattedCrossPost.x.content,
+                tweetId: xCrossPost?.tweetId || null,
+                sourcePlatform: 'platform',
+                mediaDetected,
+              });
+            }
+          } catch (crossErr) {
+            logger.error('[CREATE POST] X cross-post error', { userId: req.user.id, error: crossErr?.message || String(crossErr) });
+            crossPostResult.x.status = 'failed';
+          }
+        }
+
+        if (normalizedCrossPostTargets.threads) {
+          try {
+            crossPostResult.threads.status = await crossPostToThreads({
+              userId: req.user.id,
+              content: formattedCrossPost.threads.content,
+              mediaDetected,
+              optimizeCrossPost,
+            });
+          } catch (crossErr) {
+            logger.error('[CREATE POST] Threads cross-post error', { userId: req.user.id, error: crossErr?.message || String(crossErr) });
+            crossPostResult.threads.status = 'failed';
+          }
+        }
+      }
+    }
+
+    logger.info('[CREATE POST] Cross-post completed', {
+      userId: req.user.id,
+      x: crossPostResult.x.status,
+      threads: crossPostResult.threads.status,
+      mediaDetected,
+      selectedTeamAccount: Boolean(selectedTeamAccount),
+    });
+
+    res.json({ success: true, post: rows[0], linkedin: result, crossPost: crossPostResult, twitter: crossPostResult.x.status });
   } catch (error) {
     console.error('[CREATE POST ERROR]', error && (error.stack || error.message || error.toString()));
     res.status(500).json({ error: error.message || 'Failed to post to LinkedIn', details: error && (error.stack || error.toString()) });
@@ -222,27 +623,9 @@ export async function deletePost(req, res) {
     
     console.log(`[DELETE POST] Attempting to delete LinkedIn post with URN: ${postUrn}`);
     
-    // Get access token for the LinkedIn user who created the post
-    let accessToken;
-    if (post.linkedin_user_id) {
-      // Try to find the access token for the original LinkedIn user (team or personal)
-      const tokenResult = await pool.query(
-        `SELECT access_token FROM linkedin_team_accounts WHERE linkedin_user_id = $1 AND active = true LIMIT 1`,
-        [post.linkedin_user_id]
-      );
-      if (tokenResult.rows.length > 0) {
-        accessToken = tokenResult.rows[0].access_token;
-        console.log('[DELETE POST] Using access token for linkedin_user_id:', post.linkedin_user_id);
-      } else {
-        // Fallback to personal account if not found in team accounts
-        accessToken = user.linkedinAccessToken;
-        console.log('[DELETE POST] Fallback to personal account for user:', userId);
-      }
-    } else {
-      // Fallback to personal account
-      accessToken = user.linkedinAccessToken;
-      console.log('[DELETE POST] Using personal account for user:', userId);
-    }
+    // Get access token for the LinkedIn user who created the post (with refresh context)
+    let tokenSource = await resolveDeleteLinkedInTokenSource({ post, userId, user });
+    let accessToken = tokenSource?.accessToken || null;
 
     if (!accessToken) {
       console.error('[DELETE POST ERROR] No access token available', { accountId, userId });
@@ -253,7 +636,46 @@ export async function deletePost(req, res) {
 
     try {
       console.log(`[DELETE POST] Attempting LinkedIn API delete for postUrn: ${postUrn}, accessToken: ${accessToken ? '[REDACTED]' : 'MISSING'}`);
-      const apiResult = await linkedinService.deleteLinkedInPost(accessToken, postUrn);
+      let apiResult;
+      try {
+        apiResult = await linkedinService.deleteLinkedInPost(accessToken, postUrn);
+      } catch (apiError) {
+        const canRetryWithRefresh = isLinkedInUnauthorizedError(apiError) && Boolean(tokenSource?.refreshToken);
+        if (!canRetryWithRefresh) {
+          throw apiError;
+        }
+
+        console.warn('[DELETE POST] LinkedIn delete failed with auth error. Attempting token refresh + retry...', {
+          userId,
+          postId: id,
+          tokenSource: tokenSource?.kind || 'unknown',
+          linkedinUserId: post.linkedin_user_id || null,
+        });
+
+        try {
+          tokenSource = await refreshLinkedInTokenForSource(tokenSource, userId);
+          accessToken = tokenSource.accessToken;
+          apiResult = await linkedinService.deleteLinkedInPost(accessToken, postUrn);
+        } catch (refreshRetryError) {
+          const refreshRetryPayload = refreshRetryError?.response?.data || null;
+          const refreshRetryStatus = Number(refreshRetryError?.response?.status || 0);
+          const reconnectRequired = isLinkedInUnauthorizedError(refreshRetryError) || isLinkedInUnauthorizedError(apiError);
+
+          if (reconnectRequired) {
+            return res.status(401).json({
+              error: 'LinkedIn token revoked/expired. Please reconnect your LinkedIn account and try again.',
+              code: 'LINKEDIN_TOKEN_RECONNECT_REQUIRED',
+              details: refreshRetryError?.message || apiError?.message || 'Unauthorized',
+              provider: refreshRetryPayload || apiError?.response?.data || null,
+            });
+          }
+
+          if (refreshRetryStatus) {
+            throw refreshRetryError;
+          }
+          throw apiError;
+        }
+      }
       console.log(`[DELETE POST] LinkedIn API response:`, apiResult);
       await pool.query(
         'UPDATE linkedin_posts SET status = $1, updated_at = NOW() WHERE id = $2',
@@ -270,7 +692,9 @@ export async function deletePost(req, res) {
       }
       console.error(`[DELETE POST] Error message:`, apiError.message);
       console.error(`[DELETE POST] Stack:`, apiError.stack);
-      res.status(400).json({ error: 'Failed to delete post from LinkedIn', details: apiError.message, stack: apiError.stack, urn: postUrn });
+      const status = isLinkedInUnauthorizedError(apiError) ? 401 : 400;
+      const code = isLinkedInUnauthorizedError(apiError) ? 'LINKEDIN_TOKEN_RECONNECT_REQUIRED' : undefined;
+      res.status(status).json({ error: 'Failed to delete post from LinkedIn', details: apiError.message, code, stack: apiError.stack, urn: postUrn });
     }
   } catch (error) {
     console.error(`[DELETE POST] Internal error:`, error.message);
