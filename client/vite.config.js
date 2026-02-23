@@ -19,7 +19,9 @@ export default defineConfig({
     }
   },
   server: {
+    host: 'localhost',
     port: 5175,
+    strictPort: true,
     open: true,
     proxy: {
       '/api': {
@@ -35,6 +37,8 @@ export default defineConfig({
     },
   },
   preview: {
+    host: 'localhost',
     port: 5175,
+    strictPort: true,
   },
 });

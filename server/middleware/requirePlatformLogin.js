@@ -2,12 +2,14 @@
 import jwt from 'jsonwebtoken';
 import axios from 'axios';
 import { pool } from '../config/database.js';
+import { setAuthCookies, clearAuthCookies } from '../utils/cookieUtils.js';
 import dotenv from 'dotenv';
 dotenv.config({ quiet: true });
 
 const AUTH_CACHE_TTL_MS = Number(process.env.AUTH_CACHE_TTL_MS || 30000);
 const platformUserCache = new Map();
 const linkedinAuthCache = new Map();
+const PLATFORM_API_BASE_URL = process.env.NEW_PLATFORM_API_URL || 'http://localhost:3000/api';
 
 const getCacheValue = (cache, key) => {
   const entry = cache.get(key);
@@ -24,6 +26,44 @@ const setCacheValue = (cache, key, value) => {
     value,
     expiresAt: Date.now() + AUTH_CACHE_TTL_MS
   });
+};
+
+const extractCookieValue = (setCookieHeader, cookieName) => {
+  if (!Array.isArray(setCookieHeader)) return null;
+
+  const targetPrefix = `${cookieName}=`;
+  const rawCookie = setCookieHeader.find((cookie) => String(cookie).startsWith(targetPrefix));
+  if (!rawCookie) return null;
+
+  return rawCookie.slice(targetPrefix.length).split(';')[0] || null;
+};
+
+const applyPlatformRefreshedAuthCookies = (res, setCookieHeader) => {
+  const newAccessToken = extractCookieValue(setCookieHeader, 'accessToken');
+  if (!newAccessToken) return null;
+
+  const newRefreshToken = extractCookieValue(setCookieHeader, 'refreshToken');
+
+  // If platform rotates refresh tokens, persist the rotated cookie locally.
+  // If it doesn't, keep the existing one instead of clearing it.
+  setAuthCookies(res, newAccessToken, newRefreshToken || null);
+
+  return newAccessToken;
+};
+
+const buildPlatformRefreshHeaders = (req) => {
+  const refreshToken = req.cookies?.refreshToken;
+  const csrfToken = req.cookies?._csrf || req.headers['x-csrf-token'];
+  const cookieParts = [`refreshToken=${refreshToken}`];
+  const headers = {};
+
+  if (csrfToken) {
+    cookieParts.push(`_csrf=${csrfToken}`);
+    headers['x-csrf-token'] = csrfToken;
+  }
+
+  headers.Cookie = cookieParts.join('; ');
+  return headers;
 };
 
 export async function requirePlatformLogin(req, res, next) {
@@ -54,24 +94,16 @@ export async function requirePlatformLogin(req, res, next) {
     if (!token && req.cookies?.refreshToken) {
       try {
         const refreshResponse = await axios.post(
-          `${process.env.NEW_PLATFORM_API_URL || 'http://localhost:3000/api'}/auth/refresh`,
+          `${PLATFORM_API_BASE_URL}/auth/refresh`,
           {},
           {
-            headers: {
-              'Cookie': `refreshToken=${req.cookies.refreshToken}`
-            },
+            headers: buildPlatformRefreshHeaders(req),
             withCredentials: true
           }
         );
         if (refreshResponse.status !== 200) {
           console.error('[requirePlatformLogin] Refresh failed, status:', refreshResponse.status, refreshResponse.data);
-          // Clear refreshToken cookie to prevent infinite loop
-          res.clearCookie('refreshToken', {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'none',
-            domain: process.env.COOKIE_DOMAIN || '.suitegenie.in'
-          });
+          clearAuthCookies(res);
           if (isApiRequest(req)) {
             return res.status(401).json({ error: 'Unauthorized: refresh failed', details: refreshResponse.data });
           } else {
@@ -82,16 +114,8 @@ export async function requirePlatformLogin(req, res, next) {
         }
         const setCookieHeader = refreshResponse.headers['set-cookie'];
         if (setCookieHeader) {
-          const accessTokenCookie = setCookieHeader.find(cookie => cookie.startsWith('accessToken='));
-          if (accessTokenCookie) {
-            const newToken = accessTokenCookie.split('accessToken=')[1].split(';')[0];
-            res.cookie('accessToken', newToken, {
-              httpOnly: true,
-              secure: process.env.NODE_ENV === 'production',
-              sameSite: 'none', // must be 'none' for cross-domain
-              domain: process.env.COOKIE_DOMAIN || '.suitegenie.in',
-              maxAge: 15 * 60 * 1000
-            });
+          const newToken = applyPlatformRefreshedAuthCookies(res, setCookieHeader);
+          if (newToken) {
             token = newToken;
           } else {
             console.error('[requirePlatformLogin] No accessToken in set-cookie after refresh:', setCookieHeader);
@@ -115,13 +139,7 @@ export async function requirePlatformLogin(req, res, next) {
         }
       } catch (refreshError) {
         console.error('[requirePlatformLogin] Exception during refresh:', refreshError?.response?.data || refreshError.message, refreshError.stack);
-        // Clear refreshToken cookie to prevent infinite loop
-        res.clearCookie('refreshToken', {
-          httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-          sameSite: 'none',
-          domain: process.env.COOKIE_DOMAIN || '.suitegenie.in'
-        });
+        clearAuthCookies(res);
         if (isApiRequest(req)) {
           return res.status(401).json({ error: 'Unauthorized: refresh exception', details: refreshError?.response?.data || refreshError.message });
         } else {
@@ -152,39 +170,25 @@ export async function requirePlatformLogin(req, res, next) {
       if (jwtError.name === 'TokenExpiredError' && req.cookies?.refreshToken) {
         try {
           const refreshResponse = await axios.post(
-            `${process.env.NEW_PLATFORM_API_URL || 'http://localhost:3000/api'}/auth/refresh`,
+            `${PLATFORM_API_BASE_URL}/auth/refresh`,
             {},
             {
-              headers: {
-                'Cookie': `refreshToken=${req.cookies.refreshToken}`
-              },
+              headers: buildPlatformRefreshHeaders(req),
               withCredentials: true
             }
           );
           const setCookieHeader = refreshResponse.headers['set-cookie'];
           if (setCookieHeader) {
-            const accessTokenCookie = setCookieHeader.find(cookie => cookie.startsWith('accessToken='));
-            if (accessTokenCookie) {
-              const newToken = accessTokenCookie.split('accessToken=')[1].split(';')[0];
-              res.cookie('accessToken', newToken, {
-                httpOnly: true,
-                secure: process.env.NODE_ENV === 'production',
-                sameSite: 'none',
-                domain: process.env.COOKIE_DOMAIN || '.suitegenie.in',
-                maxAge: 15 * 60 * 1000
-              });
+            const newToken = applyPlatformRefreshedAuthCookies(res, setCookieHeader);
+            if (newToken) {
               decoded = jwt.verify(newToken, process.env.JWT_SECRET);
               token = newToken;
+            } else {
+              throw new Error('No access token in Platform refresh response');
             }
           }
         } catch (refreshError) {
-          // Clear refreshToken cookie to prevent infinite loop
-          res.clearCookie('refreshToken', {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'none',
-            domain: process.env.COOKIE_DOMAIN || '.suitegenie.in'
-          });
+          clearAuthCookies(res);
           if (isApiRequest(req)) {
             return res.status(401).json({ error: 'Unauthorized: refresh failed' });
           } else {

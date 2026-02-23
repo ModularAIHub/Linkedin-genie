@@ -120,7 +120,11 @@ const LinkedInPostComposer = () => {
     const scheduledDateTime = `${scheduleDate}T${scheduleTime}`;
     const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     
-    await handleSchedule(scheduledDateTime, userTimezone);
+    await handleSchedule(scheduledDateTime, userTimezone, {
+      x: postToX,
+      threads: postToThreads,
+      optimizeCrossPost,
+    });
     setShowScheduleModal(false);
     setScheduleDate('');
     setScheduleTime('');

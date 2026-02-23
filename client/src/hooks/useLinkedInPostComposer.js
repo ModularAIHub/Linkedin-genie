@@ -271,7 +271,21 @@ const useLinkedInPostComposer = () => {
   };
 
   // Schedule post handler
-  const handleSchedule = async (scheduleDate, userTimezone) => {
+  const handleSchedule = async (scheduleDate, userTimezone, crossPostInput = false) => {
+    const normalizedCrossPost =
+      crossPostInput && typeof crossPostInput === 'object' && !Array.isArray(crossPostInput)
+        ? {
+            x: Boolean(crossPostInput.x),
+            threads: Boolean(crossPostInput.threads),
+            optimizeCrossPost: crossPostInput.optimizeCrossPost !== false,
+          }
+        : {
+            x: false,
+            threads: false,
+            optimizeCrossPost: true,
+          };
+    const hasAnyCrossPostTarget = normalizedCrossPost.x || normalizedCrossPost.threads;
+
     if (!content.trim() && selectedImages.length === 0) {
       toast.error('Please enter some content or add images');
       return;
@@ -290,11 +304,25 @@ const useLinkedInPostComposer = () => {
         post_type: 'single_post',
         company_id: null,
         scheduled_time: scheduleDate,
-        user_timezone: userTimezone
+        user_timezone: userTimezone,
+        ...(hasAnyCrossPostTarget && {
+          crossPostTargets: {
+            x: normalizedCrossPost.x,
+            threads: normalizedCrossPost.threads,
+          },
+          optimizeCrossPost: normalizedCrossPost.optimizeCrossPost,
+        }),
       });
       
       const accountInfo = selectedAccount?.linkedin_display_name || selectedAccount?.linkedin_username || 'LinkedIn';
-      toast.success(`Post scheduled for ${accountInfo}!`);
+      if (hasAnyCrossPostTarget) {
+        const labels = [];
+        if (normalizedCrossPost.x) labels.push('X');
+        if (normalizedCrossPost.threads) labels.push('Threads');
+        toast.success(`Post scheduled for ${accountInfo}. Cross-post to ${labels.join(' + ')} will run at publish time.`);
+      } else {
+        toast.success(`Post scheduled for ${accountInfo}!`);
+      }
       setScheduledFor(scheduleDate);
       setContent('');
       setSelectedImages([]);

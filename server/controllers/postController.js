@@ -425,10 +425,19 @@ export async function createPost(req, res) {
 
     // Save to DB without initial metrics - will be populated by real analytics sync
     const { rows } = await pool.query(
-      `INSERT INTO linkedin_posts (user_id, linkedin_post_id, post_content, media_urls, post_type, company_id, linkedin_user_id, status, views, likes, comments, shares, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'posted', 0, 0, 0, 0, NOW(), NOW())
+      `INSERT INTO linkedin_posts (user_id, account_id, linkedin_post_id, post_content, media_urls, post_type, company_id, linkedin_user_id, status, views, likes, comments, shares, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'posted', 0, 0, 0, 0, NOW(), NOW())
        RETURNING *`,
-      [req.user.id, result.id || result.urn, post_content, JSON.stringify(media_urls), post_type, company_id, linkedin_user_id]
+      [
+        req.user.id,
+        selectedTeamAccount?.id || null,
+        result.id || result.urn,
+        post_content,
+        JSON.stringify(media_urls),
+        post_type,
+        company_id,
+        linkedin_user_id
+      ]
     );
     console.log('[CREATE POST] Inserted into linkedin_posts:', rows[0]);
 

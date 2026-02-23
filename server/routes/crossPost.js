@@ -1,9 +1,57 @@
 import express from 'express';
 import { pool } from '../config/database.js';
-import { createLinkedInPost } from '../services/linkedinService.js';
+import { createLinkedInPost, refreshLinkedInAccessToken } from '../services/linkedinService.js';
 import { logger } from '../utils/logger.js';
 
 const router = express.Router();
+
+const isLinkedInUnauthorizedError = (error) => {
+  const status = Number(error?.response?.status || error?.status || 0);
+  const apiCode = String(error?.response?.data?.code || error?.code || '').toUpperCase();
+  const serviceErrorCode = String(error?.response?.data?.serviceErrorCode || '');
+  const message = String(error?.response?.data?.message || error?.message || '').toUpperCase();
+
+  return (
+    status === 401 ||
+    apiCode === 'REVOKED_ACCESS_TOKEN' ||
+    serviceErrorCode === '65601' ||
+    message.includes('REVOKED') ||
+    message.includes('UNAUTHORIZED')
+  );
+};
+
+async function refreshLinkedInAuthForUser(userId, accountRow) {
+  const refreshToken = String(accountRow?.refresh_token || '').trim();
+  if (!refreshToken) {
+    throw new Error('LinkedIn refresh token missing');
+  }
+
+  const refreshed = await refreshLinkedInAccessToken(refreshToken);
+  const accessToken = String(refreshed?.access_token || '').trim();
+  if (!accessToken) {
+    throw new Error('LinkedIn refresh did not return access token');
+  }
+
+  const nextRefreshToken = String(refreshed?.refresh_token || refreshToken).trim() || refreshToken;
+  const expiresIn = Number(refreshed?.expires_in || 0);
+  const tokenExpiresAt =
+    Number.isFinite(expiresIn) && expiresIn > 0
+      ? new Date(Date.now() + expiresIn * 1000)
+      : null;
+
+  const { rows } = await pool.query(
+    `UPDATE linkedin_auth
+     SET access_token = $1,
+         refresh_token = $2,
+         token_expires_at = $3,
+         updated_at = NOW()
+     WHERE user_id = $4
+     RETURNING *`,
+    [accessToken, nextRefreshToken, tokenExpiresAt, userId]
+  );
+
+  return rows[0] || { ...accountRow, access_token: accessToken, refresh_token: nextRefreshToken, token_expires_at: tokenExpiresAt };
+}
 
 /**
  * POST /api/internal/cross-post
@@ -40,13 +88,46 @@ router.post('/cross-post', async (req, res) => {
 
     const linkedinContent = content;
 
-    const linkedinResult = await createLinkedInPost(
-      account.access_token,
-      authorUrn,
-      linkedinContent,
-      [],
-      'single_post'
-    );
+    let postingAccount = account;
+    let linkedinResult;
+
+    try {
+      linkedinResult = await createLinkedInPost(
+        postingAccount.access_token,
+        authorUrn,
+        linkedinContent,
+        [],
+        'single_post'
+      );
+    } catch (postErr) {
+      const canRefresh = isLinkedInUnauthorizedError(postErr) && Boolean(String(postingAccount?.refresh_token || '').trim());
+      if (!canRefresh) {
+        throw postErr;
+      }
+
+      logger.warn('[cross-post] LinkedIn access token invalid for internal cross-post. Attempting refresh + retry', {
+        user: platformUserId,
+      });
+
+      try {
+        postingAccount = await refreshLinkedInAuthForUser(platformUserId, postingAccount);
+        linkedinResult = await createLinkedInPost(
+          postingAccount.access_token,
+          authorUrn,
+          linkedinContent,
+          [],
+          'single_post'
+        );
+      } catch (retryErr) {
+        if (isLinkedInUnauthorizedError(retryErr)) {
+          return res.status(401).json({
+            error: 'LinkedIn token revoked/expired. Reconnect required.',
+            code: 'LINKEDIN_TOKEN_EXPIRED',
+          });
+        }
+        throw retryErr;
+      }
+    }
 
     try {
       const linkedinPostId = linkedinResult?.id || linkedinResult?.urn || null;
@@ -75,7 +156,7 @@ router.post('/cross-post', async (req, res) => {
           linkedinPostId,
           linkedinContent,
           JSON.stringify([]),
-          account.linkedin_user_id || null,
+          postingAccount.linkedin_user_id || account.linkedin_user_id || null,
         ]
       );
     } catch (dbErr) {
@@ -93,6 +174,17 @@ router.post('/cross-post', async (req, res) => {
     });
 
   } catch (err) {
+    if (isLinkedInUnauthorizedError(err)) {
+      logger.warn('[cross-post] LinkedIn token invalid and could not refresh', {
+        user: platformUserId,
+        error: err?.response?.data || err?.message || String(err),
+      });
+      return res.status(401).json({
+        error: 'LinkedIn token revoked/expired. Reconnect required.',
+        code: 'LINKEDIN_TOKEN_EXPIRED',
+      });
+    }
+
     logger.error('[cross-post] Error posting to LinkedIn', { error: err?.response?.data || err.message });
     res.status(500).json({ error: 'Failed to post to LinkedIn' });
   }

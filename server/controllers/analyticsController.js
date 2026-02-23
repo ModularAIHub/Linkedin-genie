@@ -1,6 +1,7 @@
 import { default as axios } from 'axios';
 import { pool } from '../config/database.js';
 import { hasProPlanAccess, resolveRequestPlanType } from '../middleware/planAccess.js';
+import { resolveTeamAccountForUser } from '../utils/teamAccountScope.js';
 
 const FREE_ANALYTICS_DAYS = 7;
 const FREE_TOP_POSTS_LIMIT = 5;
@@ -226,11 +227,22 @@ export async function getAnalytics(req, res) {
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - effectiveDays);
 
-    let filterField = 'user_id';
-    let filterValue = userId;
+    let scopeClause = 'user_id = $1';
+    let scopeParams = [userId];
     if (account_type === 'team' && account_id) {
-      filterField = 'account_id';
-      filterValue = account_id;
+      const teamAccount = await resolveTeamAccountForUser(userId, account_id);
+      if (!teamAccount) {
+        return res.status(403).json({ error: 'Selected LinkedIn team account not found or access denied' });
+      }
+
+      scopeParams = [String(account_id)];
+      if (teamAccount?.team_id) {
+        scopeParams.push(String(teamAccount.team_id));
+        // Fallback keeps older rows visible where account_id was not persisted but company_id was set.
+        scopeClause = `(account_id::text = $1 OR (account_id IS NULL AND company_id::text = $2))`;
+      } else {
+        scopeClause = `account_id::text = $1`;
+      }
     }
 
     const { rows: overview } = await pool.query(
@@ -245,10 +257,10 @@ export async function getAnalytics(req, res) {
         COALESCE(AVG(NULLIF(comments, 0)), 0) as avg_comments,
         COALESCE(AVG(NULLIF(shares, 0)), 0) as avg_shares
        FROM linkedin_posts
-       WHERE ${filterField} = $1
-         AND created_at >= $2
+       WHERE ${scopeClause}
+         AND created_at >= $${scopeParams.length + 1}
          AND status = 'posted'`,
-      [filterValue, startDate]
+      [...scopeParams, startDate]
     );
 
     let daily = [];
@@ -262,13 +274,13 @@ export async function getAnalytics(req, res) {
           COALESCE(SUM(comments), 0) as comments,
           COALESCE(SUM(shares), 0) as shares
          FROM linkedin_posts
-         WHERE ${filterField} = $1
-           AND created_at >= $2
+         WHERE ${scopeClause}
+           AND created_at >= $${scopeParams.length + 1}
            AND status = 'posted'
          GROUP BY DATE(created_at)
          ORDER BY date DESC
-         LIMIT $3`,
-        [filterValue, startDate, effectiveDays]
+         LIMIT $${scopeParams.length + 2}`,
+        [...scopeParams, startDate, effectiveDays]
       );
       daily = rows;
     }
@@ -278,12 +290,27 @@ export async function getAnalytics(req, res) {
         id, linkedin_post_id, post_content, views, likes, comments, shares, created_at,
         (COALESCE(likes, 0) + COALESCE(comments, 0) + COALESCE(shares, 0)) as total_engagement
        FROM linkedin_posts
-       WHERE ${filterField} = $1
-         AND created_at >= $2
+       WHERE ${scopeClause}
+         AND created_at >= $${scopeParams.length + 1}
          AND status = 'posted'
        ORDER BY total_engagement DESC, views DESC
-       LIMIT $3`,
-      [filterValue, startDate, topPostsLimit]
+       LIMIT $${scopeParams.length + 2}`,
+      [...scopeParams, startDate, topPostsLimit]
+    );
+
+    const recentPostsLimit = isProPlan ? 10 : 5;
+    const { rows: recentPosts } = await pool.query(
+      `SELECT
+        id, linkedin_post_id, post_content, views, likes, comments, shares,
+        COALESCE(posted_at, created_at) as created_at,
+        (COALESCE(likes, 0) + COALESCE(comments, 0) + COALESCE(shares, 0)) as total_engagement
+       FROM linkedin_posts
+       WHERE ${scopeClause}
+         AND created_at >= $${scopeParams.length + 1}
+         AND status = 'posted'
+       ORDER BY COALESCE(posted_at, created_at) DESC, id DESC
+       LIMIT $${scopeParams.length + 2}`,
+      [...scopeParams, startDate, recentPostsLimit]
     );
 
     let timingByDayOfWeek = [];
@@ -299,12 +326,12 @@ export async function getAnalytics(req, res) {
             COALESCE(AVG(shares), 0) as avg_shares,
             COALESCE(AVG(likes + comments + shares), 0) as avg_engagement
            FROM linkedin_posts
-           WHERE ${filterField} = $1
-             AND created_at >= $2
+           WHERE ${scopeClause}
+             AND created_at >= $${scopeParams.length + 1}
              AND status = 'posted'
            GROUP BY EXTRACT(DOW FROM created_at)
            ORDER BY day_of_week`,
-          [filterValue, startDate]
+          [...scopeParams, startDate]
         ),
         pool.query(
           `SELECT
@@ -315,12 +342,12 @@ export async function getAnalytics(req, res) {
             COALESCE(AVG(shares), 0) as avg_shares,
             COALESCE(AVG(likes + comments + shares), 0) as avg_engagement
            FROM linkedin_posts
-           WHERE ${filterField} = $1
-             AND created_at >= $2
+           WHERE ${scopeClause}
+             AND created_at >= $${scopeParams.length + 1}
              AND status = 'posted'
            GROUP BY EXTRACT(HOUR FROM created_at)
            ORDER BY hour_of_day`,
-          [filterValue, startDate]
+          [...scopeParams, startDate]
         )
       ]);
 
@@ -332,6 +359,7 @@ export async function getAnalytics(req, res) {
       overview: overview[0] || {},
       daily,
       topPosts,
+      recentPosts,
       timing: {
         byDayOfWeek: timingByDayOfWeek,
         byHour: timingByHour

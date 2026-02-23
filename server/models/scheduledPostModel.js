@@ -2,12 +2,109 @@
 
 import { pool } from '../config/database.js';
 
+let optionalColumnsCache = null;
+
+async function resolveOptionalColumns({ ensureColumns = false } = {}) {
+  if (optionalColumnsCache) {
+    return optionalColumnsCache;
+  }
+
+  if (ensureColumns) {
+    try {
+      await pool.query(
+        `ALTER TABLE scheduled_linkedin_posts
+         ADD COLUMN IF NOT EXISTS timezone VARCHAR(100)`
+      );
+      await pool.query(
+        `ALTER TABLE scheduled_linkedin_posts
+         ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb`
+      );
+    } catch (error) {
+      console.warn('[scheduledPostModel] Could not auto-add optional schedule columns:', error?.message || String(error));
+    }
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT column_name
+       FROM information_schema.columns
+       WHERE table_name = 'scheduled_linkedin_posts'
+         AND column_name = ANY($1::text[])`,
+      [['timezone', 'metadata']]
+    );
+    const available = new Set(rows.map((row) => row.column_name));
+    optionalColumnsCache = {
+      timezone: available.has('timezone'),
+      metadata: available.has('metadata'),
+    };
+  } catch (error) {
+    console.warn('[scheduledPostModel] Failed to inspect optional schedule columns:', error?.message || String(error));
+    optionalColumnsCache = { timezone: false, metadata: false };
+  }
+
+  return optionalColumnsCache;
+}
+
 // Create a scheduled LinkedIn post
-export async function create({ user_id, post_content, media_urls, post_type, company_id, scheduled_time, status }) {
+export async function create({
+  user_id,
+  post_content,
+  media_urls,
+  post_type,
+  company_id,
+  scheduled_time,
+  timezone = null,
+  metadata = null,
+  status,
+}) {
+  const wantsOptionalColumns = timezone !== null || metadata !== null;
+  const optionalColumns = wantsOptionalColumns
+    ? await resolveOptionalColumns({ ensureColumns: true })
+    : { timezone: false, metadata: false };
+
+  const columns = [
+    'user_id',
+    'post_content',
+    'media_urls',
+    'post_type',
+    'company_id',
+    'scheduled_time',
+  ];
+  const values = [
+    user_id,
+    post_content,
+    JSON.stringify(media_urls || []),
+    post_type,
+    company_id,
+    scheduled_time,
+  ];
+
+  if (optionalColumns.timezone) {
+    columns.push('timezone');
+    values.push(timezone || null);
+  }
+
+  if (optionalColumns.metadata) {
+    columns.push('metadata');
+    values.push(JSON.stringify(metadata || {}));
+  }
+
+  columns.push('status', 'created_at', 'updated_at');
+  values.push(status || 'scheduled');
+
+  const placeholders = columns.map((column, index) => {
+    if (column === 'created_at' || column === 'updated_at') return 'NOW()';
+    if (column === 'status') return `$${values.length}`;
+    const valueIndex = columns
+      .filter((name) => !['created_at', 'updated_at'].includes(name))
+      .indexOf(column) + 1;
+    return `$${valueIndex}`;
+  });
+
   const { rows } = await pool.query(
-    `INSERT INTO scheduled_linkedin_posts (user_id, post_content, media_urls, post_type, company_id, scheduled_time, status, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW()) RETURNING *`,
-    [user_id, post_content, JSON.stringify(media_urls || []), post_type, company_id, scheduled_time, status || 'scheduled']
+    `INSERT INTO scheduled_linkedin_posts (${columns.join(', ')})
+     VALUES (${placeholders.join(', ')}) RETURNING *`,
+    values
   );
   return rows[0];
 }

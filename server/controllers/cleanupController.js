@@ -32,7 +32,7 @@ export const cleanupController = {
 
                 // 2. Delete scheduled posts created by this user
                 const scheduledPostsResult = await client.query(
-                    'DELETE FROM scheduled_posts WHERE user_id = $1',
+                    'DELETE FROM scheduled_linkedin_posts WHERE user_id = $1',
                     [userId]
                 );
                 console.log(`   ✓ Deleted ${scheduledPostsResult.rowCount} scheduled posts`);
@@ -102,7 +102,7 @@ export const cleanupController = {
 
                 // 2. Delete scheduled posts for this team
                 const scheduledPostsResult = await client.query(
-                    'DELETE FROM scheduled_posts WHERE team_id = $1',
+                    'DELETE FROM scheduled_linkedin_posts WHERE team_id = $1',
                     [teamId]
                 );
                 console.log(`   ✓ Deleted ${scheduledPostsResult.rowCount} team scheduled posts`);
@@ -164,7 +164,7 @@ export const cleanupController = {
 
                 // Delete scheduled posts created by this user for this team
                 const scheduledPostsResult = await client.query(
-                    'DELETE FROM scheduled_posts WHERE team_id = $1 AND user_id = $2',
+                    'DELETE FROM scheduled_linkedin_posts WHERE team_id = $1 AND user_id = $2',
                     [teamId, userId]
                 );
                 console.log(`   ✓ Deleted ${scheduledPostsResult.rowCount} scheduled posts for member`);

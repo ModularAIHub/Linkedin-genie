@@ -14,7 +14,7 @@ export const byok = {
 };
 
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3004';
+const API_BASE_URL = String(import.meta.env.VITE_API_URL || '').trim();
 const PLATFORM_URL = import.meta.env.VITE_PLATFORM_URL || 'http://localhost:5173';
 import axios from 'axios';
 // CSRF token cache

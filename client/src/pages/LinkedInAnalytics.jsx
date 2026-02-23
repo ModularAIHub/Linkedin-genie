@@ -160,6 +160,7 @@ const LinkedInAnalytics = () => {
   const overview = analyticsData?.overview || {};
   const dailyMetrics = analyticsData?.daily || [];
   const topPosts = analyticsData?.topPosts || [];
+  const recentPosts = analyticsData?.recentPosts || [];
   const timingData = analyticsData?.timing || { byDayOfWeek: [], byHour: [] };
 
   // Calculate key metrics
@@ -1329,6 +1330,58 @@ x``              </p>
             </button>
           </div>
         )}
+
+        <div className="mt-8 pt-6 border-t border-gray-200">
+          <div className="flex items-center justify-between mb-4">
+            <h4 className="text-sm font-semibold text-gray-900">Recent Posts (Tracking Check)</h4>
+            <span className="text-xs text-gray-500">
+              {isProPlan ? 'Latest 10' : 'Latest 5'}
+            </span>
+          </div>
+
+          {recentPosts.length > 0 ? (
+            <div className="space-y-3">
+              {recentPosts.map((post) => {
+                const totalEngagement = (parseInt(post.likes) || 0) + (parseInt(post.comments) || 0) + (parseInt(post.shares) || 0);
+                const isUpdated = updatedPostIds.has(post.id);
+
+                return (
+                  <div key={`recent-${post.id}`} className="p-3 rounded-lg border border-gray-200 bg-gray-50">
+                    <div className="flex items-center justify-between gap-3 mb-1">
+                      <span className="text-xs text-gray-500">
+                        {post.created_at
+                          ? new Date(post.created_at).toLocaleString('en-IN', {
+                              day: 'numeric',
+                              month: 'short',
+                              year: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit'
+                            })
+                          : 'Unknown date'}
+                      </span>
+                      <div className="flex items-center gap-2 flex-wrap justify-end">
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-gray-200 text-gray-700">
+                          {totalEngagement} engagement
+                        </span>
+                        {isUpdated && (
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-800">
+                            ✓ Synced
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <p className="text-sm text-gray-700 line-clamp-2">
+                      {post.post_content?.substring(0, 180)}
+                      {post.post_content?.length > 180 ? '...' : ''}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500">No recent posts found in this analytics window yet.</p>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -14,6 +14,42 @@ import {
 
 const MAX_BULK_SCHEDULE_ITEMS = 30;
 const MAX_SCHEDULING_WINDOW_DAYS = 15;
+const EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT = 100;
+const ISO_OFFSET_SUFFIX = /(?:[zZ]|[+\-]\d{2}(?::?\d{2})?)$/;
+
+function normalizeScheduledCrossPostTargets({ crossPostTargets = null, postToTwitter = false, postToX = false } = {}) {
+  const raw =
+    crossPostTargets && typeof crossPostTargets === 'object' && !Array.isArray(crossPostTargets)
+      ? crossPostTargets
+      : {};
+
+  return {
+    x:
+      typeof raw.x === 'boolean'
+        ? raw.x
+        : (typeof raw.twitter === 'boolean' ? raw.twitter : Boolean(postToTwitter || postToX)),
+    threads: typeof raw.threads === 'boolean' ? raw.threads : false,
+  };
+}
+
+function buildScheduledCrossPostMetadata({ targets, optimizeCrossPost = true } = {}) {
+  const x = Boolean(targets?.x);
+  const threads = Boolean(targets?.threads);
+  if (!x && !threads) return null;
+
+  return {
+    cross_post: {
+      version: 1,
+      source: 'linkedin_genie_schedule',
+      createdAt: new Date().toISOString(),
+      optimizeCrossPost: optimizeCrossPost !== false,
+      targets: {
+        x,
+        threads,
+      },
+    },
+  };
+}
 
 async function resolveTeamAdminAccount(req, userId) {
   const selectedAccountId =
@@ -46,13 +82,297 @@ function canManageScheduledPost(post, userId, teamAccount) {
   return scopedCompanyIds.includes(String(post.company_id));
 }
 
+function parseJsonObject(value, fallback = {}) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return { ...fallback, ...value };
+  }
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { ...fallback, ...parsed };
+      }
+    } catch {
+      return { ...fallback };
+    }
+  }
+  return { ...fallback };
+}
+
+function toUtcIso(value) {
+  if (!value) return null;
+
+  if (typeof value === 'number') {
+    const dateTime = DateTime.fromMillis(value, { zone: 'utc' });
+    return dateTime.isValid ? dateTime.toUTC().toISO() : null;
+  }
+
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+
+    // LinkedIn Genie reads external schedule rows directly from other apps' tables.
+    // When Postgres TIMESTAMP WITHOUT TIME ZONE values are parsed as JS Dates without
+    // a UTC parser override, the local timezone gets applied. Rebuild from local
+    // wall-clock components and treat them as UTC to preserve the stored UTC value.
+    const rebuiltUtc = DateTime.fromObject(
+      {
+        year: value.getFullYear(),
+        month: value.getMonth() + 1,
+        day: value.getDate(),
+        hour: value.getHours(),
+        minute: value.getMinutes(),
+        second: value.getSeconds(),
+        millisecond: value.getMilliseconds(),
+      },
+      { zone: 'utc' }
+    );
+
+    return rebuiltUtc.isValid ? rebuiltUtc.toUTC().toISO() : null;
+  }
+
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  const normalized = raw.replace(' ', 'T');
+  let parsed = null;
+
+  if (ISO_OFFSET_SUFFIX.test(normalized)) {
+    parsed = DateTime.fromISO(normalized, { setZone: true });
+    if (!parsed.isValid) {
+      parsed = DateTime.fromSQL(raw, { setZone: true });
+    }
+  } else {
+    parsed = DateTime.fromISO(normalized, { zone: 'utc' });
+    if (!parsed.isValid) {
+      parsed = DateTime.fromSQL(raw, { zone: 'utc' });
+    }
+  }
+
+  return parsed?.isValid ? parsed.toUTC().toISO() : null;
+}
+
+function mapTweetGenieLinkedInCrossScheduleStatus(row) {
+  const sourceStatus = String(row?.status || '').toLowerCase();
+  const metadata = parseJsonObject(row?.metadata, {});
+  const linkedinResultStatus = String(
+    metadata?.cross_post?.last_result?.linkedin?.status || ''
+  ).toLowerCase();
+
+  if (sourceStatus === 'cancelled') return 'cancelled';
+  if (sourceStatus === 'failed') return 'failed';
+  if (sourceStatus === 'pending' || sourceStatus === 'processing') return 'scheduled';
+
+  if (sourceStatus === 'completed' || sourceStatus === 'partially_completed') {
+    if (!linkedinResultStatus) {
+      // Older rows or missing metadata result; source tweet completed so mark as posted fallback.
+      return 'completed';
+    }
+
+    if (linkedinResultStatus === 'posted') return 'completed';
+    if (
+      [
+        'failed',
+        'timeout',
+        'not_connected',
+        'skipped_not_configured',
+        'skipped_source_thread_failed',
+      ].includes(linkedinResultStatus)
+    ) {
+      return 'failed';
+    }
+    return 'completed';
+  }
+
+  return 'scheduled';
+}
+
+function buildExternalLinkedInScheduledRow(row) {
+  const metadata = parseJsonObject(row?.metadata, {});
+  const linkedinCrossPostMeta =
+    metadata?.cross_post && typeof metadata.cross_post === 'object' ? metadata.cross_post : {};
+  const linkedinLastResult =
+    linkedinCrossPostMeta?.last_result?.linkedin &&
+    typeof linkedinCrossPostMeta.last_result.linkedin === 'object'
+      ? linkedinCrossPostMeta.last_result.linkedin
+      : null;
+
+  const mappedStatus = mapTweetGenieLinkedInCrossScheduleStatus(row);
+
+  return {
+    id: `tgx-${row.id}`,
+    post_content: row.content || '',
+    media_urls: JSON.stringify([]),
+    post_type: 'single_post',
+    company_id: null,
+    scheduled_time: toUtcIso(row.scheduled_for) || row.scheduled_for,
+    timezone: row.timezone || null,
+    status: mappedStatus,
+    created_at: row.created_at || null,
+    updated_at: row.updated_at || null,
+    posted_at: row.posted_at || null,
+    error_message:
+      row.error_message ||
+      (linkedinLastResult?.status && linkedinLastResult.status !== 'posted'
+        ? `Tweet Genie cross-post status: ${linkedinLastResult.status}`
+        : null),
+    is_external_cross_post: true,
+    external_source: 'tweet-genie',
+    external_ref_id: row.id,
+    external_target: 'linkedin',
+    external_read_only: true,
+    external_meta: {
+      source_status: row.status || null,
+      linkedin_status: linkedinLastResult?.status || null,
+      last_attempted_at: linkedinCrossPostMeta?.last_attempted_at || null,
+    },
+  };
+}
+
+function mapSocialThreadsLinkedInCrossScheduleStatus(row) {
+  const sourceStatus = String(row?.status || '').toLowerCase();
+  const metadata = parseJsonObject(row?.metadata, {});
+  const linkedinResultStatus = String(
+    metadata?.cross_post?.last_result?.linkedin?.status || ''
+  ).toLowerCase();
+
+  if (sourceStatus === 'deleted') return 'cancelled';
+  if (sourceStatus === 'failed') return 'failed';
+  if (sourceStatus === 'publishing') return 'scheduled';
+  if (sourceStatus === 'scheduled') return 'scheduled';
+
+  if (sourceStatus === 'posted') {
+    if (!linkedinResultStatus) return 'completed';
+    if (linkedinResultStatus === 'posted') return 'completed';
+    if (
+      [
+        'failed',
+        'timeout',
+        'not_connected',
+        'skipped_not_configured',
+        'skipped_individual_only',
+      ].includes(linkedinResultStatus)
+    ) {
+      return 'failed';
+    }
+    return 'completed';
+  }
+
+  return 'scheduled';
+}
+
+function buildExternalLinkedInScheduledRowFromSocial(row) {
+  const metadata = parseJsonObject(row?.metadata, {});
+  const crossPostMeta =
+    metadata?.cross_post && typeof metadata.cross_post === 'object' ? metadata.cross_post : {};
+  const linkedinLastResult =
+    crossPostMeta?.last_result?.linkedin &&
+    typeof crossPostMeta.last_result.linkedin === 'object'
+      ? crossPostMeta.last_result.linkedin
+      : null;
+  const mappedStatus = mapSocialThreadsLinkedInCrossScheduleStatus(row);
+
+  return {
+    id: `sgx-${row.id}`,
+    post_content: row.caption || '',
+    media_urls: row.media_urls || JSON.stringify([]),
+    post_type: 'single_post',
+    company_id: row.team_id || null,
+    scheduled_time: toUtcIso(row.scheduled_for) || row.scheduled_for,
+    timezone: null,
+    status: mappedStatus,
+    created_at: row.created_at || null,
+    updated_at: row.updated_at || null,
+    posted_at: row.posted_at || null,
+    error_message:
+      row.error_message ||
+      (linkedinLastResult?.status && linkedinLastResult.status !== 'posted'
+        ? `Threads cross-post to LinkedIn status: ${linkedinLastResult.status}`
+        : null),
+    is_external_cross_post: true,
+    external_source: 'social-genie',
+    external_ref_id: row.id,
+    external_target: 'linkedin',
+    external_read_only: true,
+    external_meta: {
+      source_status: row.status || null,
+      linkedin_status: linkedinLastResult?.status || null,
+      last_attempted_at: crossPostMeta?.last_attempted_at || null,
+    },
+  };
+}
+
+async function fetchExternalTweetGenieLinkedInCrossSchedules(userId, { status, limit = EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT } = {}) {
+  const safeLimit = Math.max(1, Math.min(EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT, Number(limit) || EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT));
+
+  const { rows } = await pool.query(
+    `SELECT id, user_id, content, scheduled_for, timezone, status, error_message, metadata, created_at, updated_at, posted_at
+     FROM scheduled_tweets
+     WHERE user_id = $1
+       AND team_id IS NULL
+       AND (
+         metadata->'cross_post'->'targets'->>'linkedin' = 'true'
+       )
+     ORDER BY scheduled_for DESC
+     LIMIT $2`,
+    [userId, safeLimit]
+  );
+
+  const mapped = rows.map(buildExternalLinkedInScheduledRow);
+  if (!status) return mapped;
+
+  const normalizedStatus = String(status).toLowerCase();
+  return mapped.filter((row) => String(row.status || '').toLowerCase() === normalizedStatus);
+}
+
+async function fetchExternalSocialGenieLinkedInCrossSchedules(userId, { status, limit = EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT, teamId = null } = {}) {
+  const safeLimit = Math.max(1, Math.min(EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT, Number(limit) || EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT));
+  const ownerClause = teamId
+    ? `team_id::text = $1`
+    : `user_id = $1 AND (team_id IS NULL OR team_id::text = '')`;
+  const ownerParam = teamId ? String(teamId) : userId;
+
+  const { rows } = await pool.query(
+    `SELECT *
+     FROM social_posts
+     WHERE ${ownerClause}
+       AND scheduled_for IS NOT NULL
+     ORDER BY COALESCE(scheduled_for, created_at) DESC
+     LIMIT $2`,
+    [ownerParam, safeLimit]
+  );
+
+  const mapped = rows
+    .filter((row) => {
+      const metadata = parseJsonObject(row?.metadata, {});
+      const targets = metadata?.cross_post?.targets;
+      return Boolean(targets?.linkedin || targets?.linkedIn);
+    })
+    .map(buildExternalLinkedInScheduledRowFromSocial);
+
+  if (!status) return mapped;
+  const normalizedStatus = String(status).toLowerCase();
+  return mapped.filter((row) => String(row.status || '').toLowerCase() === normalizedStatus);
+}
+
 
 // Schedule a LinkedIn post
 export async function schedulePost(req, res) {
   try {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-    const { post_content, media_urls, post_type, company_id, account_id, scheduled_time, user_timezone } = req.body;
+    const {
+      post_content,
+      media_urls,
+      post_type,
+      company_id,
+      account_id,
+      scheduled_time,
+      user_timezone,
+      crossPostTargets = null,
+      optimizeCrossPost = true,
+      postToTwitter = false,
+      postToX = false,
+    } = req.body;
     if (!post_content || !scheduled_time) return res.status(400).json({ error: 'Missing post content or scheduled time' });
 
     const selectedAccountId = account_id || req.headers['x-selected-account-id'] || company_id;
@@ -97,6 +417,20 @@ export async function schedulePost(req, res) {
       return res.status(400).json({ error: 'LinkedIn account not connected' });
     }
 
+    const requestedCrossPostTargets = normalizeScheduledCrossPostTargets({
+      crossPostTargets,
+      postToTwitter,
+      postToX,
+    });
+    // Keep parity with current immediate-post behavior: team LinkedIn accounts do not schedule cross-posts.
+    const effectiveCrossPostTargets = teamAccount
+      ? { x: false, threads: false }
+      : requestedCrossPostTargets;
+    const crossPostMetadata = buildScheduledCrossPostMetadata({
+      targets: effectiveCrossPostTargets,
+      optimizeCrossPost,
+    });
+
     // Save to DB
     const scheduledPost = await create({
       user_id: userId,
@@ -105,12 +439,15 @@ export async function schedulePost(req, res) {
       post_type,
       company_id: fixedCompanyId,
       scheduled_time: scheduledTimeUtc,
+      timezone: user_timezone || null,
+      metadata: crossPostMetadata,
       status: 'scheduled'
     });
 
     logger.info('[ScheduleController] Scheduled post created', {
       scheduledPostId: scheduledPost.id,
-      scheduledTimeUtc
+      scheduledTimeUtc,
+      crossPostTargets: effectiveCrossPostTargets,
     });
     res.json({ success: true, scheduledPost });
   } catch (error) {
@@ -135,13 +472,45 @@ export async function getScheduledPosts(req, res) {
       ? [String(teamAccount.team_id), String(teamAccount.id)]
       : undefined;
 
-    const posts = await findByUser(userId, {
+    const internalPosts = await findByUser(userId, {
       status,
       limit: limit ? parseInt(limit) : 20,
       offset: offset ? parseInt(offset) : 0,
       companyIds
     });
-    res.json({ posts });
+
+    // Show Tweet Genie -> LinkedIn cross-schedules as read-only external rows for visibility.
+    // These are not scheduled_linkedin_posts rows; Tweet Genie owns execution.
+    let externalPosts = [];
+    try {
+      const [tweetGenieExternalPosts, socialGenieExternalPosts] = await Promise.all([
+        fetchExternalTweetGenieLinkedInCrossSchedules(userId, {
+          status,
+          limit: EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT,
+        }),
+        fetchExternalSocialGenieLinkedInCrossSchedules(userId, {
+          status,
+          limit: EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT,
+          teamId: teamAccount ? teamAccount.team_id : null,
+        }),
+      ]);
+      externalPosts = [...tweetGenieExternalPosts, ...socialGenieExternalPosts];
+    } catch (externalError) {
+      logger.warn('[getScheduledPosts] Failed to load external Tweet Genie cross-schedules', {
+        userId,
+        error: externalError?.message || String(externalError),
+      });
+      externalPosts = [];
+    }
+
+    const mergedPosts = [...internalPosts, ...externalPosts]
+      .sort((a, b) => new Date(b.scheduled_time).getTime() - new Date(a.scheduled_time).getTime());
+
+    const safeOffset = offset ? parseInt(offset) : 0;
+    const safeLimit = limit ? parseInt(limit) : 20;
+    const pagedPosts = mergedPosts.slice(safeOffset, safeOffset + safeLimit);
+
+    res.json({ posts: pagedPosts });
   } catch (error) {
     logger.error('[getScheduledPosts] Error', error);
     res.status(500).json({ error: error.message });
