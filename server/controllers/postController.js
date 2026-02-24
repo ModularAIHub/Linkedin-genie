@@ -90,6 +90,14 @@ const normalizeCrossPostTargets = ({ crossPostTargets = null, postToTwitter = fa
   };
 };
 
+const normalizeCrossPostMedia = (value) => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean)
+    .slice(0, 4);
+};
+
 const buildCrossPostResultShape = ({ xEnabled = false, threadsEnabled = false, mediaDetected = false } = {}) => ({
   x: {
     enabled: Boolean(xEnabled),
@@ -200,7 +208,7 @@ async function resolveDeleteLinkedInTokenSource({ post, userId, user }) {
   return resolvePersonalLinkedInTokenSource(userId, user);
 }
 
-async function crossPostToX({ userId, content, mediaDetected = false }) {
+async function crossPostToX({ userId, content, mediaDetected = false, media = [] }) {
   const tweetGenieUrl = String(process.env.TWEET_GENIE_URL || '').trim();
   const internalApiKey = String(process.env.INTERNAL_API_KEY || '').trim();
 
@@ -222,6 +230,7 @@ async function crossPostToX({ userId, content, mediaDetected = false }) {
         content,
         mediaDetected: Boolean(mediaDetected),
         sourcePlatform: 'linkedin',
+        media: Array.isArray(media) ? media : [],
       },
     });
 
@@ -236,13 +245,19 @@ async function crossPostToX({ userId, content, mediaDetected = false }) {
       if (response.status === 400 && String(body?.code || '').toUpperCase() === 'X_POST_TOO_LONG') {
         return { status: 'failed_too_long' };
       }
-      return { status: 'failed' };
+      return {
+        status: 'failed',
+        mediaStatus: typeof body?.mediaStatus === 'string' ? body.mediaStatus : undefined,
+        mediaCount: Number.isFinite(Number(body?.mediaCount)) ? Number(body.mediaCount) : undefined,
+      };
     }
 
     return {
       status: 'posted',
       tweetId: body?.tweetId || null,
       tweetUrl: body?.tweetUrl || null,
+      mediaStatus: typeof body?.mediaStatus === 'string' ? body.mediaStatus : (mediaDetected ? 'posted' : 'none'),
+      mediaCount: Number.isFinite(Number(body?.mediaCount)) ? Number(body.mediaCount) : (mediaDetected ? undefined : 0),
     };
   } catch (error) {
     if (error?.name === 'AbortError') {
@@ -284,13 +299,13 @@ async function saveToTweetHistory({ userId, content, tweetId = null, sourcePlatf
   }
 }
 
-async function crossPostToThreads({ userId, content, mediaDetected = false, optimizeCrossPost = true }) {
+async function crossPostToThreads({ userId, content, mediaDetected = false, optimizeCrossPost = true, media = [] }) {
   const socialGenieUrl = String(process.env.SOCIAL_GENIE_URL || '').trim();
   const internalApiKey = String(process.env.INTERNAL_API_KEY || '').trim();
 
   if (!socialGenieUrl || !internalApiKey) {
     logger.warn('[Threads Cross-post] Skipped: missing SOCIAL_GENIE_URL or INTERNAL_API_KEY');
-    return 'skipped_not_configured';
+    return { status: 'skipped_not_configured' };
   }
 
   const endpoint = buildInternalServiceEndpoint(socialGenieUrl, '/api/internal/threads/cross-post');
@@ -308,28 +323,37 @@ async function crossPostToThreads({ userId, content, mediaDetected = false, opti
         sourcePlatform: 'linkedin',
         optimizeCrossPost: optimizeCrossPost !== false,
         mediaDetected: Boolean(mediaDetected),
+        media: Array.isArray(media) ? media : [],
       },
     });
 
     if (!response.ok) {
       logger.warn('[Threads Cross-post] Failed', { status: response.status, code: body?.code });
       if (response.status === 404 && String(body?.code || '').toUpperCase().includes('NOT_CONNECTED')) {
-        return 'not_connected';
+        return { status: 'not_connected' };
       }
       if (response.status === 401 && String(body?.code || '').toUpperCase().includes('TOKEN_EXPIRED')) {
-        return 'not_connected';
+        return { status: 'not_connected' };
       }
-      return 'failed';
+      return {
+        status: 'failed',
+        mediaStatus: typeof body?.mediaStatus === 'string' ? body.mediaStatus : undefined,
+        mediaCount: Number.isFinite(Number(body?.mediaCount)) ? Number(body.mediaCount) : undefined,
+      };
     }
 
-    return 'posted';
+    return {
+      status: 'posted',
+      mediaStatus: typeof body?.mediaStatus === 'string' ? body.mediaStatus : (mediaDetected ? 'posted' : 'none'),
+      mediaCount: Number.isFinite(Number(body?.mediaCount)) ? Number(body.mediaCount) : (mediaDetected ? undefined : 0),
+    };
   } catch (error) {
     if (error?.name === 'AbortError') {
       logger.warn('[Threads Cross-post] Timeout reached', { timeoutMs: THREADS_CROSSPOST_TIMEOUT_MS, userId });
-      return 'timeout';
+      return { status: 'timeout' };
     }
     logger.error('[Threads Cross-post] Request error', { userId, error: error?.message || String(error) });
-    return 'failed';
+    return { status: 'failed' };
   }
 }
 
@@ -391,8 +415,10 @@ export async function createPost(req, res) {
       optimizeCrossPost = true,
       postToTwitter = false,
       postToX = false,
+      crossPostMedia = [],
     } = req.body;
     const normalizedCrossPostTargets = normalizeCrossPostTargets({ crossPostTargets, postToTwitter, postToX });
+    const normalizedCrossPostMedia = normalizeCrossPostMedia(crossPostMedia);
     // If posting to a team account, set company_id to selectedAccountId
     if (selectedTeamAccount) {
       company_id = selectedTeamAccount.team_id;
@@ -464,8 +490,13 @@ export async function createPost(req, res) {
               userId: req.user.id,
               content: formattedCrossPost.x.content,
               mediaDetected,
+              media: normalizedCrossPostMedia,
             });
-            crossPostResult.x.status = xCrossPost?.status || 'failed';
+            crossPostResult.x = {
+              ...crossPostResult.x,
+              ...xCrossPost,
+              status: xCrossPost?.status || 'failed',
+            };
 
             if (crossPostResult.x.status === 'posted') {
               await saveToTweetHistory({
@@ -484,12 +515,18 @@ export async function createPost(req, res) {
 
         if (normalizedCrossPostTargets.threads) {
           try {
-            crossPostResult.threads.status = await crossPostToThreads({
+            const threadsCrossPost = await crossPostToThreads({
               userId: req.user.id,
               content: formattedCrossPost.threads.content,
               mediaDetected,
               optimizeCrossPost,
+              media: normalizedCrossPostMedia,
             });
+            crossPostResult.threads = {
+              ...crossPostResult.threads,
+              ...threadsCrossPost,
+              status: threadsCrossPost?.status || 'failed',
+            };
           } catch (crossErr) {
             logger.error('[CREATE POST] Threads cross-post error', { userId: req.user.id, error: crossErr?.message || String(crossErr) });
             crossPostResult.threads.status = 'failed';

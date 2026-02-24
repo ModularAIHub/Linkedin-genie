@@ -32,14 +32,23 @@ function normalizeScheduledCrossPostTargets({ crossPostTargets = null, postToTwi
   };
 }
 
-function buildScheduledCrossPostMetadata({ targets, optimizeCrossPost = true } = {}) {
+function normalizeScheduledCrossPostMedia(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean)
+    .slice(0, 4);
+}
+
+function buildScheduledCrossPostMetadata({ targets, optimizeCrossPost = true, media = [] } = {}) {
   const x = Boolean(targets?.x);
   const threads = Boolean(targets?.threads);
   if (!x && !threads) return null;
+  const normalizedMedia = normalizeScheduledCrossPostMedia(media);
 
   return {
     cross_post: {
-      version: 1,
+      version: 2,
       source: 'linkedin_genie_schedule',
       createdAt: new Date().toISOString(),
       optimizeCrossPost: optimizeCrossPost !== false,
@@ -47,6 +56,7 @@ function buildScheduledCrossPostMetadata({ targets, optimizeCrossPost = true } =
         x,
         threads,
       },
+      ...(normalizedMedia.length > 0 ? { media: normalizedMedia } : {}),
     },
   };
 }
@@ -372,6 +382,7 @@ export async function schedulePost(req, res) {
       optimizeCrossPost = true,
       postToTwitter = false,
       postToX = false,
+      crossPostMedia = [],
     } = req.body;
     if (!post_content || !scheduled_time) return res.status(400).json({ error: 'Missing post content or scheduled time' });
 
@@ -429,6 +440,7 @@ export async function schedulePost(req, res) {
     const crossPostMetadata = buildScheduledCrossPostMetadata({
       targets: effectiveCrossPostTargets,
       optimizeCrossPost,
+      media: crossPostMedia,
     });
 
     // Save to DB

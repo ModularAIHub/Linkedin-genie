@@ -87,6 +87,14 @@ const parseMediaUrls = (value) => {
   return [];
 };
 
+const normalizeCrossPostMedia = (value) => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean)
+    .slice(0, 4);
+};
+
 const computeBackoffMs = (retryCount) => {
   const exponent = Math.max(0, retryCount - 1);
   const delay = RETRY_BASE_MS * Math.pow(2, exponent);
@@ -135,7 +143,7 @@ async function postInternalJson({ endpoint, userId, teamId = null, internalApiKe
   }
 }
 
-async function crossPostScheduledToX({ userId, teamId = null, content, mediaDetected = false }) {
+async function crossPostScheduledToX({ userId, teamId = null, content, mediaDetected = false, media = [] }) {
   const tweetGenieUrl = String(process.env.TWEET_GENIE_URL || '').trim();
   const internalApiKey = String(process.env.INTERNAL_API_KEY || '').trim();
 
@@ -158,6 +166,7 @@ async function crossPostScheduledToX({ userId, teamId = null, content, mediaDete
         content,
         mediaDetected: Boolean(mediaDetected),
         sourcePlatform: 'linkedin',
+        media: Array.isArray(media) ? media : [],
       },
     });
 
@@ -171,7 +180,11 @@ async function crossPostScheduledToX({ userId, teamId = null, content, mediaDete
       if (response.status === 400 && String(body?.code || '').toUpperCase() === 'X_POST_TOO_LONG') {
         return { status: 'failed_too_long' };
       }
-      return { status: 'failed' };
+      return {
+        status: 'failed',
+        mediaStatus: typeof body?.mediaStatus === 'string' ? body.mediaStatus : undefined,
+        mediaCount: Number.isFinite(Number(body?.mediaCount)) ? Number(body.mediaCount) : undefined,
+      };
     }
 
     return {
@@ -179,6 +192,8 @@ async function crossPostScheduledToX({ userId, teamId = null, content, mediaDete
       tweetId: body?.tweetId || null,
       tweetUrl: body?.tweetUrl || null,
       mediaDetected: Boolean(mediaDetected),
+      mediaStatus: typeof body?.mediaStatus === 'string' ? body.mediaStatus : (mediaDetected ? 'posted' : 'none'),
+      mediaCount: Number.isFinite(Number(body?.mediaCount)) ? Number(body.mediaCount) : (mediaDetected ? undefined : 0),
     };
   } catch (error) {
     if (error?.name === 'AbortError') {
@@ -223,7 +238,7 @@ async function saveToTweetHistory({ userId, teamId = null, content, tweetId = nu
   }
 }
 
-async function crossPostScheduledToThreads({ userId, content, mediaDetected = false, optimizeCrossPost = true }) {
+async function crossPostScheduledToThreads({ userId, content, mediaDetected = false, optimizeCrossPost = true, media = [] }) {
   const socialGenieUrl = String(process.env.SOCIAL_GENIE_URL || '').trim();
   const internalApiKey = String(process.env.INTERNAL_API_KEY || '').trim();
 
@@ -247,6 +262,7 @@ async function crossPostScheduledToThreads({ userId, content, mediaDetected = fa
         sourcePlatform: 'linkedin_schedule',
         optimizeCrossPost: optimizeCrossPost !== false,
         mediaDetected: Boolean(mediaDetected),
+        media: Array.isArray(media) ? media : [],
       },
     });
 
@@ -257,10 +273,19 @@ async function crossPostScheduledToThreads({ userId, content, mediaDetected = fa
       if (response.status === 401 && String(body?.code || '').toUpperCase().includes('TOKEN_EXPIRED')) {
         return { status: 'not_connected' };
       }
-      return { status: 'failed' };
+      return {
+        status: 'failed',
+        mediaStatus: typeof body?.mediaStatus === 'string' ? body.mediaStatus : undefined,
+        mediaCount: Number.isFinite(Number(body?.mediaCount)) ? Number(body.mediaCount) : undefined,
+      };
     }
 
-    return { status: 'posted', mediaDetected: Boolean(mediaDetected) };
+    return {
+      status: 'posted',
+      mediaDetected: Boolean(mediaDetected),
+      mediaStatus: typeof body?.mediaStatus === 'string' ? body.mediaStatus : (mediaDetected ? 'posted' : 'none'),
+      mediaCount: Number.isFinite(Number(body?.mediaCount)) ? Number(body.mediaCount) : (mediaDetected ? undefined : 0),
+    };
   } catch (error) {
     if (error?.name === 'AbortError') {
       return { status: 'timeout' };
@@ -626,6 +651,7 @@ async function processScheduledPost(post) {
       crossPostMeta.targets && typeof crossPostMeta.targets === 'object'
         ? crossPostMeta.targets
         : {};
+    const crossPostMedia = normalizeCrossPostMedia(crossPostMeta.media);
     const xEnabled = Boolean(targets.x || targets.twitter);
     const threadsEnabled = Boolean(targets.threads);
     const mediaDetected = detectCrossPostMedia({ mediaUrls });
@@ -660,6 +686,7 @@ async function processScheduledPost(post) {
             teamId: post.team_id || null,
             content: payloads.x.content,
             mediaDetected,
+            media: crossPostMedia,
           });
           crossPostResult.x = {
             ...crossPostResult.x,
@@ -683,6 +710,7 @@ async function processScheduledPost(post) {
             content: payloads.threads.content,
             mediaDetected,
             optimizeCrossPost: crossPostMeta.optimizeCrossPost !== false,
+            media: crossPostMedia,
           });
           crossPostResult.threads = {
             ...crossPostResult.threads,

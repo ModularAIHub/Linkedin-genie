@@ -25,6 +25,63 @@ const useLinkedInPostComposer = () => {
   const [scheduledPosts, setScheduledPosts] = useState([]);
   const [isLoadingScheduled, setIsLoadingScheduled] = useState(false);
   const [characterCount, setCharacterCount] = useState(0);
+  const MAX_CROSSPOST_IMAGE_COUNT = 4;
+  const MAX_CROSSPOST_MEDIA_TOTAL_BYTES = 6 * 1024 * 1024;
+
+  const fileToDataUrl = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+
+  const estimateDataUrlBytes = (value) => {
+    const raw = String(value || '');
+    const match = raw.match(/^data:[^;,]+;base64,(.+)$/i);
+    if (!match) return 0;
+    return Math.floor((match[1].length * 3) / 4);
+  };
+
+  const buildCrossPostMediaPayload = async () => {
+    const payload = [];
+    let totalBytes = 0;
+
+    for (const image of selectedImages) {
+      if (payload.length >= MAX_CROSSPOST_IMAGE_COUNT) break;
+      if (image?.isPDF || String(image?.type || '').toLowerCase() === 'application/pdf') {
+        continue;
+      }
+
+      let mediaValue = '';
+      if (typeof image?.url === 'string' && image.url.startsWith('data:image/')) {
+        mediaValue = image.url;
+      } else if (image?.file && String(image.file.type || '').startsWith('image/')) {
+        try {
+          mediaValue = await fileToDataUrl(image.file);
+        } catch (error) {
+          console.warn('[LinkedIn Composer] Failed to serialize one image for cross-post', error);
+          continue;
+        }
+      } else if (typeof image?.url === 'string' && /^https?:\/\//i.test(image.url)) {
+        mediaValue = image.url;
+      }
+
+      if (!mediaValue) continue;
+
+      if (mediaValue.startsWith('data:')) {
+        const nextBytes = estimateDataUrlBytes(mediaValue);
+        if (nextBytes <= 0) continue;
+        if (totalBytes + nextBytes > MAX_CROSSPOST_MEDIA_TOTAL_BYTES) {
+          break;
+        }
+        totalBytes += nextBytes;
+      }
+
+      payload.push(mediaValue);
+    }
+
+    return payload;
+  };
 
   // Image/PDF upload for single post (uploads as base64 to backend, stores LinkedIn URL)
   const handleImageUpload = async (event) => {
@@ -190,6 +247,7 @@ const useLinkedInPostComposer = () => {
       const unicodeContent = htmlToUnicode(content);
       // Prepare media as array of URLs or base64 (assume .url exists, fallback to file name)
       const media_urls = selectedImages.map(img => img.url || img.file?.name || '');
+      const crossPostMedia = hasAnyCrossPostTarget ? await buildCrossPostMediaPayload() : [];
       
       // Use account-aware API to post with selected account
       const response = await postForCurrentAccount('/api/posts', {
@@ -202,6 +260,7 @@ const useLinkedInPostComposer = () => {
             threads: normalizedCrossPost.threads,
           },
           optimizeCrossPost: normalizedCrossPost.optimizeCrossPost,
+          ...(crossPostMedia.length > 0 ? { crossPostMedia } : {}),
         }),
       });
 
@@ -296,6 +355,7 @@ const useLinkedInPostComposer = () => {
       const unicodeContent = htmlToUnicode(content);
       // Prepare media as array of URLs
       const media_urls = selectedImages.map(img => img.url || img.file?.name || '');
+      const crossPostMedia = hasAnyCrossPostTarget ? await buildCrossPostMediaPayload() : [];
       
       // Use account-aware API to schedule with selected account
       await postForCurrentAccount('/api/schedule', {
@@ -311,6 +371,7 @@ const useLinkedInPostComposer = () => {
             threads: normalizedCrossPost.threads,
           },
           optimizeCrossPost: normalizedCrossPost.optimizeCrossPost,
+          ...(crossPostMedia.length > 0 ? { crossPostMedia } : {}),
         }),
       });
       

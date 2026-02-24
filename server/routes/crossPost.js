@@ -1,10 +1,12 @@
 import express from 'express';
 import { pool } from '../config/database.js';
-import { createLinkedInPost, refreshLinkedInAccessToken } from '../services/linkedinService.js';
+import { createLinkedInPost, refreshLinkedInAccessToken, uploadImageToLinkedIn } from '../services/linkedinService.js';
 import { logger } from '../utils/logger.js';
 
 const router = express.Router();
 const TEAM_ADMIN_ROLES = new Set(['owner', 'admin']);
+const MAX_CROSSPOST_MEDIA_ITEMS = 9;
+const MAX_CROSSPOST_REMOTE_MEDIA_BYTES = 8 * 1024 * 1024;
 
 const parsePositiveInt = (value) => {
   const normalized = String(value ?? '').trim();
@@ -18,6 +20,156 @@ const normalizeOptionalString = (value, maxLength = 255) => {
   const normalized = String(value).trim();
   if (!normalized) return null;
   return normalized.slice(0, maxLength);
+};
+
+const normalizeCrossPostMediaInputs = (value) => {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean)
+    .slice(0, MAX_CROSSPOST_MEDIA_ITEMS);
+};
+
+const isHttpUrl = (value) => /^https?:\/\//i.test(String(value || '').trim());
+
+const parseDataUrlToFile = (value, index) => {
+  const raw = String(value || '').trim();
+  const match = raw.match(/^data:([^;,]+);base64,(.+)$/i);
+  if (!match) return null;
+
+  const mimetype = String(match[1] || '').toLowerCase();
+  if (!mimetype.startsWith('image/')) {
+    return null;
+  }
+
+  const buffer = Buffer.from(match[2], 'base64');
+  const extensionMap = {
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/png': 'png',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+  };
+  const ext = extensionMap[mimetype] || 'bin';
+
+  return {
+    buffer,
+    mimetype,
+    size: buffer.length,
+    originalname: `crosspost_${Date.now()}_${index}.${ext}`,
+  };
+};
+
+const fetchRemoteImageToFile = async (value, index) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 12000);
+
+  try {
+    const response = await fetch(String(value).trim(), { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.startsWith('image/')) {
+      throw new Error(`Unsupported content-type: ${contentType || 'unknown'}`);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    if (buffer.length > MAX_CROSSPOST_REMOTE_MEDIA_BYTES) {
+      throw new Error(`Remote image too large (${buffer.length} bytes)`);
+    }
+
+    const extensionMap = {
+      'image/jpeg': 'jpg',
+      'image/jpg': 'jpg',
+      'image/png': 'png',
+      'image/gif': 'gif',
+      'image/webp': 'webp',
+    };
+    const ext = extensionMap[contentType] || 'bin';
+
+    return {
+      buffer,
+      mimetype: contentType,
+      size: buffer.length,
+      originalname: `crosspost_${Date.now()}_${index}.${ext}`,
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+const resolveCrossPostMediaFile = async (mediaInput, index) => {
+  const normalized = String(mediaInput || '').trim();
+  if (!normalized) return null;
+
+  if (normalized.startsWith('data:')) {
+    return parseDataUrlToFile(normalized, index);
+  }
+
+  if (isHttpUrl(normalized)) {
+    return fetchRemoteImageToFile(normalized, index);
+  }
+
+  return null;
+};
+
+const uploadCrossPostMediaAssets = async ({ accessToken, authorUrn, mediaInputs = [], userId }) => {
+  const normalizedInputs = normalizeCrossPostMediaInputs(mediaInputs);
+  if (!normalizedInputs.length) {
+    return {
+      assets: [],
+      mediaStatus: 'none',
+      mediaCount: 0,
+      skippedCount: 0,
+    };
+  }
+
+  const assets = [];
+  let skippedCount = 0;
+  let hadUploadError = false;
+
+  for (let index = 0; index < normalizedInputs.length; index += 1) {
+    const item = normalizedInputs[index];
+    try {
+      const file = await resolveCrossPostMediaFile(item, index);
+      if (!file) {
+        skippedCount += 1;
+        continue;
+      }
+
+      const asset = await uploadImageToLinkedIn(accessToken, authorUrn, file);
+      if (asset) {
+        assets.push(asset);
+      } else {
+        skippedCount += 1;
+      }
+    } catch (error) {
+      hadUploadError = true;
+      skippedCount += 1;
+      logger.warn('[cross-post] Skipping one media item during LinkedIn cross-post upload', {
+        user: userId,
+        index,
+        error: error?.message || String(error),
+      });
+    }
+  }
+
+  let mediaStatus = 'none';
+  if (assets.length > 0 && skippedCount > 0) mediaStatus = 'posted_partial';
+  else if (assets.length > 0) mediaStatus = 'posted';
+  else if (hadUploadError) mediaStatus = 'text_only_upload_failed';
+  else mediaStatus = 'text_only_unsupported';
+
+  return {
+    assets,
+    mediaStatus,
+    mediaCount: assets.length,
+    skippedCount,
+  };
 };
 
 const buildTeamLinkedInLabel = (row = {}) => {
@@ -265,6 +417,9 @@ router.post('/cross-post', async (req, res) => {
 
   try {
     const linkedinContent = content;
+    const preferredMediaInput =
+      Array.isArray(req.body?.media) && req.body.media.length > 0 ? req.body.media : req.body?.mediaUrls;
+    const normalizedCrossPostMedia = normalizeCrossPostMediaInputs(preferredMediaInput);
     const explicitTeamTargetRequested =
       targetLinkedinTeamAccountId !== null &&
       targetLinkedinTeamAccountId !== undefined &&
@@ -318,15 +473,41 @@ router.post('/cross-post', async (req, res) => {
     }
 
     let linkedinResult;
+    let uploadedMediaAssets = [];
+    let mediaStatus = normalizedCrossPostMedia.length > 0 ? 'text_only_unsupported' : 'none';
+    let mediaCount = 0;
 
-    try {
-      linkedinResult = await createLinkedInPost(
-        postingAccount.access_token,
-        authorUrn,
+    const publishToLinkedIn = async ({ currentAccount, currentAuthorUrn }) => {
+      const mediaUpload = await uploadCrossPostMediaAssets({
+        accessToken: currentAccount.access_token,
+        authorUrn: currentAuthorUrn,
+        mediaInputs: normalizedCrossPostMedia,
+        userId: platformUserId,
+      });
+
+      const result = await createLinkedInPost(
+        currentAccount.access_token,
+        currentAuthorUrn,
         linkedinContent,
-        [],
+        mediaUpload.assets,
         'single_post'
       );
+
+      return {
+        linkedinResult: result,
+        mediaUpload,
+      };
+    };
+
+    try {
+      const publishResult = await publishToLinkedIn({
+        currentAccount: postingAccount,
+        currentAuthorUrn: authorUrn,
+      });
+      linkedinResult = publishResult.linkedinResult;
+      uploadedMediaAssets = publishResult.mediaUpload.assets;
+      mediaStatus = publishResult.mediaUpload.mediaStatus;
+      mediaCount = publishResult.mediaUpload.mediaCount;
     } catch (postErr) {
       const canRefresh = isLinkedInUnauthorizedError(postErr) && Boolean(String(postingAccount?.refresh_token || '').trim());
       if (!canRefresh) {
@@ -341,13 +522,14 @@ router.post('/cross-post', async (req, res) => {
         postingAccount = isTeamTarget
           ? await refreshLinkedInAuthForTeamAccount(targetTeamAccount.id, postingAccount)
           : await refreshLinkedInAuthForUser(platformUserId, postingAccount);
-        linkedinResult = await createLinkedInPost(
-          postingAccount.access_token,
-          authorUrn,
-          linkedinContent,
-          [],
-          'single_post'
-        );
+        const publishResult = await publishToLinkedIn({
+          currentAccount: postingAccount,
+          currentAuthorUrn: authorUrn,
+        });
+        linkedinResult = publishResult.linkedinResult;
+        uploadedMediaAssets = publishResult.mediaUpload.assets;
+        mediaStatus = publishResult.mediaUpload.mediaStatus;
+        mediaCount = publishResult.mediaUpload.mediaCount;
       } catch (retryErr) {
         if (isLinkedInUnauthorizedError(retryErr)) {
           return res.status(401).json({
@@ -387,7 +569,7 @@ router.post('/cross-post', async (req, res) => {
           isTeamTarget ? targetTeamAccount?.id || null : null,
           linkedinPostId,
           linkedinContent,
-          JSON.stringify([]),
+          JSON.stringify(uploadedMediaAssets),
           isTeamTarget ? platformTeamId : null,
           postingAccount.linkedin_user_id || targetTeamAccount?.linkedin_user_id || null,
         ]
@@ -403,12 +585,16 @@ router.post('/cross-post', async (req, res) => {
       user: platformUserId,
       teamId: isTeamTarget ? platformTeamId : null,
       targetLinkedinTeamAccountId: isTeamTarget ? targetTeamAccount?.id || null : null,
+      mediaStatus,
+      mediaCount,
     });
     res.json({
       success: true,
       linkedinPostId: linkedinResult?.id || linkedinResult?.urn || null,
       tweetUrl: typeof tweetUrl === 'string' ? tweetUrl : null,
       targetLinkedinTeamAccountId: isTeamTarget ? String(targetTeamAccount?.id) : null,
+      mediaStatus,
+      mediaCount,
     });
 
   } catch (err) {
