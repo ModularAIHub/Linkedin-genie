@@ -44,6 +44,34 @@ const allowedOrigins = [
   'https://apilinkedin.suitegenie.in',
   'https://api.suitegenie.in'
 ];
+
+const isAllowedCorsOrigin = (origin) => {
+  if (!origin) return true;
+  if (allowedOrigins.includes(origin)) return true;
+
+  try {
+    const { hostname, protocol } = new URL(origin);
+    if (!['http:', 'https:'].includes(protocol)) return false;
+
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      return true;
+    }
+
+    if (hostname === 'suitegenie.in' || hostname.endsWith('.suitegenie.in')) {
+      return true;
+    }
+
+    // Allow Vercel preview deployments for this team/project namespace.
+    if (hostname.endsWith('.vercel.app') && hostname.includes('suitegenies-projects')) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+};
+
 if (process.env.NODE_ENV === 'development' || !process.env.NODE_ENV) {
   allowedOrigins.push(
     'http://localhost:5173',
@@ -56,7 +84,7 @@ if (process.env.NODE_ENV === 'development' || !process.env.NODE_ENV) {
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1) {
+    if (isAllowedCorsOrigin(origin)) {
       logger.debug('[CORS] Allowed origin', { origin });
       return callback(null, true);
     } else {
@@ -123,7 +151,7 @@ app.use(Honeybadger.errorHandler);
 // Error handling with CORS headers
 app.use((err, req, res, next) => {
   const origin = req.headers.origin;
-  if (origin && allowedOrigins.includes(origin)) {
+  if (origin && isAllowedCorsOrigin(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
   }

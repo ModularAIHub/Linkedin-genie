@@ -14,7 +14,7 @@ import {
 import { useLinkedInPostComposer } from '../hooks/useLinkedInPostComposer';
 import { useAccount } from '../contexts/AccountContext';
 import AccountSelector from '../components/AccountSelector';
-import { byok } from '../utils/api';
+import api, { byok } from '../utils/api';
 
 const LinkedInPostComposer = () => {
   const { accounts, loading: accountsLoading, selectedAccount } = useAccount();
@@ -34,8 +34,8 @@ const LinkedInPostComposer = () => {
 
   const fetchCrossPostStatuses = async () => {
     try {
-      const res = await fetch('/api/twitter/status', { credentials: 'include' });
-      const data = await res.json().catch(() => ({ connected: false, reason: 'service_unreachable' }));
+      const res = await api.get('/api/twitter/status');
+      const data = res?.data || { connected: false, reason: 'service_unreachable' };
       setXConnected(data.connected === true);
       setXConnectionReason(typeof data.reason === 'string' ? data.reason : '');
     } catch (error) {
@@ -45,8 +45,8 @@ const LinkedInPostComposer = () => {
     }
 
     try {
-      const res = await fetch('/api/threads/status', { credentials: 'include' });
-      const data = await res.json().catch(() => ({ connected: false, reason: 'service_unreachable' }));
+      const res = await api.get('/api/threads/status');
+      const data = res?.data || { connected: false, reason: 'service_unreachable' };
       setThreadsConnected(data.connected === true);
       setThreadsConnectionReason(typeof data.reason === 'string' ? data.reason : '');
     } catch (error) {
