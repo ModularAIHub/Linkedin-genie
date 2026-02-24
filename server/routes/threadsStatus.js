@@ -1,63 +1,115 @@
 import express from 'express';
-import { pool } from '../config/database.js';
 import { logger } from '../utils/logger.js';
 
 const router = express.Router();
+const THREADS_STATUS_TIMEOUT_MS = Number.parseInt(process.env.THREADS_STATUS_TIMEOUT_MS || '5000', 10);
 
-// Advisory status check (like Tweet Genie's LinkedIn status route):
-// direct DB lookup against shared Supabase/Postgres instead of proxying to Social Genie.
 router.get('/status', async (req, res) => {
   const userId = req.user?.id || req.user?.userId;
+
   if (!userId) {
     return res.status(401).json({ connected: false, reason: 'unauthorized' });
   }
 
-  try {
-    const { rows } = await pool.query(
-      `SELECT id, account_id, account_username, access_token, token_expires_at
-       FROM social_connected_accounts
-       WHERE user_id = $1
-         AND team_id IS NULL
-         AND platform = 'threads'
-         AND is_active = true
-       ORDER BY updated_at DESC
-       LIMIT 1`,
-      [userId]
-    );
+  const socialGenieUrl = String(process.env.SOCIAL_GENIE_URL || '').trim();
+  const internalApiKey = String(process.env.INTERNAL_API_KEY || '').trim();
 
-    if (rows.length === 0) {
-      return res.json({ connected: false, reason: 'not_connected' });
+  if (!socialGenieUrl || !internalApiKey) {
+    logger.warn('[threads/status] Not configured for upstream status proxy', {
+      hasSocialGenieUrl: !!socialGenieUrl,
+      hasInternalApiKey: !!internalApiKey,
+    });
+    return res.json({
+      connected: false,
+      reason: 'not_configured',
+    });
+  }
+
+  const endpoint = `${socialGenieUrl.replace(/\/$/, '')}/api/internal/threads/status`;
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), THREADS_STATUS_TIMEOUT_MS);
+
+    logger.info('[threads/status] Proxying status request to Social Genie', {
+      endpoint,
+      userId,
+      timeoutMs: THREADS_STATUS_TIMEOUT_MS,
+    });
+
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        'x-internal-api-key': internalApiKey,
+        'x-internal-caller': 'linkedin-genie',
+        'x-platform-user-id': String(userId),
+      },
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    const contentType = response.headers.get('content-type') || '';
+    const bodyText = await response.text().catch(() => '');
+    let body = {};
+    try {
+      body = bodyText ? JSON.parse(bodyText) : {};
+    } catch {
+      body = {};
+    }
+    const bodyPreview = bodyText && typeof bodyText === 'string'
+      ? (bodyText.length > 240 ? `${bodyText.slice(0, 237)}...` : bodyText)
+      : '';
+
+    logger.info('[threads/status] Upstream response received', {
+      endpoint,
+      userId,
+      status: response.status,
+      ok: response.ok,
+      contentType: contentType || null,
+      upstreamCode: body?.code || null,
+      upstreamReason: body?.reason || null,
+      hasBodyPreview: !!bodyPreview && !contentType.includes('application/json'),
+      bodyPreview: !contentType.includes('application/json') ? bodyPreview : undefined,
+    });
+
+    if (!response.ok) {
+      logger.warn('[threads/status] Social Genie returned non-OK response', {
+        endpoint,
+        userId,
+        status: response.status,
+        code: body?.code,
+        reason: body?.reason,
+        error: body?.error,
+      });
+      return res.json({
+        connected: false,
+        reason: response.status === 404 ? 'not_connected' : 'service_unreachable',
+      });
     }
 
-    const account = rows[0];
-    const expiresAt = account?.token_expires_at ? new Date(account.token_expires_at) : null;
-    const hasToken = Boolean(String(account?.access_token || '').trim());
-    const hasAccountId = Boolean(String(account?.account_id || '').trim());
-    const isExpired =
-      expiresAt instanceof Date &&
-      !Number.isNaN(expiresAt.getTime()) &&
-      expiresAt.getTime() <= Date.now();
-
     return res.json({
-      connected: true,
-      reason: (!hasToken || !hasAccountId) ? 'token_missing' : (isExpired ? 'token_expired' : null),
-      account: {
-        id: account.id,
-        account_id: account.account_id || null,
-        account_username: account.account_username || null,
-      },
-      token: {
-        isExpired,
-        hasToken,
-        hasAccountId,
-        expiresAt: expiresAt && !Number.isNaN(expiresAt.getTime()) ? expiresAt.toISOString() : null,
-      },
+      connected: body?.connected === true,
+      reason: body?.connected === true ? null : (body?.reason || 'not_connected'),
+      account: body?.account || null,
     });
   } catch (error) {
-    logger.error('[threads/status] DB error', {
+    if (error?.name === 'AbortError') {
+      logger.warn('[threads/status] Upstream status request timed out', {
+        endpoint,
+        userId,
+        timeoutMs: THREADS_STATUS_TIMEOUT_MS,
+      });
+      return res.json({ connected: false, reason: 'timeout' });
+    }
+
+    logger.error('[threads/status] Proxy error', {
+      endpoint,
+      userId,
       error: error?.message || String(error),
     });
-    return res.json({ connected: false, reason: 'service_unavailable' });
+    return res.json({ connected: false, reason: 'service_unreachable' });
   }
 });
 
