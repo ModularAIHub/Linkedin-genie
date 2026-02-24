@@ -213,6 +213,30 @@ const History = () => {
     });
   };
 
+  const getMediaCount = (mediaUrls) => {
+    let values = [];
+
+    if (Array.isArray(mediaUrls)) {
+      values = mediaUrls;
+    } else if (typeof mediaUrls === 'string') {
+      const trimmed = mediaUrls.trim();
+      if (!trimmed) return 0;
+
+      try {
+        const parsed = JSON.parse(trimmed);
+        values = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        values = trimmed.includes(',') ? trimmed.split(',') : [trimmed];
+      }
+    }
+
+    return values.filter((value) => {
+      if (value === null || value === undefined) return false;
+      const normalized = String(value).trim();
+      return normalized !== '' && normalized.toLowerCase() !== 'null';
+    }).length;
+  };
+
   const getEngagementRate = (post) => {
     const totalEngagement = (post.likes || 0) + (post.shares || 0) + (post.comments || 0);
     const impressions = post.views || 1;
@@ -397,6 +421,7 @@ const History = () => {
         {postedPosts.length > 0 ? (
           postedPosts.map((post, idx) => {
             const postId = post.id || post.linkedin_post_id;
+            const mediaCount = getMediaCount(post.media_urls);
 
             return (
               <div
@@ -455,10 +480,10 @@ const History = () => {
                     </p>
 
                     {/* Media Indicators */}
-                    {post.media_urls && post.media_urls.length > 0 && (
+                    {mediaCount > 0 && (
                       <div className="mb-4">
                         <div className="flex items-center text-sm text-gray-500">
-                          <span>📷 {post.media_urls.filter(url => url && url !== null).length} media file(s) attached</span>
+                          <span>📷 {mediaCount} media file(s) attached</span>
                         </div>
                       </div>
                     )}
