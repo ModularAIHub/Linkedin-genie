@@ -704,44 +704,80 @@ async function processScheduledPost(post) {
           optimizeCrossPost: crossPostMeta.optimizeCrossPost !== false,
         });
 
+        // Build task list — only enabled targets
+        const crossPostTasks = [];
+
         if (xEnabled) {
-  const xResult = await crossPostScheduledToX({
-    userId: post.user_id,
-    teamId: post.team_id || null,
-    content: payloads.x.content,
-    threadParts: payloads.x.threadParts || [],
-    postMode: payloads.x.postMode || 'single',
-    mediaDetected,
-  });
-          crossPostResult.x = {
-            ...crossPostResult.x,
-            ...xResult,
-            status: xResult?.status || 'failed',
-          };
-          if (crossPostResult.x.status === 'posted') {
-            await saveToTweetHistory({
+          crossPostTasks.push(
+            crossPostScheduledToX({
               userId: post.user_id,
               teamId: post.team_id || null,
               content: payloads.x.content,
-              tweetId: crossPostResult.x.tweetId || null,
+              threadParts: payloads.x.threadParts || [],
+              postMode: payloads.x.postMode || 'single',
               mediaDetected,
-            });
-          }
+            })
+              .then((result) => {
+                // saveToTweetHistory is non-blocking — fire and forget
+                // it must NOT delay Threads from starting
+                if (result?.status === 'posted') {
+                  saveToTweetHistory({
+                    userId: post.user_id,
+                    teamId: post.team_id || null,
+                    content: payloads.x.content,
+                    tweetId: result.tweetId || null,
+                    mediaDetected,
+                  }).catch((err) => {
+                    logger.warn('[LinkedIn Scheduler] Failed to save X history (non-blocking)', {
+                      userId: post.user_id,
+                      error: err?.message || String(err),
+                    });
+                  });
+                }
+                return { platform: 'x', result };
+              })
+              .catch((err) => {
+                logger.error('[LinkedIn Scheduler] X cross-post error', {
+                  userId: post.user_id,
+                  error: err?.message || String(err),
+                });
+                return { platform: 'x', result: { status: 'failed' } };
+              })
+          );
         }
 
         if (threadsEnabled) {
-          const threadsResult = await crossPostScheduledToThreads({
-            userId: post.user_id,
-            content: payloads.threads.content,
-            mediaUrls: crossPostMedia, // ← NEW: pass as mediaUrls
-            mediaDetected,
-            optimizeCrossPost: crossPostMeta.optimizeCrossPost !== false,
-          });
-          crossPostResult.threads = {
-            ...crossPostResult.threads,
-            ...threadsResult,
-            status: threadsResult?.status || 'failed',
-          };
+          crossPostTasks.push(
+            crossPostScheduledToThreads({
+              userId: post.user_id,
+              content: payloads.threads.content,
+              mediaUrls: crossPostMedia,
+              mediaDetected,
+              optimizeCrossPost: crossPostMeta.optimizeCrossPost !== false,
+            })
+              .then((result) => ({ platform: 'threads', result }))
+              .catch((err) => {
+                logger.error('[LinkedIn Scheduler] Threads cross-post error', {
+                  userId: post.user_id,
+                  error: err?.message || String(err),
+                });
+                return { platform: 'threads', result: { status: 'failed' } };
+              })
+          );
+        }
+
+        // Fire all cross-posts simultaneously
+        const settlements = await Promise.allSettled(crossPostTasks);
+
+        for (const settlement of settlements) {
+          if (settlement.status === 'fulfilled') {
+            const { platform, result } = settlement.value;
+            crossPostResult[platform] = {
+              ...crossPostResult[platform],
+              ...result,
+              status: result?.status || 'failed',
+            };
+          }
         }
       }
     }

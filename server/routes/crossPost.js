@@ -128,33 +128,48 @@ const uploadCrossPostMediaAssets = async ({ accessToken, authorUrn, mediaInputs 
     };
   }
 
+  // Resolve all media files in parallel — base64 decode + remote fetch run simultaneously
+  const resolvedFiles = await Promise.allSettled(
+    normalizedInputs.map((item, index) => resolveCrossPostMediaFile(item, index))
+  );
+
+  // Upload all successfully resolved files to LinkedIn in parallel
+  const uploadTasks = resolvedFiles.map((settlement, index) => {
+    if (settlement.status === 'rejected' || !settlement.value) {
+      return Promise.resolve({ index, asset: null, skipped: true, error: settlement.reason });
+    }
+    const file = settlement.value;
+    return uploadImageToLinkedIn(accessToken, authorUrn, file)
+      .then((asset) => ({ index, asset, skipped: !asset }))
+      .catch((err) => {
+        logger.warn('[cross-post] Skipping one media item during LinkedIn cross-post upload', {
+          user: userId,
+          index,
+          error: err?.message || String(err),
+        });
+        return { index, asset: null, skipped: true, error: err };
+      });
+  });
+
+  const uploadResults = await Promise.allSettled(uploadTasks);
+
   const assets = [];
   let skippedCount = 0;
   let hadUploadError = false;
 
-  for (let index = 0; index < normalizedInputs.length; index += 1) {
-    const item = normalizedInputs[index];
-    try {
-      const file = await resolveCrossPostMediaFile(item, index);
-      if (!file) {
-        skippedCount += 1;
-        continue;
-      }
-
-      const asset = await uploadImageToLinkedIn(accessToken, authorUrn, file);
-      if (asset) {
-        assets.push(asset);
-      } else {
-        skippedCount += 1;
-      }
-    } catch (error) {
-      hadUploadError = true;
+  for (const settlement of uploadResults) {
+    if (settlement.status === 'rejected') {
+      // Should never happen since each uploadTask catches internally
       skippedCount += 1;
-      logger.warn('[cross-post] Skipping one media item during LinkedIn cross-post upload', {
-        user: userId,
-        index,
-        error: error?.message || String(error),
-      });
+      hadUploadError = true;
+      continue;
+    }
+    const { asset, skipped, error } = settlement.value;
+    if (skipped || !asset) {
+      skippedCount += 1;
+      if (error) hadUploadError = true;
+    } else {
+      assets.push(asset);
     }
   }
 
