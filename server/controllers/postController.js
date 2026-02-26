@@ -1486,6 +1486,36 @@ export async function deletePost(req, res) {
           const reconnectRequired = isLinkedInUnauthorizedError(refreshRetryError) || isLinkedInUnauthorizedError(apiError);
 
           if (reconnectRequired) {
+            // Mark the linked account as disconnected in DB to avoid future retries
+            try {
+              if (tokenSource?.kind === 'team' && tokenSource?.id) {
+                console.warn('[DELETE POST] Marking team LinkedIn account inactive due to revoked token', { teamAccountId: tokenSource.id });
+                await pool.query(
+                  `UPDATE linkedin_team_accounts
+                   SET active = false,
+                       access_token = NULL,
+                       refresh_token = NULL,
+                       token_expires_at = NULL,
+                       updated_at = NOW()
+                   WHERE id = $1`,
+                  [tokenSource.id]
+                );
+              } else if (tokenSource?.kind === 'personal' && tokenSource?.userId) {
+                console.warn('[DELETE POST] Clearing personal LinkedIn tokens due to revoked token', { userId: tokenSource.userId });
+                await pool.query(
+                  `UPDATE linkedin_auth
+                   SET access_token = NULL,
+                       refresh_token = NULL,
+                       token_expires_at = NULL,
+                       updated_at = NOW()
+                   WHERE user_id = $1`,
+                  [tokenSource.userId]
+                );
+              }
+            } catch (dbErr) {
+              console.error('[DELETE POST] Failed to mark LinkedIn account disconnected in DB', { error: dbErr?.message || String(dbErr) });
+            }
+
             return res.status(401).json({
               error: 'LinkedIn token revoked/expired. Please reconnect your LinkedIn account and try again.',
               code: 'LINKEDIN_TOKEN_RECONNECT_REQUIRED',
@@ -1518,6 +1548,38 @@ export async function deletePost(req, res) {
       console.error(`[DELETE POST] Stack:`, apiError.stack);
       const status = isLinkedInUnauthorizedError(apiError) ? 401 : 400;
       const code = isLinkedInUnauthorizedError(apiError) ? 'LINKEDIN_TOKEN_RECONNECT_REQUIRED' : undefined;
+      if (isLinkedInUnauthorizedError(apiError)) {
+        // Attempt to mark the linked account disconnected in DB to avoid further failed calls
+        try {
+          if (tokenSource?.kind === 'team' && tokenSource?.id) {
+            console.warn('[DELETE POST] Marking team LinkedIn account inactive due to unauthorized API error', { teamAccountId: tokenSource.id });
+            await pool.query(
+              `UPDATE linkedin_team_accounts
+               SET active = false,
+                   access_token = NULL,
+                   refresh_token = NULL,
+                   token_expires_at = NULL,
+                   updated_at = NOW()
+               WHERE id = $1`,
+              [tokenSource.id]
+            );
+          } else if (tokenSource?.kind === 'personal' && tokenSource?.userId) {
+            console.warn('[DELETE POST] Clearing personal LinkedIn tokens due to unauthorized API error', { userId: tokenSource.userId });
+            await pool.query(
+              `UPDATE linkedin_auth
+               SET access_token = NULL,
+                   refresh_token = NULL,
+                   token_expires_at = NULL,
+                   updated_at = NOW()
+               WHERE user_id = $1`,
+              [tokenSource.userId]
+            );
+          }
+        } catch (dbErr) {
+          console.error('[DELETE POST] Failed to mark LinkedIn account disconnected in DB', { error: dbErr?.message || String(dbErr) });
+        }
+      }
+
       res.status(status).json({ error: 'Failed to delete post from LinkedIn', details: apiError.message, code, stack: apiError.stack, urn: postUrn });
     }
   } catch (error) {

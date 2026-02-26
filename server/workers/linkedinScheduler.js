@@ -262,7 +262,7 @@ async function crossPostScheduledToThreads({ userId, content, mediaDetected = fa
         sourcePlatform: 'linkedin_schedule',
         optimizeCrossPost: optimizeCrossPost !== false,
         mediaDetected: Boolean(mediaDetected),
-        media: Array.isArray(media) ? media : [],
+        mediaUrls: Array.isArray(media) ? media : [], // ← NEW: pass as mediaUrls
       },
     });
 
@@ -630,6 +630,30 @@ async function processScheduledPost(post) {
     post.company_id
   );
 
+  // --- PATCH: Resolve LinkedIn asset URNs to real URLs for Threads cross-post ---
+  let resolvedMediaUrls = mediaUrls;
+  if (Array.isArray(mediaUrls) && mediaUrls.some(url => url.startsWith('urn:li:digitalmediaAsset:'))) {
+    const { resolveLinkedInAssetUrl } = await import('../utils/linkedinAssetResolver.js');
+    resolvedMediaUrls = await Promise.all(mediaUrls.map(async (url) => {
+      if (url.startsWith('urn:li:digitalmediaAsset:')) {
+        try {
+          const resolved = await resolveLinkedInAssetUrl(url, context.accessToken);
+          logger.info('[LinkedIn Scheduler] Resolved LinkedIn asset URN to URL', { urn: url, resolved });
+          return resolved;
+        } catch (e) {
+          logger.warn('[LinkedIn Scheduler] Failed to resolve LinkedIn asset URN to URL', { url, error: e?.message || String(e) });
+          return null;
+        }
+      }
+      return url;
+    }));
+    resolvedMediaUrls = resolvedMediaUrls.filter(Boolean);
+    logger.info('[LinkedIn Scheduler] Final resolvedMediaUrls for Threads cross-post', { resolvedMediaUrls });
+    if (!resolvedMediaUrls.length) {
+      logger.warn('[LinkedIn Scheduler] No valid media URLs resolved for Threads cross-post. Skipping media.');
+    }
+  }
+
   try {
     await addPostedEntry(post, linkedinResult, context.linkedinUserId);
   } catch (historyError) {
@@ -681,13 +705,14 @@ async function processScheduledPost(post) {
         });
 
         if (xEnabled) {
-          const xResult = await crossPostScheduledToX({
-            userId: post.user_id,
-            teamId: post.team_id || null,
-            content: payloads.x.content,
-            mediaDetected,
-            media: crossPostMedia,
-          });
+  const xResult = await crossPostScheduledToX({
+    userId: post.user_id,
+    teamId: post.team_id || null,
+    content: payloads.x.content,
+    threadParts: payloads.x.threadParts || [],
+    postMode: payloads.x.postMode || 'single',
+    mediaDetected,
+  });
           crossPostResult.x = {
             ...crossPostResult.x,
             ...xResult,
@@ -708,9 +733,9 @@ async function processScheduledPost(post) {
           const threadsResult = await crossPostScheduledToThreads({
             userId: post.user_id,
             content: payloads.threads.content,
+            mediaUrls: crossPostMedia, // ← NEW: pass as mediaUrls
             mediaDetected,
             optimizeCrossPost: crossPostMeta.optimizeCrossPost !== false,
-            media: crossPostMedia,
           });
           crossPostResult.threads = {
             ...crossPostResult.threads,

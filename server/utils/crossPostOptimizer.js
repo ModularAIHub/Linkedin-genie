@@ -112,9 +112,11 @@ export const detectCrossPostMedia = ({ media = [], threadMedia = [], mediaUrls =
 
 export const buildCrossPostPayloads = ({
   content = '',
+  postContent = '',
   thread = [],
   optimizeCrossPost = true,
 } = {}) => {
+  content = content || postContent;  // ← add this line
   const normalizedOptimize = optimizeCrossPost !== false;
   const threadParts = normalizeThreadParts(thread);
   const isThread = threadParts.length > 1;

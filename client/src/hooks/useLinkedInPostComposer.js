@@ -292,17 +292,17 @@ const useLinkedInPostComposer = () => {
           }
 
           const statusMessages = {
-            not_connected: `${platform.label} not connected - LinkedIn post succeeded.`,
-            timeout: `${platform.label} cross-post timed out - LinkedIn post succeeded.`,
+            not_connected: `${platform.label} not connected — original post succeeded.`,
+            timeout: `${platform.label} cross-post timed out — original post succeeded.`,
             skipped_individual_only: `${platform.label} cross-post is available only for personal LinkedIn accounts right now.`,
             skipped_not_configured: `${platform.label} cross-post is not configured yet.`,
             skipped: `${platform.label} cross-post was skipped.`,
             failed_too_long: `${platform.label} cross-post failed because the LinkedIn post is too long for X.`,
-            failed: `${platform.label} cross-post failed - LinkedIn post succeeded.`,
+            failed: `${platform.label} cross-post failed — original post succeeded.`,
             disabled: null,
             '': null,
           };
-          const issue = statusMessages[status] ?? `${platform.label} cross-post did not complete (${status}). LinkedIn post succeeded.`;
+          const issue = statusMessages[status] ?? `${platform.label} cross-post did not complete (${status}). Original post succeeded.`;
           if (issue) issues.push(issue);
         }
 
