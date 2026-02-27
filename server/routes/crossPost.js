@@ -331,6 +331,27 @@ async function listEligibleTeamLinkedInTargets({ teamId, platformUserId }) {
   return { membership, targets };
 }
 
+async function listPersonalLinkedInTargets({ userId }) {
+  const { rows } = await pool.query(
+    `SELECT id, linkedin_user_id, linkedin_username, linkedin_display_name, linkedin_profile_image_url
+     FROM linkedin_auth
+     WHERE user_id = $1
+     ORDER BY updated_at DESC NULLS LAST, id DESC`,
+    [userId]
+  );
+
+  return rows.map((row) => ({
+    id: String(row.id),
+    platform: 'linkedin',
+    username: normalizeOptionalString(row.linkedin_username, 255) || normalizeOptionalString(row.linkedin_user_id, 255),
+    displayName:
+      normalizeOptionalString(row.linkedin_display_name, 255) ||
+      normalizeOptionalString(row.linkedin_username, 255) ||
+      `LinkedIn account #${row.id}`,
+    avatar: normalizeOptionalString(row.linkedin_profile_image_url, 1024),
+  }));
+}
+
 async function resolveExplicitTeamLinkedInTarget({ teamId, platformUserId, targetLinkedinTeamAccountId }) {
   const membership = await getActiveTeamMembership(teamId, platformUserId);
   if (!membership) {
@@ -412,6 +433,62 @@ router.get('/team-accounts/eligible-crosspost-targets', async (req, res) => {
   }
 });
 
+router.get('/accounts/targets', async (req, res) => {
+  if (!req.isInternal) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const platformUserId = String(req.headers['x-platform-user-id'] || '').trim();
+  const platformTeamId = String(req.headers['x-platform-team-id'] || '').trim() || null;
+  const excludeAccountId = normalizeOptionalString(req.query?.excludeAccountId, 128);
+
+  if (!platformUserId) {
+    return res.status(400).json({
+      error: 'x-platform-user-id is required',
+      code: 'PLATFORM_USER_ID_REQUIRED',
+    });
+  }
+
+  try {
+    if (platformTeamId) {
+      const { membership, targets } = await listEligibleTeamLinkedInTargets({
+        teamId: platformTeamId,
+        platformUserId,
+      });
+
+      if (!membership) {
+        return res.status(403).json({
+          error: 'Requester is not an active team member.',
+          code: 'CROSSPOST_TARGET_ACCOUNT_FORBIDDEN',
+        });
+      }
+
+      const accounts = targets
+        .map((target) => ({
+          id: String(target.id),
+          platform: 'linkedin',
+          username: target.linkedinUserId || null,
+          displayName: target.label || `LinkedIn account #${target.id}`,
+          avatar: null,
+        }))
+        .filter((target) => !excludeAccountId || String(target.id) !== String(excludeAccountId));
+
+      return res.json({ success: true, scope: 'team', accounts });
+    }
+
+    const accounts = (await listPersonalLinkedInTargets({ userId: platformUserId }))
+      .filter((target) => !excludeAccountId || String(target.id) !== String(excludeAccountId));
+    return res.json({ success: true, scope: 'personal', accounts });
+  } catch (error) {
+    logger.error('[cross-post] Failed to list LinkedIn targets', {
+      user: platformUserId,
+      teamId: platformTeamId,
+      error: error?.message || String(error),
+    });
+    return res.status(500).json({ error: 'Failed to fetch LinkedIn targets' });
+  }
+});
+
 /**
  * POST /api/internal/cross-post
  * Called internally by Tweet Genie to cross-post a tweet to LinkedIn.
@@ -422,7 +499,12 @@ router.post('/cross-post', async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
-  const { content, tweetUrl, targetLinkedinTeamAccountId = null } = req.body || {};
+  const {
+    content,
+    tweetUrl,
+    targetLinkedinTeamAccountId = null,
+    targetAccountId = null,
+  } = req.body || {};
   const platformUserId = String(req.headers['x-platform-user-id'] || '').trim();
   const platformTeamId = String(req.headers['x-platform-team-id'] || '').trim() || null;
 
@@ -439,6 +521,10 @@ router.post('/cross-post', async (req, res) => {
       targetLinkedinTeamAccountId !== null &&
       targetLinkedinTeamAccountId !== undefined &&
       String(targetLinkedinTeamAccountId).trim() !== '';
+    const explicitPersonalTargetRequested =
+      targetAccountId !== null &&
+      targetAccountId !== undefined &&
+      String(targetAccountId).trim() !== '';
 
     let postingAccount;
     let authorUrn;
@@ -471,15 +557,36 @@ router.post('/cross-post', async (req, res) => {
       authorUrn = `urn:li:person:${postingAccount.linkedin_user_id}`;
       isTeamTarget = true;
     } else {
-      const { rows } = await pool.query(
-        'SELECT * FROM linkedin_auth WHERE user_id = $1 LIMIT 1',
-        [platformUserId]
-      );
+      let rows = [];
+      if (explicitPersonalTargetRequested) {
+        const personalTargetId = parsePositiveInt(targetAccountId);
+        if (!personalTargetId) {
+          return res.status(400).json({
+            error: 'Invalid target LinkedIn account id.',
+            code: 'CROSSPOST_TARGET_ACCOUNT_INVALID',
+          });
+        }
+        const result = await pool.query(
+          'SELECT * FROM linkedin_auth WHERE id = $1 AND user_id = $2 LIMIT 1',
+          [personalTargetId, platformUserId]
+        );
+        rows = result.rows;
+      } else {
+        const result = await pool.query(
+          'SELECT * FROM linkedin_auth WHERE user_id = $1 LIMIT 1',
+          [platformUserId]
+        );
+        rows = result.rows;
+      }
 
       if (!rows.length) {
         return res.status(404).json({
-          error: 'LinkedIn account not connected.',
-          code: 'LINKEDIN_NOT_CONNECTED',
+          error: explicitPersonalTargetRequested
+            ? 'Target LinkedIn account not found.'
+            : 'LinkedIn account not connected.',
+          code: explicitPersonalTargetRequested
+            ? 'CROSSPOST_TARGET_ACCOUNT_NOT_FOUND'
+            : 'LINKEDIN_NOT_CONNECTED',
         });
       }
 
@@ -608,6 +715,7 @@ router.post('/cross-post', async (req, res) => {
       linkedinPostId: linkedinResult?.id || linkedinResult?.urn || null,
       tweetUrl: typeof tweetUrl === 'string' ? tweetUrl : null,
       targetLinkedinTeamAccountId: isTeamTarget ? String(targetTeamAccount?.id) : null,
+      targetAccountId: !isTeamTarget && explicitPersonalTargetRequested ? String(targetAccountId) : null,
       mediaStatus,
       mediaCount,
     });
