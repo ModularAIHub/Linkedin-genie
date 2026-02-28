@@ -440,18 +440,94 @@ export async function handleOAuthCallback(req, res) {
 
           // Check if personal account is already connected to ANY team globally
           const { rows: existingGlobalRows } = await pool.query(
-            `SELECT lta.id, lta.linkedin_display_name, lta.team_id, t.name as team_name
+            `SELECT lta.id, lta.linkedin_display_name, lta.team_id
              FROM linkedin_team_accounts lta
-             LEFT JOIN teams t ON t.id::text = lta.team_id::text
              WHERE lta.linkedin_user_id = $1 AND lta.active = true`,
             [linkedinUserId]
           );
 
-          const connectedToOtherTeam = existingGlobalRows.find(
-            (row) => String(row.team_id) !== String(teamId)
-          );
+          const existingTeamIds = [
+            ...new Set(
+              existingGlobalRows
+                .map((row) => normalizeString(row.team_id, 128))
+                .filter(Boolean)
+            ),
+          ];
+
+          let validTeamsById = new Map();
+          if (existingTeamIds.length > 0) {
+            const { rows: platformTeams } = await newPlatformPool.query(
+              `SELECT id::text AS id, name
+               FROM teams
+               WHERE id::text = ANY($1::text[])`,
+              [existingTeamIds]
+            );
+            validTeamsById = new Map(
+              platformTeams.map((row) => [String(row.id), row.name])
+            );
+          }
+
+          const staleGlobalRows = existingGlobalRows.filter((row) => {
+            const rowTeamId = normalizeString(row.team_id, 128);
+            if (!rowTeamId) return false;
+            if (String(rowTeamId) === String(teamId)) return false;
+            return !validTeamsById.has(String(rowTeamId));
+          });
+
+          if (staleGlobalRows.length > 0) {
+            try {
+              const staleRowIds = staleGlobalRows
+                .map((row) => Number(row.id))
+                .filter(Number.isFinite);
+              const staleTeamIds = [
+                ...new Set(
+                  staleGlobalRows
+                    .map((row) => normalizeString(row.team_id, 128))
+                    .filter(Boolean)
+                ),
+              ];
+
+              if (staleRowIds.length > 0) {
+                await pool.query(
+                  `UPDATE linkedin_team_accounts
+                   SET active = false,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ANY($1::int[])`,
+                  [staleRowIds]
+                );
+              }
+
+              if (staleTeamIds.length > 0) {
+                await pool.query(
+                  `UPDATE social_connected_accounts
+                   SET is_active = false,
+                       updated_at = NOW()
+                   WHERE platform = 'linkedin'
+                     AND team_id::text = ANY($1::text[])
+                     AND account_id = $2
+                     AND is_active = true`,
+                  [staleTeamIds, linkedinUserId]
+                );
+              }
+
+              console.warn('[Team OAuth] Deactivated stale LinkedIn team connection rows:', {
+                linkedinUserId,
+                staleRowIds,
+                staleTeamIds,
+              });
+            } catch (staleCleanupError) {
+              console.warn('[Team OAuth] Failed to deactivate stale LinkedIn team rows:', staleCleanupError?.message || staleCleanupError);
+            }
+          }
+
+          const connectedToOtherTeam = existingGlobalRows.find((row) => {
+            const rowTeamId = normalizeString(row.team_id, 128);
+            if (!rowTeamId) return false;
+            if (String(rowTeamId) === String(teamId)) return false;
+            return validTeamsById.has(String(rowTeamId));
+          });
           if (connectedToOtherTeam) {
-            return res.redirect(`${returnUrl}?error=already_connected&existingTeam=${encodeURIComponent(connectedToOtherTeam.team_name || 'another team')}&accountName=${encodeURIComponent(connectedToOtherTeam.linkedin_display_name || 'this account')}`);
+            return res.redirect(`${returnUrl}?error=already_connected&existingTeam=${encodeURIComponent(validTeamsById.get(String(connectedToOtherTeam.team_id)) || 'another team')}&accountName=${encodeURIComponent(connectedToOtherTeam.linkedin_display_name || 'this account')}`);
           }
 
           const personalAlreadyConnected = existingGlobalRows.some(
