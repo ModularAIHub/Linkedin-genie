@@ -287,23 +287,25 @@ export async function connectTeamAccount(req, res) {
 
     const linkedinAuth = authRows[0];
 
-    // Check if this LinkedIn account is already connected to this team
-    const { rows: existingRows } = await pool.query(
-      `SELECT id FROM linkedin_team_accounts WHERE team_id = $1 AND linkedin_user_id = $2`,
-      [teamId, linkedinAuth.linkedin_user_id]
-    );
-
-    if (existingRows.length > 0) {
-      return res.status(400).json({ error: 'This LinkedIn account is already connected to this team' });
-    }
-
-    // Insert into linkedin_team_accounts
+    // Upsert into linkedin_team_accounts so stale inactive rows do not block reconnect.
     const { rows: insertedRows } = await pool.query(
       `INSERT INTO linkedin_team_accounts (
         team_id, user_id, linkedin_user_id, linkedin_username, linkedin_display_name,
         access_token, refresh_token, token_expires_at, linkedin_profile_image_url,
         connections_count, headline, active
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true)
+      ON CONFLICT (team_id, linkedin_user_id) DO UPDATE SET
+        user_id = EXCLUDED.user_id,
+        linkedin_username = EXCLUDED.linkedin_username,
+        linkedin_display_name = EXCLUDED.linkedin_display_name,
+        access_token = EXCLUDED.access_token,
+        refresh_token = EXCLUDED.refresh_token,
+        token_expires_at = EXCLUDED.token_expires_at,
+        linkedin_profile_image_url = EXCLUDED.linkedin_profile_image_url,
+        connections_count = EXCLUDED.connections_count,
+        headline = EXCLUDED.headline,
+        active = true,
+        updated_at = CURRENT_TIMESTAMP
       RETURNING *`,
       [
         teamId,
@@ -340,7 +342,7 @@ export async function connectTeamAccount(req, res) {
     });
 
     res.json({ 
-      success: true, 
+      success: true,
       message: 'LinkedIn account connected to team',
       account: insertedRows[0]
     });

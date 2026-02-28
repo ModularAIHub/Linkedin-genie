@@ -486,7 +486,9 @@ export async function handleOAuthCallback(req, res) {
           }
 
           if (personalAlreadyConnected) {
-            return res.redirect(`${returnUrl}?error=no_org_pages&accountName=${encodeURIComponent(linkedinDisplayName || 'this account')}`);
+            return res.redirect(
+              `${returnUrl}?success=team&already_connected=true&username=${encodeURIComponent(linkedinUsername || linkedinDisplayName || 'this account')}`
+            );
           }
 
           // Insert personal account into linkedin_team_accounts
