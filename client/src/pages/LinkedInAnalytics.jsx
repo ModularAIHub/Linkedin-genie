@@ -110,7 +110,13 @@ const LinkedInAnalytics = () => {
       setError(null);
       const loadingToast = toast.loading('Syncing analytics from LinkedIn...');
       
-      const response = await analytics.sync();
+      const syncPayload = {};
+      if (selectedAccount?.id && selectedAccount?.account_type) {
+        syncPayload.account_id = selectedAccount.id;
+        syncPayload.account_type = selectedAccount.account_type;
+      }
+
+      const response = await analytics.sync(syncPayload);
       console.log('Sync response:', response.data);
       
       toast.dismiss(loadingToast);

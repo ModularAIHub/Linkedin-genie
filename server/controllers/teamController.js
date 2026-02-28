@@ -1,12 +1,133 @@
 import { pool } from '../config/database.js';
 import pg from 'pg';
+import crypto from 'crypto';
 
 // Create a separate pool for new-platform database (for teams table access)
 const { Pool } = pg;
+const platformDatabaseUrl = process.env.NEW_PLATFORM_DATABASE_URL || process.env.DATABASE_URL || '';
+const usePlatformDbSsl =
+  platformDatabaseUrl.includes('supabase.com') ||
+  platformDatabaseUrl.includes('supabase.co') ||
+  process.env.NODE_ENV === 'production';
+
 const newPlatformPool = new Pool({
-  connectionString: process.env.NEW_PLATFORM_DATABASE_URL || process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  connectionString: platformDatabaseUrl,
+  ssl: usePlatformDbSsl ? { rejectUnauthorized: false } : false,
 });
+
+const normalizeString = (value, maxLen = null) => {
+  if (value === undefined || value === null) return null;
+  const stringValue = String(value).trim();
+  if (!stringValue) return null;
+  if (Number.isFinite(maxLen) && maxLen > 0) {
+    return stringValue.slice(0, maxLen);
+  }
+  return stringValue;
+};
+
+const resolveTeamLinkedInSocialAccountId = (row = {}) => {
+  const accountType = normalizeString(row.account_type, 50);
+  const organizationId = normalizeString(row.organization_id, 255);
+  if (accountType === 'organization' && organizationId) {
+    return `org:${organizationId}`;
+  }
+  return normalizeString(row.linkedin_user_id, 255);
+};
+
+async function upsertTeamLinkedInSocialAccount({
+  userId,
+  teamId,
+  accountId,
+  accountUsername = null,
+  accountDisplayName = null,
+  accessToken = null,
+  refreshToken = null,
+  tokenExpiresAt = null,
+  profileImageUrl = null,
+  followersCount = 0,
+  metadata = {},
+}) {
+  const normalizedUserId = normalizeString(userId, 128);
+  const normalizedTeamId = normalizeString(teamId, 128);
+  const normalizedAccountId = normalizeString(accountId, 255);
+  if (!normalizedUserId || !normalizedTeamId || !normalizedAccountId) {
+    return;
+  }
+
+  try {
+    const { rows: existing } = await pool.query(
+      `SELECT id
+       FROM social_connected_accounts
+       WHERE team_id::text = $1::text
+         AND platform = 'linkedin'
+         AND account_id = $2
+       LIMIT 1`,
+      [normalizedTeamId, normalizedAccountId]
+    );
+
+    if (existing[0]?.id) {
+      await pool.query(
+        `UPDATE social_connected_accounts
+         SET user_id = $1,
+             account_username = $2,
+             account_display_name = $3,
+             access_token = COALESCE($4, access_token),
+             refresh_token = COALESCE($5, refresh_token),
+             token_expires_at = COALESCE($6, token_expires_at),
+             profile_image_url = $7,
+             followers_count = $8,
+             metadata = $9::jsonb,
+             connected_by = $10,
+             is_active = true,
+             updated_at = NOW()
+         WHERE id = $11`,
+        [
+          normalizedUserId,
+          normalizeString(accountUsername, 255),
+          normalizeString(accountDisplayName, 255),
+          normalizeString(accessToken),
+          normalizeString(refreshToken),
+          tokenExpiresAt || null,
+          normalizeString(profileImageUrl, 2048),
+          Number.isFinite(Number(followersCount)) ? Number(followersCount) : 0,
+          JSON.stringify(metadata && typeof metadata === 'object' ? metadata : {}),
+          normalizedUserId,
+          existing[0].id,
+        ]
+      );
+      return;
+    }
+
+    await pool.query(
+      `INSERT INTO social_connected_accounts (
+        id, user_id, team_id, platform, account_id, account_username, account_display_name,
+        access_token, refresh_token, token_expires_at, profile_image_url, followers_count,
+        metadata, connected_by, is_active
+      ) VALUES (
+        $1, $2, $3, 'linkedin', $4, $5, $6,
+        $7, $8, $9, $10, $11,
+        $12::jsonb, $13, true
+      )`,
+      [
+        crypto.randomUUID(),
+        normalizedUserId,
+        normalizedTeamId,
+        normalizedAccountId,
+        normalizeString(accountUsername, 255),
+        normalizeString(accountDisplayName, 255),
+        normalizeString(accessToken),
+        normalizeString(refreshToken),
+        tokenExpiresAt || null,
+        normalizeString(profileImageUrl, 2048),
+        Number.isFinite(Number(followersCount)) ? Number(followersCount) : 0,
+        JSON.stringify(metadata && typeof metadata === 'object' ? metadata : {}),
+        normalizedUserId,
+      ]
+    );
+  } catch (error) {
+    console.warn('[teamController] Failed to mirror team LinkedIn account into social_connected_accounts:', error?.message || error);
+  }
+}
 
 // Get all LinkedIn accounts for user (personal + team accounts they have access to)
 export async function getAccounts(req, res) {
@@ -136,8 +257,12 @@ export async function connectTeamAccount(req, res) {
     }
 
     // Verify user is owner or admin of this team
-    const { rows: memberRows } = await pool.query(
-      `SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2`,
+    const { rows: memberRows } = await newPlatformPool.query(
+      `SELECT role
+       FROM team_members
+       WHERE team_id = $1
+         AND user_id = $2
+         AND status = 'active'`,
       [teamId, userId]
     );
 
@@ -195,6 +320,25 @@ export async function connectTeamAccount(req, res) {
       ]
     );
 
+    await upsertTeamLinkedInSocialAccount({
+      userId,
+      teamId,
+      accountId: linkedinAuth.linkedin_user_id,
+      accountUsername: linkedinAuth.linkedin_username,
+      accountDisplayName: linkedinAuth.linkedin_display_name || linkedinAuth.linkedin_username,
+      accessToken: linkedinAuth.access_token,
+      refreshToken: linkedinAuth.refresh_token,
+      tokenExpiresAt: linkedinAuth.token_expires_at,
+      profileImageUrl: linkedinAuth.linkedin_profile_image_url,
+      followersCount: linkedinAuth.connections_count || 0,
+      metadata: {
+        source_table: 'linkedin_team_accounts',
+        account_type: 'personal',
+        legacy_team_account_id: insertedRows[0]?.id || null,
+        linkedin_user_id: linkedinAuth.linkedin_user_id || null,
+      },
+    });
+
     res.json({ 
       success: true, 
       message: 'LinkedIn account connected to team',
@@ -214,11 +358,10 @@ export async function disconnectTeamAccount(req, res) {
 
     // Verify user is owner or admin of the team this account belongs to
     const { rows: accountRows } = await pool.query(
-      `SELECT lta.*, tm.role 
-       FROM linkedin_team_accounts lta
-       JOIN team_members tm ON tm.team_id = lta.team_id AND tm.user_id = $1
-       WHERE lta.id = $2`,
-      [userId, accountId]
+      `SELECT *
+       FROM linkedin_team_accounts
+       WHERE id = $1`,
+      [accountId]
     );
 
     if (!accountRows.length) {
@@ -226,7 +369,21 @@ export async function disconnectTeamAccount(req, res) {
     }
 
     const account = accountRows[0];
-    if (account.role !== 'owner' && account.role !== 'admin') {
+    const { rows: membershipRows } = await newPlatformPool.query(
+      `SELECT role
+       FROM team_members
+       WHERE team_id = $1
+         AND user_id = $2
+         AND status = 'active'`,
+      [account.team_id, userId]
+    );
+
+    if (!membershipRows.length) {
+      return res.status(404).json({ error: 'Team LinkedIn account not found or access denied' });
+    }
+
+    const membershipRole = membershipRows[0].role;
+    if (membershipRole !== 'owner' && membershipRole !== 'admin') {
       return res.status(403).json({ error: 'Only team owners and admins can disconnect LinkedIn accounts' });
     }
 
@@ -235,6 +392,20 @@ export async function disconnectTeamAccount(req, res) {
       `DELETE FROM linkedin_team_accounts WHERE id = $1`,
       [accountId]
     );
+
+    const socialAccountId = resolveTeamLinkedInSocialAccountId(account);
+    if (socialAccountId) {
+      await pool.query(
+        `UPDATE social_connected_accounts
+         SET is_active = false,
+             updated_at = NOW()
+         WHERE team_id::text = $1::text
+           AND platform = 'linkedin'
+           AND account_id = $2
+           AND is_active = true`,
+        [String(account.team_id), socialAccountId]
+      );
+    }
 
     res.json({ success: true, message: 'LinkedIn account disconnected from team' });
   } catch (error) {

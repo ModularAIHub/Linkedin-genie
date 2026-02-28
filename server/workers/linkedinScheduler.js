@@ -29,6 +29,8 @@ let schedulerStarted = false;
 let schedulerInterval = null;
 let schedulerStartedAt = null;
 let lastTickFinishedAt = null;
+let nextAllowedTickAt = 0;
+let transientFailureBackoffMs = 0;
 
 const schedulerStats = {
   ticks: 0,
@@ -55,6 +57,32 @@ const lastTickSummary = {
 const safeErrorMessage = (error) => {
   const message = error?.response?.data?.message || error?.message || 'Unknown scheduler error';
   return String(message).slice(0, MAX_ERROR_LENGTH);
+};
+
+const isTransientConnectionError = (error) => {
+  const message = String(error?.response?.data?.message || error?.message || '').toLowerCase();
+  const code = String(error?.code || '').toUpperCase();
+
+  return (
+    message.includes('getaddrinfo eai_again') ||
+    message.includes('enotfound') ||
+    message.includes('connect eacces') ||
+    message.includes('connection terminated') ||
+    message.includes('connection timeout') ||
+    code === 'EAI_AGAIN' ||
+    code === 'ENOTFOUND' ||
+    code === 'EACCES' ||
+    code === 'EPERM' ||
+    code === 'ECONNRESET' ||
+    code === 'ETIMEDOUT'
+  );
+};
+
+const computeTransientBackoffMs = () => {
+  if (!transientFailureBackoffMs) {
+    return Math.min(Math.max(POLL_INTERVAL_MS * 2, 30000), 300000);
+  }
+  return Math.min(transientFailureBackoffMs * 2, 300000);
 };
 
 const parseJsonObject = (value, fallback = {}) => {
@@ -103,6 +131,15 @@ const computeBackoffMs = (retryCount) => {
 
 const toIso = (value) => (value ? new Date(value).toISOString() : null);
 
+const resolveSocialLinkedinUserId = (row = {}) => {
+  const metadata = row?.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+  const fromMetadata = String(metadata?.linkedin_user_id || '').trim();
+  if (fromMetadata) return fromMetadata;
+  const accountId = String(row?.account_id || '').trim();
+  if (!accountId || accountId.startsWith('org:')) return null;
+  return accountId;
+};
+
 const buildInternalServiceHeaders = ({ userId, internalApiKey, teamId = null }) => {
   const headers = {
     'Content-Type': 'application/json',
@@ -120,6 +157,19 @@ const buildInternalServiceHeaders = ({ userId, internalApiKey, teamId = null }) 
 
 const buildInternalServiceEndpoint = (baseUrl, path) =>
   `${String(baseUrl || '').trim().replace(/\/$/, '')}${path}`;
+
+function resolveTweetGenieInternalBaseUrl() {
+  const configuredUrl = String(process.env.TWEET_GENIE_URL || '').trim();
+  if (configuredUrl) {
+    return configuredUrl;
+  }
+
+  if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+    return 'http://localhost:3002';
+  }
+
+  return '';
+}
 
 async function postInternalJson({ endpoint, userId, teamId = null, internalApiKey, payload, timeoutMs = 0 }) {
   const controller = Number.isFinite(timeoutMs) && timeoutMs > 0 ? new AbortController() : null;
@@ -143,8 +193,17 @@ async function postInternalJson({ endpoint, userId, teamId = null, internalApiKe
   }
 }
 
-async function crossPostScheduledToX({ userId, teamId = null, content, mediaDetected = false, media = [] }) {
-  const tweetGenieUrl = String(process.env.TWEET_GENIE_URL || '').trim();
+async function crossPostScheduledToX({
+  userId,
+  teamId = null,
+  targetAccountId = null,
+  content,
+  postMode = 'single',
+  threadParts = [],
+  mediaDetected = false,
+  media = [],
+}) {
+  const tweetGenieUrl = resolveTweetGenieInternalBaseUrl();
   const internalApiKey = String(process.env.INTERNAL_API_KEY || '').trim();
 
   if (!tweetGenieUrl || !internalApiKey) {
@@ -162,11 +221,13 @@ async function crossPostScheduledToX({ userId, teamId = null, content, mediaDete
       internalApiKey,
       timeoutMs: X_CROSSPOST_TIMEOUT_MS,
       payload: {
-        postMode: 'single',
+        postMode,
         content,
+        threadParts: Array.isArray(threadParts) ? threadParts : [],
         mediaDetected: Boolean(mediaDetected),
         sourcePlatform: 'linkedin',
         media: Array.isArray(media) ? media : [],
+        ...(targetAccountId ? { targetAccountId: String(targetAccountId) } : {}),
       },
     });
 
@@ -176,6 +237,12 @@ async function crossPostScheduledToX({ userId, teamId = null, content, mediaDete
       }
       if (response.status === 401 && String(body?.code || '').toUpperCase().includes('TOKEN_EXPIRED')) {
         return { status: 'not_connected' };
+      }
+      if (
+        (response.status === 404 && String(body?.code || '').toUpperCase().includes('TARGET_ACCOUNT_NOT_FOUND')) ||
+        (response.status === 403 && String(body?.code || '').toUpperCase().includes('TARGET_ACCOUNT_FORBIDDEN'))
+      ) {
+        return { status: 'target_not_found' };
       }
       if (response.status === 400 && String(body?.code || '').toUpperCase() === 'X_POST_TOO_LONG') {
         return { status: 'failed_too_long' };
@@ -207,8 +274,18 @@ async function crossPostScheduledToX({ userId, teamId = null, content, mediaDete
   }
 }
 
-async function saveToTweetHistory({ userId, teamId = null, content, tweetId = null, mediaDetected = false }) {
-  const tweetGenieUrl = String(process.env.TWEET_GENIE_URL || '').trim();
+async function saveToTweetHistory({
+  userId,
+  teamId = null,
+  targetAccountId = null,
+  content,
+  tweetId = null,
+  mediaDetected = false,
+  media = [],
+  postMode = 'single',
+  threadParts = [],
+}) {
+  const tweetGenieUrl = resolveTweetGenieInternalBaseUrl();
   const internalApiKey = String(process.env.INTERNAL_API_KEY || '').trim();
 
   if (!tweetGenieUrl || !internalApiKey) {
@@ -228,6 +305,10 @@ async function saveToTweetHistory({ userId, teamId = null, content, tweetId = nu
         tweetId,
         sourcePlatform: 'linkedin_schedule',
         mediaDetected: Boolean(mediaDetected),
+        media: Array.isArray(media) ? media : [],
+        postMode,
+        threadParts: Array.isArray(threadParts) ? threadParts : [],
+        ...(targetAccountId ? { targetAccountId: String(targetAccountId) } : {}),
       },
     });
   } catch (error) {
@@ -238,7 +319,15 @@ async function saveToTweetHistory({ userId, teamId = null, content, tweetId = nu
   }
 }
 
-async function crossPostScheduledToThreads({ userId, content, mediaDetected = false, optimizeCrossPost = true, media = [] }) {
+async function crossPostScheduledToThreads({
+  userId,
+  teamId = null,
+  targetAccountId = null,
+  content,
+  mediaDetected = false,
+  optimizeCrossPost = true,
+  media = [],
+}) {
   const socialGenieUrl = String(process.env.SOCIAL_GENIE_URL || '').trim();
   const internalApiKey = String(process.env.INTERNAL_API_KEY || '').trim();
 
@@ -253,6 +342,7 @@ async function crossPostScheduledToThreads({ userId, content, mediaDetected = fa
     const { response, body } = await postInternalJson({
       endpoint,
       userId,
+      teamId,
       internalApiKey,
       timeoutMs: THREADS_CROSSPOST_TIMEOUT_MS,
       payload: {
@@ -262,7 +352,8 @@ async function crossPostScheduledToThreads({ userId, content, mediaDetected = fa
         sourcePlatform: 'linkedin_schedule',
         optimizeCrossPost: optimizeCrossPost !== false,
         mediaDetected: Boolean(mediaDetected),
-        mediaUrls: Array.isArray(media) ? media : [], // ← NEW: pass as mediaUrls
+        mediaUrls: Array.isArray(media) ? media : [],
+        ...(targetAccountId ? { targetAccountId: String(targetAccountId) } : {}),
       },
     });
 
@@ -418,6 +509,32 @@ async function claimDueScheduledPosts(limit) {
 
 async function resolvePublishingContext(post) {
   if (post.company_id) {
+    const { rows: socialTeamRows } = await pool.query(
+      `SELECT id, team_id, account_id, metadata, access_token, token_expires_at
+       FROM social_connected_accounts
+       WHERE platform = 'linkedin'
+         AND team_id IS NOT NULL
+         AND is_active = true
+         AND (
+           team_id::text = $1
+           OR id::text = $1
+           OR COALESCE(metadata->>'legacy_team_account_id', '') = $1
+           OR COALESCE(metadata->>'legacy_row_id', '') = $1
+         )
+       ORDER BY updated_at DESC NULLS LAST, id DESC
+       LIMIT 1`,
+      [String(post.company_id)]
+    );
+
+    const socialTeamLinkedinUserId = resolveSocialLinkedinUserId(socialTeamRows[0] || {});
+    if (socialTeamRows[0]?.access_token && socialTeamLinkedinUserId) {
+      return {
+        accessToken: socialTeamRows[0].access_token,
+        authorUrn: `urn:li:person:${socialTeamLinkedinUserId}`,
+        linkedinUserId: socialTeamLinkedinUserId
+      };
+    }
+
     const { rows: teamRows } = await pool.query(
       `SELECT id, team_id, access_token, linkedin_user_id
        FROM linkedin_team_accounts
@@ -435,6 +552,27 @@ async function resolvePublishingContext(post) {
         linkedinUserId: teamRows[0].linkedin_user_id
       };
     }
+  }
+
+  const { rows: socialPersonalRows } = await pool.query(
+    `SELECT access_token, account_id, metadata
+     FROM social_connected_accounts
+     WHERE user_id::text = $1::text
+       AND team_id IS NULL
+       AND platform = 'linkedin'
+       AND is_active = true
+     ORDER BY updated_at DESC NULLS LAST, id DESC
+     LIMIT 1`,
+    [post.user_id]
+  );
+
+  const socialPersonalLinkedinUserId = resolveSocialLinkedinUserId(socialPersonalRows[0] || {});
+  if (socialPersonalRows[0]?.access_token && socialPersonalLinkedinUserId) {
+    return {
+      accessToken: socialPersonalRows[0].access_token,
+      authorUrn: `urn:li:person:${socialPersonalLinkedinUserId}`,
+      linkedinUserId: socialPersonalLinkedinUserId
+    };
   }
 
   const { rows: personalRows } = await pool.query(
@@ -678,6 +816,24 @@ async function processScheduledPost(post) {
     const crossPostMedia = normalizeCrossPostMedia(crossPostMeta.media);
     const xEnabled = Boolean(targets.x || targets.twitter);
     const threadsEnabled = Boolean(targets.threads);
+    const routing =
+      crossPostMeta.routing && typeof crossPostMeta.routing === 'object'
+        ? crossPostMeta.routing
+        : {};
+    const xTargetAccountId =
+      routing?.x?.targetAccountId !== undefined && routing?.x?.targetAccountId !== null
+        ? String(routing.x.targetAccountId).trim() || null
+        : null;
+    const threadsTargetAccountId =
+      routing?.threads?.targetAccountId !== undefined && routing?.threads?.targetAccountId !== null
+        ? String(routing.threads.targetAccountId).trim() || null
+        : null;
+    const resolvedTeamId =
+      post.company_id !== undefined && post.company_id !== null && String(post.company_id).trim()
+        ? String(post.company_id).trim()
+        : (post.team_id !== undefined && post.team_id !== null && String(post.team_id).trim()
+            ? String(post.team_id).trim()
+            : null);
     const mediaDetected = detectCrossPostMedia({ mediaUrls });
     const crossPostResult = {
       x: {
@@ -695,89 +851,88 @@ async function processScheduledPost(post) {
     };
 
     if (xEnabled || threadsEnabled) {
-      if (post.company_id) {
-        if (xEnabled) crossPostResult.x.status = 'skipped_individual_only';
-        if (threadsEnabled) crossPostResult.threads.status = 'skipped_individual_only';
-      } else {
-        const payloads = buildCrossPostPayloads({
-          postContent: post.post_content,
-          optimizeCrossPost: crossPostMeta.optimizeCrossPost !== false,
-        });
+      const payloads = buildCrossPostPayloads({
+        postContent: post.post_content,
+        optimizeCrossPost: crossPostMeta.optimizeCrossPost !== false,
+      });
 
-        // Build task list — only enabled targets
-        const crossPostTasks = [];
+      const crossPostTasks = [];
 
-        if (xEnabled) {
-          crossPostTasks.push(
-            crossPostScheduledToX({
-              userId: post.user_id,
-              teamId: post.team_id || null,
-              content: payloads.x.content,
-              threadParts: payloads.x.threadParts || [],
-              postMode: payloads.x.postMode || 'single',
-              mediaDetected,
-            })
-              .then((result) => {
-                // saveToTweetHistory is non-blocking — fire and forget
-                // it must NOT delay Threads from starting
-                if (result?.status === 'posted') {
-                  saveToTweetHistory({
+      if (xEnabled) {
+        crossPostTasks.push(
+          crossPostScheduledToX({
+            userId: post.user_id,
+            teamId: resolvedTeamId,
+            targetAccountId: xTargetAccountId,
+            content: payloads.x.content,
+            threadParts: payloads.x.threadParts || [],
+            postMode: payloads.x.postMode || 'single',
+            media: crossPostMedia,
+            mediaDetected,
+          })
+            .then((result) => {
+              if (result?.status === 'posted') {
+                saveToTweetHistory({
+                  userId: post.user_id,
+                  teamId: resolvedTeamId,
+                  targetAccountId: xTargetAccountId,
+                  content: payloads.x.content,
+                  tweetId: result.tweetId || null,
+                  mediaDetected,
+                  media: crossPostMedia,
+                  postMode: payloads.x.postMode || 'single',
+                  threadParts: payloads.x.threadParts || [],
+                }).catch((err) => {
+                  logger.warn('[LinkedIn Scheduler] Failed to save X history (non-blocking)', {
                     userId: post.user_id,
-                    teamId: post.team_id || null,
-                    content: payloads.x.content,
-                    tweetId: result.tweetId || null,
-                    mediaDetected,
-                  }).catch((err) => {
-                    logger.warn('[LinkedIn Scheduler] Failed to save X history (non-blocking)', {
-                      userId: post.user_id,
-                      error: err?.message || String(err),
-                    });
+                    error: err?.message || String(err),
                   });
-                }
-                return { platform: 'x', result };
-              })
-              .catch((err) => {
-                logger.error('[LinkedIn Scheduler] X cross-post error', {
-                  userId: post.user_id,
-                  error: err?.message || String(err),
                 });
-                return { platform: 'x', result: { status: 'failed' } };
-              })
-          );
-        }
-
-        if (threadsEnabled) {
-          crossPostTasks.push(
-            crossPostScheduledToThreads({
-              userId: post.user_id,
-              content: payloads.threads.content,
-              mediaUrls: crossPostMedia,
-              mediaDetected,
-              optimizeCrossPost: crossPostMeta.optimizeCrossPost !== false,
+              }
+              return { platform: 'x', result };
             })
-              .then((result) => ({ platform: 'threads', result }))
-              .catch((err) => {
-                logger.error('[LinkedIn Scheduler] Threads cross-post error', {
-                  userId: post.user_id,
-                  error: err?.message || String(err),
-                });
-                return { platform: 'threads', result: { status: 'failed' } };
-              })
-          );
-        }
+            .catch((err) => {
+              logger.error('[LinkedIn Scheduler] X cross-post error', {
+                userId: post.user_id,
+                error: err?.message || String(err),
+              });
+              return { platform: 'x', result: { status: 'failed' } };
+            })
+        );
+      }
 
-        // Fire all cross-posts simultaneously
-        const settlements = await Promise.allSettled(crossPostTasks);
+      if (threadsEnabled) {
+        crossPostTasks.push(
+          crossPostScheduledToThreads({
+            userId: post.user_id,
+            teamId: resolvedTeamId,
+            targetAccountId: threadsTargetAccountId,
+            content: payloads.threads.content,
+            media: crossPostMedia,
+            mediaDetected,
+            optimizeCrossPost: crossPostMeta.optimizeCrossPost !== false,
+          })
+            .then((result) => ({ platform: 'threads', result }))
+            .catch((err) => {
+              logger.error('[LinkedIn Scheduler] Threads cross-post error', {
+                userId: post.user_id,
+                error: err?.message || String(err),
+              });
+              return { platform: 'threads', result: { status: 'failed' } };
+            })
+        );
+      }
 
-        for (const settlement of settlements) {
-          if (settlement.status === 'fulfilled') {
-            const { platform, result } = settlement.value;
-            crossPostResult[platform] = {
-              ...crossPostResult[platform],
-              ...result,
-              status: result?.status || 'failed',
-            };
-          }
+      const settlements = await Promise.allSettled(crossPostTasks);
+
+      for (const settlement of settlements) {
+        if (settlement.status === 'fulfilled') {
+          const { platform, result } = settlement.value;
+          crossPostResult[platform] = {
+            ...crossPostResult[platform],
+            ...result,
+            status: result?.status || 'failed',
+          };
         }
       }
     }
@@ -797,6 +952,9 @@ async function processScheduledPost(post) {
 
 async function schedulerTick() {
   if (tickInProgress) return;
+  if (nextAllowedTickAt && Date.now() < nextAllowedTickAt) {
+    return;
+  }
 
   tickInProgress = true;
   const tickId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -814,6 +972,8 @@ async function schedulerTick() {
   try {
     const duePosts = await claimDueScheduledPosts(BATCH_SIZE);
     if (!duePosts.length) {
+      transientFailureBackoffMs = 0;
+      nextAllowedTickAt = 0;
       schedulerStats.noopTicks += 1;
       lastTickSummary.status = 'noop';
       // Only log noop ticks when explicitly enabled to avoid noisy logs in development
@@ -823,6 +983,8 @@ async function schedulerTick() {
       return;
     }
 
+    transientFailureBackoffMs = 0;
+    nextAllowedTickAt = 0;
     lastTickSummary.processed = duePosts.length;
     schedulerStats.processedPosts += duePosts.length;
 
@@ -856,10 +1018,21 @@ async function schedulerTick() {
   } catch (error) {
     lastTickSummary.status = 'error';
     lastTickSummary.error = safeErrorMessage(error);
-    logger.error('[LinkedIn Scheduler] Tick failed', {
-      tickId,
-      error: safeErrorMessage(error)
-    });
+    if (isTransientConnectionError(error)) {
+      transientFailureBackoffMs = computeTransientBackoffMs();
+      nextAllowedTickAt = Date.now() + transientFailureBackoffMs;
+      logger.warn('[LinkedIn Scheduler] Tick failed with transient DB/network error; backing off', {
+        tickId,
+        error: safeErrorMessage(error),
+        backoffMs: transientFailureBackoffMs,
+        nextRetryAt: new Date(nextAllowedTickAt).toISOString(),
+      });
+    } else {
+      logger.error('[LinkedIn Scheduler] Tick failed', {
+        tickId,
+        error: safeErrorMessage(error)
+      });
+    }
   } finally {
     tickInProgress = false;
     lastTickFinishedAt = Date.now();

@@ -9,8 +9,69 @@ const PRO_TOP_POSTS_LIMIT = 20;
 
 // Helper: Get LinkedIn access token for user
 async function getLinkedInAuthForUser(userId) {
+  const { rows: socialRows } = await pool.query(
+    `SELECT access_token,
+            COALESCE(
+              NULLIF(metadata->>'linkedin_user_id', ''),
+              CASE
+                WHEN account_id LIKE 'org:%' THEN NULL
+                ELSE account_id
+              END
+            ) AS linkedin_user_id
+     FROM social_connected_accounts
+     WHERE user_id::text = $1::text
+       AND team_id IS NULL
+       AND platform = 'linkedin'
+       AND is_active = true
+     ORDER BY updated_at DESC NULLS LAST, id DESC
+     LIMIT 1`,
+    [userId]
+  );
+  if (socialRows[0]) {
+    return socialRows[0];
+  }
+
   const { rows } = await pool.query('SELECT * FROM linkedin_auth WHERE user_id = $1', [userId]);
   return rows[0];
+}
+
+async function resolveAnalyticsScope({ userId, accountId = null, accountType = null }) {
+  if (accountType === 'team' && accountId) {
+    const teamAccount = await resolveTeamAccountForUser(userId, accountId);
+    if (!teamAccount) {
+      return {
+        error: { status: 403, message: 'Selected LinkedIn team account not found or access denied' },
+      };
+    }
+
+    const scopeAccountId = teamAccount?.id ? String(teamAccount.id) : String(accountId);
+    const scopeParams = [scopeAccountId];
+    let scopeClause = 'account_id::text = $1';
+
+    if (teamAccount?.team_id) {
+      scopeParams.push(String(teamAccount.team_id));
+      scopeClause = `(account_id::text = $1 OR (account_id IS NULL AND company_id::text = $2))`;
+    }
+
+    return {
+      auth: {
+        access_token: teamAccount.access_token,
+        linkedin_user_id: teamAccount.linkedin_user_id,
+      },
+      scopeClause,
+      scopeParams,
+      scopeAccountId,
+      teamAccount,
+    };
+  }
+
+  return {
+    auth: await getLinkedInAuthForUser(userId),
+    scopeClause: `user_id = $1 AND (company_id IS NULL OR company_id::text = '')`,
+    scopeParams: [userId],
+    scopeAccountId: null,
+    teamAccount: null,
+  };
 }
 
 // Helper: Update a post's analytics in DB
@@ -139,23 +200,35 @@ async function fetchLinkedInPostAnalytics(accessToken, postId, linkedinUserId) {
 export async function syncAnalytics(req, res) {
   try {
     const userId = req.user.id;
+    const accountId =
+      req.body?.account_id !== undefined && req.body?.account_id !== null
+        ? String(req.body.account_id)
+        : (req.query?.account_id ? String(req.query.account_id) : null);
+    const accountType =
+      req.body?.account_type !== undefined && req.body?.account_type !== null
+        ? String(req.body.account_type)
+        : (req.query?.account_type ? String(req.query.account_type) : null);
     console.log('[Analytics Sync] Starting sync for user', userId);
 
-    // Get LinkedIn auth
-    const auth = await getLinkedInAuthForUser(userId);
+    const scope = await resolveAnalyticsScope({ userId, accountId, accountType });
+    if (scope?.error) {
+      return res.status(scope.error.status).json({ error: scope.error.message });
+    }
+
+    const auth = scope.auth;
     if (!auth || !auth.access_token || !auth.linkedin_user_id) {
       return res.status(400).json({ error: 'No LinkedIn account connected' });
     }
     const accessToken = auth.access_token;
     const linkedinUserId = auth.linkedin_user_id;
 
-    // Get all posted LinkedIn posts for this user
+    // Get all posted LinkedIn posts for the requested scope
     const { rows: posts } = await pool.query(
       `SELECT id, linkedin_post_id, post_content, views, likes, comments, shares, created_at
        FROM linkedin_posts 
-       WHERE user_id = $1 AND status = 'posted'
+       WHERE ${scope.scopeClause} AND status = 'posted'
        ORDER BY created_at DESC`,
-      [userId]
+      scope.scopeParams
     );
 
     console.log(`[Analytics Sync] Found ${posts.length} posts to sync`);
@@ -227,23 +300,12 @@ export async function getAnalytics(req, res) {
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - effectiveDays);
 
-    let scopeClause = 'user_id = $1';
-    let scopeParams = [userId];
-    if (account_type === 'team' && account_id) {
-      const teamAccount = await resolveTeamAccountForUser(userId, account_id);
-      if (!teamAccount) {
-        return res.status(403).json({ error: 'Selected LinkedIn team account not found or access denied' });
-      }
-
-      scopeParams = [String(account_id)];
-      if (teamAccount?.team_id) {
-        scopeParams.push(String(teamAccount.team_id));
-        // Fallback keeps older rows visible where account_id was not persisted but company_id was set.
-        scopeClause = `(account_id::text = $1 OR (account_id IS NULL AND company_id::text = $2))`;
-      } else {
-        scopeClause = `account_id::text = $1`;
-      }
+    const scope = await resolveAnalyticsScope({ userId, accountId: account_id, accountType: account_type });
+    if (scope?.error) {
+      return res.status(scope.error.status).json({ error: scope.error.message });
     }
+    const scopeClause = scope.scopeClause;
+    const scopeParams = scope.scopeParams;
 
     const { rows: overview } = await pool.query(
       `SELECT

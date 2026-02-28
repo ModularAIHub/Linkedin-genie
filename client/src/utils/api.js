@@ -146,7 +146,7 @@ export const scheduling = {
 export const analytics = {
   getOverview: (params) => api.get('/api/analytics/overview', { params }),
   getDetailed: (data) => api.post('/api/analytics/detailed', data),
-  sync: () => api.post('/api/analytics/sync'),
+  sync: (data = {}) => api.post('/api/analytics/sync', data),
   getHashtags: (params) => api.get('/api/analytics/hashtags', { params }),
   getEngagement: (params) => api.get('/api/analytics/engagement', { params }),
   getAudience: (params) => api.get('/api/analytics/audience', { params }),

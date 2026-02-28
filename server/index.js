@@ -18,6 +18,7 @@ import { requirePlatformLogin } from './middleware/requirePlatformLogin.js';
 import errorHandler from './middleware/errorHandler.js';
 import { logger } from './utils/logger.js';
 import internalAuth from './middleware/internalAuth.js';
+import pool from './config/database.js';
 
 dotenv.config({ quiet: true });
 
@@ -32,6 +33,89 @@ const app = express();
 // Honeybadger request handler (must be first middleware)
 app.use(Honeybadger.requestHandler);
 const PORT = process.env.PORT || 3004;
+const READINESS_CHECK_INTERVAL_MS = Number.parseInt(process.env.READINESS_CHECK_INTERVAL_MS || '30000', 10);
+const runSchedulerInApi = process.env.LINKEDIN_RUN_SCHEDULER_IN_API !== 'false';
+const linkedinRuntimeState = {
+  database: {
+    ok: false,
+    lastCheckedAt: null,
+    error: 'Database readiness not checked yet',
+  },
+  schedulerStarted: false,
+};
+
+const setLinkedInDatabaseReady = () => {
+  linkedinRuntimeState.database.ok = true;
+  linkedinRuntimeState.database.lastCheckedAt = new Date().toISOString();
+  linkedinRuntimeState.database.error = null;
+};
+
+const setLinkedInDatabaseNotReady = (error) => {
+  linkedinRuntimeState.database.ok = false;
+  linkedinRuntimeState.database.lastCheckedAt = new Date().toISOString();
+  linkedinRuntimeState.database.error = error?.message || String(error || 'Unknown database error');
+};
+
+const refreshLinkedInDatabaseReadiness = async () => {
+  try {
+    await pool.query('SELECT 1');
+    setLinkedInDatabaseReady();
+    return true;
+  } catch (error) {
+    setLinkedInDatabaseNotReady(error);
+    return false;
+  }
+};
+
+const getLinkedInHealthPayload = () => ({
+  status: linkedinRuntimeState.database.ok ? 'OK' : 'DEGRADED',
+  live: true,
+  ready: linkedinRuntimeState.database.ok,
+  service: 'LinkedIn Genie',
+  timestamp: new Date().toISOString(),
+  checks: {
+    database: { ...linkedinRuntimeState.database },
+    scheduler: {
+      enabled: !process.env.VERCEL && runSchedulerInApi,
+      started: linkedinRuntimeState.schedulerStarted,
+    },
+  },
+});
+
+const maybeStartEmbeddedScheduler = async () => {
+  if (process.env.VERCEL || !runSchedulerInApi || linkedinRuntimeState.schedulerStarted) {
+    return;
+  }
+
+  if (!linkedinRuntimeState.database.ok) {
+    logger.warn('[LinkedIn Scheduler] Embedded scheduler startup skipped because database is not ready', {
+      database: linkedinRuntimeState.database,
+    });
+    return;
+  }
+
+  const { startLinkedinScheduler } = await import('./workers/linkedinScheduler.js');
+  await startLinkedinScheduler({ enabled: true });
+  linkedinRuntimeState.schedulerStarted = true;
+};
+
+const startLinkedInReadinessLoop = () => {
+  const intervalMs =
+    Number.isFinite(READINESS_CHECK_INTERVAL_MS) && READINESS_CHECK_INTERVAL_MS > 0
+      ? READINESS_CHECK_INTERVAL_MS
+      : 30000;
+
+  const timer = setInterval(async () => {
+    await refreshLinkedInDatabaseReadiness();
+    try {
+      await maybeStartEmbeddedScheduler();
+    } catch (error) {
+      logger.error('[LinkedIn Scheduler] Failed to start embedded scheduler in API process', error);
+    }
+  }, intervalMs);
+
+  timer.unref?.();
+};
 
 // Basic middleware
 app.use(helmet());
@@ -94,7 +178,17 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'X-CSRF-Token', 'x-csrf-token', 'X-Selected-Account-Id'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'Cookie',
+    'X-CSRF-Token',
+    'x-csrf-token',
+    'X-Selected-Account-Id',
+    'x-selected-account-id',
+    'X-Team-Id',
+    'x-team-id'
+  ],
   exposedHeaders: ['Set-Cookie']
 }));
 
@@ -103,9 +197,31 @@ app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+// Handle malformed JSON payloads early (before Honeybadger error middleware)
+app.use((err, req, res, next) => {
+  if (err?.type === 'entity.parse.failed') {
+    logger.warn('[request] Invalid JSON payload', {
+      path: req.originalUrl,
+      method: req.method,
+      message: err?.message || 'Malformed JSON body',
+    });
+    return res.status(400).json({
+      error: 'Invalid JSON payload',
+      code: 'INVALID_JSON_PAYLOAD',
+    });
+  }
+  return next(err);
+});
+
 // Health check
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'OK', service: 'LinkedIn Genie' });
+  const payload = getLinkedInHealthPayload();
+  res.status(200).json(payload);
+});
+
+app.get('/ready', (req, res) => {
+  const payload = getLinkedInHealthPayload();
+  res.status(payload.ready ? 200 : 503).json(payload);
 });
 
 // CSRF token endpoint
@@ -150,6 +266,10 @@ app.use(Honeybadger.errorHandler);
 
 // Error handling with CORS headers
 app.use((err, req, res, next) => {
+  if (res.headersSent) {
+    return next(err);
+  }
+
   const origin = req.headers.origin;
   if (origin && isAllowedCorsOrigin(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
@@ -166,17 +286,16 @@ if (!process.env.VERCEL) {
   app.listen(PORT, () => {
     logger.info('LinkedIn Genie backend listening', { port: PORT });
   });
-}
 
-const runSchedulerInApi = process.env.LINKEDIN_RUN_SCHEDULER_IN_API !== 'false';
+  await refreshLinkedInDatabaseReadiness();
+  try {
+    await maybeStartEmbeddedScheduler();
+  } catch (error) {
+    logger.error('[LinkedIn Scheduler] Failed to start embedded scheduler in API process', error);
+  }
+  startLinkedInReadinessLoop();
 
-if (!process.env.VERCEL) {
-  if (runSchedulerInApi) {
-    const { startLinkedinScheduler } = await import('./workers/linkedinScheduler.js');
-    startLinkedinScheduler({ enabled: true }).catch((error) => {
-      logger.error('[LinkedIn Scheduler] Failed to start embedded scheduler in API process', error);
-    });
-  } else {
+  if (!runSchedulerInApi) {
     logger.info('[LinkedIn Scheduler] Embedded scheduler disabled in API process', {
       hint: 'Run `npm run start:scheduler` in Linkedin-genie/server'
     });

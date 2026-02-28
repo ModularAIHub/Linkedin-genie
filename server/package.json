@@ -12,7 +12,9 @@
     "dev": "nodemon index.js",
     "dev:api": "nodemon index.js",
     "dev:scheduler": "nodemon scheduler.js",
-    "clean:logs": "node ./scripts/clean-logs.js"
+    "clean:logs": "node ./scripts/clean-logs.js",
+    "backfill:linkedin-social": "node ./scripts/backfill-linkedin-social-accounts.mjs",
+    "backfill:linkedin-social:apply": "node ./scripts/backfill-linkedin-social-accounts.mjs --apply"
   },
   "dependencies": {
     "@honeybadger-io/js": "^6.12.3",

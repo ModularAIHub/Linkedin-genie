@@ -28,6 +28,21 @@ const setCacheValue = (cache, key, value) => {
   });
 };
 
+const shouldAttachLinkedinAuth = (req) => {
+  const path = String(req?.originalUrl || req?.path || '').split('?')[0];
+  return /^\/api\/(posts|schedule|linkedin)(?:\/|$)/.test(path);
+};
+
+const resolveSocialLinkedinUserId = (row = {}) => {
+  const metadata = row?.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+  const fromMetadata = String(metadata?.linkedin_user_id || '').trim();
+  if (fromMetadata) return fromMetadata;
+
+  const accountId = String(row?.account_id || '').trim();
+  if (!accountId || accountId.startsWith('org:')) return null;
+  return accountId;
+};
+
 const extractCookieValue = (setCookieHeader, cookieName) => {
   if (!Array.isArray(setCookieHeader)) return null;
 
@@ -244,11 +259,33 @@ export async function requirePlatformLogin(req, res, next) {
     }
 
     // Attach LinkedIn access token and URN if user is authenticated
-    if (req.user && req.user.id) {
+    if (req.user && req.user.id && shouldAttachLinkedinAuth(req)) {
       try {
         const linkedinCacheKey = req.user.id;
         const cachedLinkedinAuth = getCacheValue(linkedinAuthCache, linkedinCacheKey);
         let linkedinAuth = cachedLinkedinAuth;
+
+        if (!linkedinAuth) {
+          const { rows: socialRows } = await pool.query(
+            `SELECT access_token, account_id, metadata
+             FROM social_connected_accounts
+             WHERE user_id::text = $1::text
+               AND team_id IS NULL
+               AND platform = 'linkedin'
+               AND is_active = true
+             ORDER BY updated_at DESC NULLS LAST, id DESC
+             LIMIT 1`,
+            [req.user.id]
+          );
+
+          if (socialRows[0]) {
+            linkedinAuth = {
+              access_token: socialRows[0].access_token,
+              linkedin_user_id: resolveSocialLinkedinUserId(socialRows[0]),
+            };
+            setCacheValue(linkedinAuthCache, linkedinCacheKey, linkedinAuth);
+          }
+        }
 
         if (!linkedinAuth) {
           const { rows } = await pool.query(

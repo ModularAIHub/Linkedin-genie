@@ -1,6 +1,17 @@
 
 // Error handler middleware for LinkedIn Genie
 const errorHandler = (err, req, res, next) => {
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  if (err?.type === 'entity.parse.failed') {
+    return res.status(400).json({
+      error: 'Invalid JSON payload',
+      code: 'INVALID_JSON_PAYLOAD',
+    });
+  }
+
   console.error('Error:', err);
   if (err.code === 'LINKEDIN_API_ERROR') {
     return res.status(400).json({ error: 'LinkedIn API error', message: err.message, details: err.details });

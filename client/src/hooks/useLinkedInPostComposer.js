@@ -83,6 +83,65 @@ const useLinkedInPostComposer = () => {
     return payload;
   };
 
+  const normalizeTargetAccountId = (value) => {
+    if (value === undefined || value === null) return null;
+    const trimmed = String(value).trim();
+    return trimmed || null;
+  };
+
+  const normalizeCrossPostInput = (crossPostInput = false) => {
+    const raw =
+      crossPostInput && typeof crossPostInput === 'object' && !Array.isArray(crossPostInput)
+        ? crossPostInput
+        : {};
+
+    const rawTargetIds =
+      raw.crossPostTargetAccountIds &&
+      typeof raw.crossPostTargetAccountIds === 'object' &&
+      !Array.isArray(raw.crossPostTargetAccountIds)
+        ? raw.crossPostTargetAccountIds
+        : {};
+    const rawTargetLabels =
+      raw.crossPostTargetAccountLabels &&
+      typeof raw.crossPostTargetAccountLabels === 'object' &&
+      !Array.isArray(raw.crossPostTargetAccountLabels)
+        ? raw.crossPostTargetAccountLabels
+        : {};
+
+    return {
+      x: Boolean(raw.x),
+      threads: Boolean(raw.threads),
+      optimizeCrossPost: raw.optimizeCrossPost !== false,
+      targetAccountIds: {
+        x: normalizeTargetAccountId(rawTargetIds.x ?? rawTargetIds.twitter),
+        threads: normalizeTargetAccountId(rawTargetIds.threads),
+      },
+      targetAccountLabels: {
+        x: normalizeTargetAccountId(rawTargetLabels.x ?? rawTargetLabels.twitter),
+        threads: normalizeTargetAccountId(rawTargetLabels.threads),
+      },
+    };
+  };
+
+  const getCrossPostMediaNotice = (platformLabel, result = {}) => {
+    const mediaStatus = String(result?.mediaStatus || '').trim();
+    const mediaDetected = Boolean(result?.mediaDetected);
+
+    if (!mediaDetected || !mediaStatus || mediaStatus === 'posted' || mediaStatus === 'none') {
+      return null;
+    }
+
+    const messages = {
+      posted_partial: `${platformLabel} attached only some images. Check the target post for partial media upload.`,
+      text_only_requires_oauth1: `${platformLabel} posted without images because the selected X account is missing Tweet Genie media permissions (OAuth1).`,
+      text_only_upload_failed: `${platformLabel} posted without images because media upload to the target platform failed.`,
+      text_only_unsupported: `${platformLabel} posted without images because the selected media could not be reused for that platform.`,
+      text_only_phase1: `${platformLabel} posted without images.`,
+    };
+
+    return messages[mediaStatus] || `${platformLabel} posted without all images (${mediaStatus}).`;
+  };
+
   // Image/PDF upload for single post (uploads as base64 to backend, stores LinkedIn URL)
   const handleImageUpload = async (event) => {
     const files = Array.from(event.target.files);
@@ -223,18 +282,7 @@ const useLinkedInPostComposer = () => {
 
   // Post handler (single post only)
   const handlePost = async (crossPostInput = false) => {
-    const normalizedCrossPost =
-      crossPostInput && typeof crossPostInput === 'object' && !Array.isArray(crossPostInput)
-        ? {
-            x: Boolean(crossPostInput.x),
-            threads: Boolean(crossPostInput.threads),
-            optimizeCrossPost: crossPostInput.optimizeCrossPost !== false,
-          }
-        : {
-            x: false,
-            threads: false,
-            optimizeCrossPost: true,
-          };
+    const normalizedCrossPost = normalizeCrossPostInput(crossPostInput);
     const hasAnyCrossPostTarget = normalizedCrossPost.x || normalizedCrossPost.threads;
 
     if (!content.trim() && selectedImages.length === 0) {
@@ -248,6 +296,22 @@ const useLinkedInPostComposer = () => {
       // Prepare media as array of URLs or base64 (assume .url exists, fallback to file name)
       const media_urls = selectedImages.map(img => img.url || img.file?.name || '');
       const crossPostMedia = hasAnyCrossPostTarget ? await buildCrossPostMediaPayload() : [];
+      const crossPostTargetAccountIds = {
+        ...(normalizedCrossPost.x && normalizedCrossPost.targetAccountIds.x
+          ? { x: normalizedCrossPost.targetAccountIds.x }
+          : {}),
+        ...(normalizedCrossPost.threads && normalizedCrossPost.targetAccountIds.threads
+          ? { threads: normalizedCrossPost.targetAccountIds.threads }
+          : {}),
+      };
+      const crossPostTargetAccountLabels = {
+        ...(normalizedCrossPost.x && normalizedCrossPost.targetAccountLabels.x
+          ? { x: normalizedCrossPost.targetAccountLabels.x }
+          : {}),
+        ...(normalizedCrossPost.threads && normalizedCrossPost.targetAccountLabels.threads
+          ? { threads: normalizedCrossPost.targetAccountLabels.threads }
+          : {}),
+      };
       
       // Use account-aware API to post with selected account
       const response = await postForCurrentAccount('/api/posts', {
@@ -259,6 +323,12 @@ const useLinkedInPostComposer = () => {
             x: normalizedCrossPost.x,
             threads: normalizedCrossPost.threads,
           },
+          ...(Object.keys(crossPostTargetAccountIds).length > 0
+            ? { crossPostTargetAccountIds }
+            : {}),
+          ...(Object.keys(crossPostTargetAccountLabels).length > 0
+            ? { crossPostTargetAccountLabels }
+            : {}),
           optimizeCrossPost: normalizedCrossPost.optimizeCrossPost,
           ...(crossPostMedia.length > 0 ? { crossPostMedia } : {}),
         }),
@@ -279,26 +349,27 @@ const useLinkedInPostComposer = () => {
 
         const successful = [];
         const issues = [];
-        let mediaFallbackShown = false;
+        const mediaNotices = [];
 
         for (const platform of selectedPlatforms) {
           const status = String(platform?.result?.status || '').trim();
           if (status === 'posted') {
             successful.push(platform.label);
-            if (platform?.result?.mediaDetected && platform?.result?.mediaStatus === 'text_only_phase1') {
-              mediaFallbackShown = true;
-            }
+            const mediaNotice = getCrossPostMediaNotice(platform.label, platform?.result);
+            if (mediaNotice) mediaNotices.push(mediaNotice);
             continue;
           }
 
           const statusMessages = {
-            not_connected: `${platform.label} not connected — original post succeeded.`,
-            timeout: `${platform.label} cross-post timed out — original post succeeded.`,
+            not_connected: `${platform.label} not connected - original post succeeded.`,
+            target_not_found: `${platform.label} target account was unavailable or no longer accessible - original post succeeded.`,
+            timeout: `${platform.label} cross-post timed out - original post succeeded.`,
             skipped_individual_only: `${platform.label} cross-post is available only for personal LinkedIn accounts right now.`,
             skipped_not_configured: `${platform.label} cross-post is not configured yet.`,
             skipped: `${platform.label} cross-post was skipped.`,
+            missing_target_route: `${platform.label} cross-post target was not selected - original post succeeded.`,
             failed_too_long: `${platform.label} cross-post failed because the LinkedIn post is too long for X.`,
-            failed: `${platform.label} cross-post failed — original post succeeded.`,
+            failed: `${platform.label} cross-post failed - original post succeeded.`,
             disabled: null,
             '': null,
           };
@@ -313,9 +384,7 @@ const useLinkedInPostComposer = () => {
           issues.forEach((message) => toast(message, { icon: '⚠️' }));
         }
 
-        if (mediaFallbackShown) {
-          toast('Images were posted to LinkedIn only. Cross-posts used text-only content (Phase 1).', { icon: 'ℹ️' });
-        }
+        mediaNotices.forEach((message) => toast(message, { icon: 'ℹ️' }));
       } else {
         toast.success(`Posted to ${accountInfo}!`);
       }
@@ -331,18 +400,7 @@ const useLinkedInPostComposer = () => {
 
   // Schedule post handler
   const handleSchedule = async (scheduleDate, userTimezone, crossPostInput = false) => {
-    const normalizedCrossPost =
-      crossPostInput && typeof crossPostInput === 'object' && !Array.isArray(crossPostInput)
-        ? {
-            x: Boolean(crossPostInput.x),
-            threads: Boolean(crossPostInput.threads),
-            optimizeCrossPost: crossPostInput.optimizeCrossPost !== false,
-          }
-        : {
-            x: false,
-            threads: false,
-            optimizeCrossPost: true,
-          };
+    const normalizedCrossPost = normalizeCrossPostInput(crossPostInput);
     const hasAnyCrossPostTarget = normalizedCrossPost.x || normalizedCrossPost.threads;
 
     if (!content.trim() && selectedImages.length === 0) {
@@ -356,6 +414,22 @@ const useLinkedInPostComposer = () => {
       // Prepare media as array of URLs
       const media_urls = selectedImages.map(img => img.url || img.file?.name || '');
       const crossPostMedia = hasAnyCrossPostTarget ? await buildCrossPostMediaPayload() : [];
+      const crossPostTargetAccountIds = {
+        ...(normalizedCrossPost.x && normalizedCrossPost.targetAccountIds.x
+          ? { x: normalizedCrossPost.targetAccountIds.x }
+          : {}),
+        ...(normalizedCrossPost.threads && normalizedCrossPost.targetAccountIds.threads
+          ? { threads: normalizedCrossPost.targetAccountIds.threads }
+          : {}),
+      };
+      const crossPostTargetAccountLabels = {
+        ...(normalizedCrossPost.x && normalizedCrossPost.targetAccountLabels.x
+          ? { x: normalizedCrossPost.targetAccountLabels.x }
+          : {}),
+        ...(normalizedCrossPost.threads && normalizedCrossPost.targetAccountLabels.threads
+          ? { threads: normalizedCrossPost.targetAccountLabels.threads }
+          : {}),
+      };
       
       // Use account-aware API to schedule with selected account
       await postForCurrentAccount('/api/schedule', {
@@ -370,6 +444,12 @@ const useLinkedInPostComposer = () => {
             x: normalizedCrossPost.x,
             threads: normalizedCrossPost.threads,
           },
+          ...(Object.keys(crossPostTargetAccountIds).length > 0
+            ? { crossPostTargetAccountIds }
+            : {}),
+          ...(Object.keys(crossPostTargetAccountLabels).length > 0
+            ? { crossPostTargetAccountLabels }
+            : {}),
           optimizeCrossPost: normalizedCrossPost.optimizeCrossPost,
           ...(crossPostMedia.length > 0 ? { crossPostMedia } : {}),
         }),

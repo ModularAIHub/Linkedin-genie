@@ -15,6 +15,12 @@ const parsePositiveInt = (value) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
+const parseNonEmptyString = (value, maxLength = 255) => {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) return null;
+  return normalized.slice(0, maxLength);
+};
+
 const normalizeOptionalString = (value, maxLength = 255) => {
   if (value === null || value === undefined) return null;
   const normalized = String(value).trim();
@@ -188,17 +194,91 @@ const uploadCrossPostMediaAssets = async ({ accessToken, authorUrn, mediaInputs 
 };
 
 const buildTeamLinkedInLabel = (row = {}) => {
-  const accountType = String(row?.account_type || 'personal').toLowerCase();
+  const metadata = row?.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+  const accountType = String(
+    row?.account_type ||
+    metadata?.account_type ||
+    (String(row?.account_id || '').startsWith('org:') ? 'organization' : 'personal')
+  ).toLowerCase();
   const baseName =
+    normalizeOptionalString(row?.account_display_name) ||
+    normalizeOptionalString(metadata?.organization_name) ||
     normalizeOptionalString(row?.organization_name) ||
     normalizeOptionalString(row?.linkedin_display_name) ||
     normalizeOptionalString(row?.organization_vanity_name) ||
+    normalizeOptionalString(row?.account_username) ||
     normalizeOptionalString(row?.linkedin_username) ||
+    normalizeOptionalString(metadata?.linkedin_user_id) ||
+    (!String(row?.account_id || '').startsWith('org:') ? normalizeOptionalString(row?.account_id) : null) ||
     normalizeOptionalString(row?.linkedin_user_id) ||
     `LinkedIn account #${row?.id ?? 'unknown'}`;
 
   return `${baseName} (${accountType === 'organization' ? 'LinkedIn organization' : 'LinkedIn personal'})`;
 };
+
+const getSocialLinkedInMetadata = (row = {}) => {
+  return row?.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+};
+
+const getSocialAccountType = (row = {}) => {
+  const metadata = getSocialLinkedInMetadata(row);
+  const fromMetadata = normalizeOptionalString(metadata?.account_type, 40);
+  if (fromMetadata) return fromMetadata.toLowerCase();
+  return String(row?.account_id || '').startsWith('org:') ? 'organization' : 'personal';
+};
+
+const getSocialLinkedInUserId = (row = {}) => {
+  const metadata = getSocialLinkedInMetadata(row);
+  const fromMetadata = normalizeOptionalString(metadata?.linkedin_user_id, 255);
+  if (fromMetadata) return fromMetadata;
+  const accountId = normalizeOptionalString(row?.account_id, 255);
+  if (!accountId || accountId.startsWith('org:')) return null;
+  return accountId;
+};
+
+const getSocialLegacyTeamAccountId = (row = {}) => {
+  const metadata = getSocialLinkedInMetadata(row);
+  return (
+    parsePositiveInt(metadata?.legacy_team_account_id) ||
+    parsePositiveInt(metadata?.legacy_row_id) ||
+    null
+  );
+};
+
+const toPostingAccountFromSocialRow = (row = {}) => ({
+  source: 'social',
+  id: String(row.id),
+  social_id: String(row.id),
+  user_id: normalizeOptionalString(row.user_id, 128),
+  team_id: normalizeOptionalString(row.team_id, 128),
+  account_id: normalizeOptionalString(row.account_id, 255),
+  account_username: normalizeOptionalString(row.account_username, 255),
+  account_display_name: normalizeOptionalString(row.account_display_name, 255),
+  profile_image_url: normalizeOptionalString(row.profile_image_url, 1024),
+  access_token: normalizeOptionalString(row.access_token, 4096),
+  refresh_token: normalizeOptionalString(row.refresh_token, 4096),
+  token_expires_at: row.token_expires_at || null,
+  metadata: getSocialLinkedInMetadata(row),
+  account_type: getSocialAccountType(row),
+  linkedin_user_id: getSocialLinkedInUserId(row),
+  legacy_team_account_id: getSocialLegacyTeamAccountId(row),
+});
+
+const toPostingAccountFromLegacyTeamRow = (row = {}) => ({
+  ...row,
+  source: 'legacy_team',
+  id: String(row.id),
+  legacy_team_account_id: parsePositiveInt(row.id),
+  account_type: normalizeOptionalString(row.account_type, 40) || 'personal',
+});
+
+const toPostingAccountFromLegacyPersonalRow = (row = {}) => ({
+  ...row,
+  source: 'legacy_personal',
+  id: String(row.id),
+  account_type: 'personal',
+  legacy_team_account_id: null,
+});
 
 const isLinkedInUnauthorizedError = (error) => {
   const status = Number(error?.response?.status || error?.status || 0);
@@ -281,6 +361,83 @@ async function refreshLinkedInAuthForTeamAccount(teamAccountId, accountRow) {
   return rows[0] || { ...accountRow, access_token: accessToken, refresh_token: nextRefreshToken, token_expires_at: tokenExpiresAt };
 }
 
+async function refreshLinkedInAuthForSocialAccount(socialAccountId, accountRow) {
+  const refreshToken = String(accountRow?.refresh_token || '').trim();
+  if (!refreshToken) {
+    throw new Error('LinkedIn refresh token missing');
+  }
+
+  const refreshed = await refreshLinkedInAccessToken(refreshToken);
+  const accessToken = String(refreshed?.access_token || '').trim();
+  if (!accessToken) {
+    throw new Error('LinkedIn refresh did not return access token');
+  }
+
+  const nextRefreshToken = String(refreshed?.refresh_token || refreshToken).trim() || refreshToken;
+  const expiresIn = Number(refreshed?.expires_in || 0);
+  const tokenExpiresAt =
+    Number.isFinite(expiresIn) && expiresIn > 0
+      ? new Date(Date.now() + expiresIn * 1000)
+      : null;
+
+  const { rows } = await pool.query(
+    `UPDATE social_connected_accounts
+     SET access_token = $1,
+         refresh_token = $2,
+         token_expires_at = $3,
+         updated_at = NOW()
+     WHERE id::text = $4::text
+     RETURNING *`,
+    [accessToken, nextRefreshToken, tokenExpiresAt, String(socialAccountId)]
+  );
+
+  const refreshedRow = rows[0] ? toPostingAccountFromSocialRow(rows[0]) : {
+    ...accountRow,
+    access_token: accessToken,
+    refresh_token: nextRefreshToken,
+    token_expires_at: tokenExpiresAt,
+  };
+
+  const metadata = refreshedRow?.metadata && typeof refreshedRow.metadata === 'object' ? refreshedRow.metadata : {};
+  const sourceTable = normalizeOptionalString(metadata?.source_table, 80);
+  const legacyPersonalId =
+    normalizeOptionalString(metadata?.legacy_personal_row_id, 128) ||
+    normalizeOptionalString(metadata?.legacy_row_id, 128);
+  const legacyTeamId = parsePositiveInt(metadata?.legacy_team_account_id) || parsePositiveInt(metadata?.legacy_row_id);
+
+  try {
+    if (sourceTable === 'linkedin_auth' && legacyPersonalId) {
+      await pool.query(
+        `UPDATE linkedin_auth
+         SET access_token = $1,
+             refresh_token = $2,
+             token_expires_at = $3,
+             updated_at = NOW()
+         WHERE id::text = $4::text`,
+        [accessToken, nextRefreshToken, tokenExpiresAt, legacyPersonalId]
+      );
+    } else if (sourceTable === 'linkedin_team_accounts' && legacyTeamId) {
+      await pool.query(
+        `UPDATE linkedin_team_accounts
+         SET access_token = $1,
+             refresh_token = $2,
+             token_expires_at = $3,
+             updated_at = NOW()
+         WHERE id = $4`,
+        [accessToken, nextRefreshToken, tokenExpiresAt, legacyTeamId]
+      );
+    }
+  } catch (legacySyncError) {
+    logger.warn('[cross-post] Social token refresh succeeded but legacy sync failed', {
+      socialAccountId: String(socialAccountId),
+      sourceTable,
+      error: legacySyncError?.message || String(legacySyncError),
+    });
+  }
+
+  return refreshedRow;
+}
+
 async function getActiveTeamMembership(teamId, userId) {
   const { rows } = await pool.query(
     `SELECT team_id, user_id, role
@@ -305,26 +462,27 @@ async function listEligibleTeamLinkedInTargets({ teamId, platformUserId }) {
 
   const params = [teamId];
   let query = `
-    SELECT lta.*
-    FROM linkedin_team_accounts lta
-    WHERE lta.team_id = $1
-      AND lta.active = true
+    SELECT sca.*
+    FROM social_connected_accounts sca
+    WHERE sca.team_id::text = $1::text
+      AND sca.platform = 'linkedin'
+      AND sca.is_active = true
   `;
 
   if (!allowAllTeamAccounts) {
     params.push(platformUserId);
-    query += ' AND lta.user_id = $2';
+    query += ' AND sca.user_id::text = $2::text';
   }
 
-  query += ' ORDER BY lta.updated_at DESC NULLS LAST, lta.id DESC';
+  query += ' ORDER BY sca.updated_at DESC NULLS LAST, sca.id DESC';
 
   const { rows } = await pool.query(query, params);
   const targets = rows.map((row) => ({
     id: String(row.id),
     teamId: String(row.team_id),
     label: buildTeamLinkedInLabel(row),
-    accountType: normalizeOptionalString(row.account_type, 40) || 'personal',
-    linkedinUserId: normalizeOptionalString(row.linkedin_user_id),
+    accountType: getSocialAccountType(row),
+    linkedinUserId: getSocialLinkedInUserId(row),
     connectedByUserId: normalizeOptionalString(row.user_id),
   }));
 
@@ -333,9 +491,12 @@ async function listEligibleTeamLinkedInTargets({ teamId, platformUserId }) {
 
 async function listPersonalLinkedInTargets({ userId }) {
   const { rows } = await pool.query(
-    `SELECT id, linkedin_user_id, linkedin_username, linkedin_display_name, linkedin_profile_image_url
-     FROM linkedin_auth
+    `SELECT id, account_id, account_username, account_display_name, profile_image_url, metadata
+     FROM social_connected_accounts
      WHERE user_id = $1
+       AND team_id IS NULL
+       AND platform = 'linkedin'
+       AND is_active = true
      ORDER BY updated_at DESC NULLS LAST, id DESC`,
     [userId]
   );
@@ -343,12 +504,12 @@ async function listPersonalLinkedInTargets({ userId }) {
   return rows.map((row) => ({
     id: String(row.id),
     platform: 'linkedin',
-    username: normalizeOptionalString(row.linkedin_username, 255) || normalizeOptionalString(row.linkedin_user_id, 255),
+    username: normalizeOptionalString(row.account_username, 255) || getSocialLinkedInUserId(row),
     displayName:
-      normalizeOptionalString(row.linkedin_display_name, 255) ||
-      normalizeOptionalString(row.linkedin_username, 255) ||
+      normalizeOptionalString(row.account_display_name, 255) ||
+      normalizeOptionalString(row.account_username, 255) ||
       `LinkedIn account #${row.id}`,
-    avatar: normalizeOptionalString(row.linkedin_profile_image_url, 1024),
+    avatar: normalizeOptionalString(row.profile_image_url, 1024),
   }));
 }
 
@@ -358,22 +519,42 @@ async function resolveExplicitTeamLinkedInTarget({ teamId, platformUserId, targe
     return { error: { status: 403, code: 'CROSSPOST_TARGET_ACCOUNT_FORBIDDEN', message: 'Requester is not an active team member.' } };
   }
 
-  const parsedTargetId = parsePositiveInt(targetLinkedinTeamAccountId);
-  if (!parsedTargetId) {
+  const normalizedTargetId = parseNonEmptyString(targetLinkedinTeamAccountId, 128);
+  if (!normalizedTargetId) {
     return { error: { status: 400, code: 'CROSSPOST_TARGET_ACCOUNT_INVALID', message: 'Invalid target LinkedIn team account id.' } };
   }
 
   const { rows } = await pool.query(
-    `SELECT lta.*
-     FROM linkedin_team_accounts lta
-     WHERE lta.id = $1
-       AND lta.team_id = $2
-       AND lta.active = true
+    `SELECT sca.*
+     FROM social_connected_accounts sca
+     WHERE sca.id::text = $1::text
+       AND sca.team_id::text = $2::text
+       AND sca.platform = 'linkedin'
+       AND sca.is_active = true
      LIMIT 1`,
-    [parsedTargetId, teamId]
+    [normalizedTargetId, teamId]
   );
 
-  const targetRow = rows[0] || null;
+  let targetRow = rows[0] ? toPostingAccountFromSocialRow(rows[0]) : null;
+  if (!targetRow) {
+    // Compatibility path for older scheduled payloads using legacy integer team account ids.
+    const legacyTargetId = parsePositiveInt(normalizedTargetId);
+    if (legacyTargetId) {
+      const legacyResult = await pool.query(
+        `SELECT lta.*
+         FROM linkedin_team_accounts lta
+         WHERE lta.id = $1
+           AND lta.team_id::text = $2::text
+           AND lta.active = true
+         LIMIT 1`,
+        [legacyTargetId, teamId]
+      );
+      if (legacyResult.rows[0]) {
+        targetRow = toPostingAccountFromLegacyTeamRow(legacyResult.rows[0]);
+      }
+    }
+  }
+
   if (!targetRow) {
     return { error: { status: 404, code: 'CROSSPOST_TARGET_ACCOUNT_NOT_FOUND', message: 'Target LinkedIn team account not found.' } };
   }
@@ -384,6 +565,75 @@ async function resolveExplicitTeamLinkedInTarget({ teamId, platformUserId, targe
   }
 
   return { membership, targetRow };
+}
+
+async function resolveExplicitPersonalLinkedInTarget({ platformUserId, targetAccountId }) {
+  const normalizedTargetId = parseNonEmptyString(targetAccountId, 128);
+  if (!normalizedTargetId) {
+    return { error: { status: 400, code: 'CROSSPOST_TARGET_ACCOUNT_INVALID', message: 'Invalid target LinkedIn account id.' } };
+  }
+
+  const socialResult = await pool.query(
+    `SELECT sca.*
+     FROM social_connected_accounts sca
+     WHERE sca.id::text = $1::text
+       AND sca.user_id::text = $2::text
+       AND sca.team_id IS NULL
+       AND sca.platform = 'linkedin'
+       AND sca.is_active = true
+     LIMIT 1`,
+    [normalizedTargetId, platformUserId]
+  );
+
+  if (socialResult.rows[0]) {
+    return { account: toPostingAccountFromSocialRow(socialResult.rows[0]) };
+  }
+
+  const legacyResult = await pool.query(
+    `SELECT *
+     FROM linkedin_auth
+     WHERE id::text = $1::text
+       AND user_id::text = $2::text
+     LIMIT 1`,
+    [normalizedTargetId, platformUserId]
+  );
+
+  if (legacyResult.rows[0]) {
+    return { account: toPostingAccountFromLegacyPersonalRow(legacyResult.rows[0]) };
+  }
+
+  return { error: { status: 404, code: 'CROSSPOST_TARGET_ACCOUNT_NOT_FOUND', message: 'Target LinkedIn account not found.' } };
+}
+
+async function resolveDefaultPersonalLinkedInTarget({ platformUserId }) {
+  const socialResult = await pool.query(
+    `SELECT sca.*
+     FROM social_connected_accounts sca
+     WHERE sca.user_id::text = $1::text
+       AND sca.team_id IS NULL
+       AND sca.platform = 'linkedin'
+       AND sca.is_active = true
+     ORDER BY sca.updated_at DESC NULLS LAST, sca.id DESC
+     LIMIT 1`,
+    [platformUserId]
+  );
+  if (socialResult.rows[0]) {
+    return { account: toPostingAccountFromSocialRow(socialResult.rows[0]) };
+  }
+
+  const legacyResult = await pool.query(
+    `SELECT *
+     FROM linkedin_auth
+     WHERE user_id::text = $1::text
+     ORDER BY updated_at DESC NULLS LAST, id DESC
+     LIMIT 1`,
+    [platformUserId]
+  );
+  if (legacyResult.rows[0]) {
+    return { account: toPostingAccountFromLegacyPersonalRow(legacyResult.rows[0]) };
+  }
+
+  return { error: { status: 404, code: 'LINKEDIN_NOT_CONNECTED', message: 'LinkedIn account not connected.' } };
 }
 
 /**
@@ -557,42 +807,68 @@ router.post('/cross-post', async (req, res) => {
       authorUrn = `urn:li:person:${postingAccount.linkedin_user_id}`;
       isTeamTarget = true;
     } else {
-      let rows = [];
-      if (explicitPersonalTargetRequested) {
-        const personalTargetId = parsePositiveInt(targetAccountId);
-        if (!personalTargetId) {
-          return res.status(400).json({
-            error: 'Invalid target LinkedIn account id.',
-            code: 'CROSSPOST_TARGET_ACCOUNT_INVALID',
-          });
-        }
-        const result = await pool.query(
-          'SELECT * FROM linkedin_auth WHERE id = $1 AND user_id = $2 LIMIT 1',
-          [personalTargetId, platformUserId]
-        );
-        rows = result.rows;
-      } else {
-        const result = await pool.query(
-          'SELECT * FROM linkedin_auth WHERE user_id = $1 LIMIT 1',
-          [platformUserId]
-        );
-        rows = result.rows;
-      }
-
-      if (!rows.length) {
-        return res.status(404).json({
-          error: explicitPersonalTargetRequested
-            ? 'Target LinkedIn account not found.'
-            : 'LinkedIn account not connected.',
-          code: explicitPersonalTargetRequested
-            ? 'CROSSPOST_TARGET_ACCOUNT_NOT_FOUND'
-            : 'LINKEDIN_NOT_CONNECTED',
+      // Team mode fallback: if requester is in team context and no explicit target was sent,
+      // use the first eligible active LinkedIn team account.
+      if (platformTeamId && !explicitPersonalTargetRequested) {
+        const { membership, targets } = await listEligibleTeamLinkedInTargets({
+          teamId: platformTeamId,
+          platformUserId,
         });
+
+        if (membership && Array.isArray(targets) && targets.length > 0) {
+          const defaultTeamTargetId = targets[0]?.id;
+          const targetResolution = await resolveExplicitTeamLinkedInTarget({
+            teamId: platformTeamId,
+            platformUserId,
+            targetLinkedinTeamAccountId: defaultTeamTargetId,
+          });
+
+          if (!targetResolution.error) {
+            targetTeamAccount = targetResolution.targetRow;
+            postingAccount = targetTeamAccount;
+            authorUrn = `urn:li:person:${postingAccount.linkedin_user_id}`;
+            isTeamTarget = true;
+          }
+        }
       }
 
-      postingAccount = rows[0];
-      authorUrn = `urn:li:person:${postingAccount.linkedin_user_id}`;
+      if (!postingAccount) {
+        if (explicitPersonalTargetRequested) {
+          const targetResolution = await resolveExplicitPersonalLinkedInTarget({
+            platformUserId,
+            targetAccountId,
+          });
+
+          if (targetResolution.error) {
+            return res.status(targetResolution.error.status).json({
+              error: targetResolution.error.message,
+              code: targetResolution.error.code,
+            });
+          }
+
+          postingAccount = targetResolution.account;
+        } else {
+          const defaultResolution = await resolveDefaultPersonalLinkedInTarget({ platformUserId });
+          if (defaultResolution.error) {
+            return res.status(defaultResolution.error.status).json({
+              error: defaultResolution.error.message,
+              code: defaultResolution.error.code,
+            });
+          }
+          postingAccount = defaultResolution.account;
+        }
+      }
     }
+
+    const resolvedLinkedInUserId = normalizeOptionalString(postingAccount?.linkedin_user_id, 255);
+    if (!resolvedLinkedInUserId) {
+      return res.status(400).json({
+        error: 'LinkedIn account is missing a usable user identifier.',
+        code: 'LINKEDIN_ACCOUNT_INVALID',
+      });
+    }
+
+    authorUrn = `urn:li:person:${resolvedLinkedInUserId}`;
 
     let linkedinResult;
     let uploadedMediaAssets = [];
@@ -641,9 +917,14 @@ router.post('/cross-post', async (req, res) => {
       });
 
       try {
-        postingAccount = isTeamTarget
-          ? await refreshLinkedInAuthForTeamAccount(targetTeamAccount.id, postingAccount)
-          : await refreshLinkedInAuthForUser(platformUserId, postingAccount);
+        if (postingAccount?.source === 'social' && postingAccount?.social_id) {
+          postingAccount = await refreshLinkedInAuthForSocialAccount(postingAccount.social_id, postingAccount);
+        } else if (isTeamTarget) {
+          postingAccount = await refreshLinkedInAuthForTeamAccount(targetTeamAccount.id, postingAccount);
+        } else {
+          postingAccount = await refreshLinkedInAuthForUser(platformUserId, postingAccount);
+        }
+
         const publishResult = await publishToLinkedIn({
           currentAccount: postingAccount,
           currentAuthorUrn: authorUrn,
@@ -665,6 +946,9 @@ router.post('/cross-post', async (req, res) => {
 
     try {
       const linkedinPostId = linkedinResult?.id || linkedinResult?.urn || null;
+      const historyAccountId = isTeamTarget
+        ? (postingAccount?.legacy_team_account_id || parsePositiveInt(targetTeamAccount?.id))
+        : null;
       await pool.query(
         `INSERT INTO linkedin_posts (
           user_id,
@@ -688,12 +972,12 @@ router.post('/cross-post', async (req, res) => {
         )`,
         [
           platformUserId,
-          isTeamTarget ? targetTeamAccount?.id || null : null,
+          historyAccountId,
           linkedinPostId,
           linkedinContent,
           JSON.stringify(uploadedMediaAssets),
           isTeamTarget ? platformTeamId : null,
-          postingAccount.linkedin_user_id || targetTeamAccount?.linkedin_user_id || null,
+          resolvedLinkedInUserId,
         ]
       );
     } catch (dbErr) {

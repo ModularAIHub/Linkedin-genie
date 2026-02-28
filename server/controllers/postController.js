@@ -800,6 +800,64 @@ const isLinkedInUnauthorizedError = (error) => {
   );
 };
 
+const parsePositiveInt = (value) => {
+  const normalized = String(value ?? '').trim();
+  if (!/^\d+$/.test(normalized)) return null;
+  const parsed = Number.parseInt(normalized, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+const normalizeOptionalString = (value, maxLength = 255) => {
+  if (value === null || value === undefined) return null;
+  const normalized = String(value).trim();
+  if (!normalized) return null;
+  return normalized.slice(0, maxLength);
+};
+
+const getSocialLinkedInMetadata = (row = {}) =>
+  row?.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+
+const getSocialLinkedInUserId = (row = {}) => {
+  const metadata = getSocialLinkedInMetadata(row);
+  const fromMetadata = normalizeOptionalString(metadata?.linkedin_user_id, 255);
+  if (fromMetadata) return fromMetadata;
+  const accountId = normalizeOptionalString(row?.account_id, 255);
+  if (!accountId || accountId.startsWith('org:')) return null;
+  return accountId;
+};
+
+const getSocialLegacyTeamAccountId = (row = {}) => {
+  const metadata = getSocialLinkedInMetadata(row);
+  return (
+    parsePositiveInt(metadata?.legacy_team_account_id) ||
+    parsePositiveInt(metadata?.legacy_row_id) ||
+    null
+  );
+};
+
+const buildSocialTokenSourceFromRow = (row = {}) => {
+  const metadata = getSocialLinkedInMetadata(row);
+  const teamId = normalizeOptionalString(row.team_id, 128);
+  const sourceTable = normalizeOptionalString(metadata?.source_table, 80);
+  const legacyPersonalRowId =
+    normalizeOptionalString(metadata?.legacy_personal_row_id, 128) ||
+    normalizeOptionalString(metadata?.legacy_row_id, 128);
+
+  return {
+    kind: teamId ? 'team_social' : 'personal_social',
+    socialId: String(row.id),
+    teamId,
+    userId: normalizeOptionalString(row.user_id, 128),
+    accessToken: row?.access_token || null,
+    refreshToken: row?.refresh_token || null,
+    tokenExpiresAt: row?.token_expires_at || null,
+    linkedinUserId: getSocialLinkedInUserId(row),
+    sourceTable,
+    legacyTeamAccountId: getSocialLegacyTeamAccountId(row),
+    legacyPersonalRowId,
+  };
+};
+
 async function refreshLinkedInTokenForSource(tokenSource, userId) {
   if (!tokenSource?.refreshToken) {
     throw new Error('No refresh token available for LinkedIn account');
@@ -817,7 +875,49 @@ async function refreshLinkedInTokenForSource(tokenSource, userId) {
     ? new Date(Date.now() + expiresIn * 1000)
     : null;
 
-  if (tokenSource.kind === 'team' && tokenSource.id) {
+  if ((tokenSource.kind === 'team_social' || tokenSource.kind === 'personal_social') && tokenSource.socialId) {
+    await pool.query(
+      `UPDATE social_connected_accounts
+       SET access_token = $1,
+           refresh_token = $2,
+           token_expires_at = $3,
+           updated_at = NOW()
+       WHERE id::text = $4::text`,
+      [newAccessToken, newRefreshToken, newExpiry, String(tokenSource.socialId)]
+    );
+
+    if (tokenSource.sourceTable === 'linkedin_team_accounts' && tokenSource.legacyTeamAccountId) {
+      await pool.query(
+        `UPDATE linkedin_team_accounts
+         SET access_token = $1,
+             refresh_token = $2,
+             token_expires_at = $3,
+             updated_at = NOW()
+         WHERE id = $4`,
+        [newAccessToken, newRefreshToken, newExpiry, tokenSource.legacyTeamAccountId]
+      );
+    } else if (tokenSource.sourceTable === 'linkedin_auth' && tokenSource.legacyPersonalRowId) {
+      await pool.query(
+        `UPDATE linkedin_auth
+         SET access_token = $1,
+             refresh_token = $2,
+             token_expires_at = $3,
+             updated_at = NOW()
+         WHERE id::text = $4::text`,
+        [newAccessToken, newRefreshToken, newExpiry, tokenSource.legacyPersonalRowId]
+      );
+    } else if (tokenSource.kind === 'personal_social' && userId) {
+      await pool.query(
+        `UPDATE linkedin_auth
+         SET access_token = $1,
+             refresh_token = $2,
+             token_expires_at = $3,
+             updated_at = NOW()
+         WHERE user_id = $4`,
+        [newAccessToken, newRefreshToken, newExpiry, userId]
+      );
+    }
+  } else if (tokenSource.kind === 'team' && tokenSource.id) {
     await pool.query(
       `UPDATE linkedin_team_accounts
        SET access_token = $1,
@@ -862,6 +962,24 @@ const normalizeCrossPostTargets = ({ crossPostTargets = null, postToTwitter = fa
   };
 };
 
+const normalizeCrossPostTargetAccountIds = ({ crossPostTargetAccountIds = null } = {}) => {
+  const raw =
+    crossPostTargetAccountIds && typeof crossPostTargetAccountIds === 'object' && !Array.isArray(crossPostTargetAccountIds)
+      ? crossPostTargetAccountIds
+      : {};
+
+  const normalize = (value) => {
+    if (value === undefined || value === null) return null;
+    const trimmed = String(value).trim();
+    return trimmed || null;
+  };
+
+  return {
+    x: normalize(raw.x ?? raw.twitter),
+    threads: normalize(raw.threads),
+  };
+};
+
 const normalizeCrossPostMedia = (value) => {
   if (!Array.isArray(value)) return [];
   return value
@@ -885,17 +1003,18 @@ const buildCrossPostResultShape = ({ xEnabled = false, threadsEnabled = false, m
   },
 });
 
-const buildInternalServiceHeaders = ({ userId, internalApiKey }) => ({
+const buildInternalServiceHeaders = ({ userId, internalApiKey, teamId = null }) => ({
   'Content-Type': 'application/json',
   'x-internal-api-key': internalApiKey,
   'x-internal-caller': INTERNAL_CALLER,
   'x-platform-user-id': String(userId),
+  ...(teamId ? { 'x-platform-team-id': String(teamId) } : {}),
 });
 
 const buildInternalServiceEndpoint = (baseUrl, path) =>
   `${String(baseUrl || '').trim().replace(/\/$/, '')}${path}`;
 
-async function postInternalJson({ endpoint, userId, internalApiKey, payload, timeoutMs = 0 }) {
+async function postInternalJson({ endpoint, userId, teamId = null, internalApiKey, payload, timeoutMs = 0 }) {
   const controller = Number.isFinite(timeoutMs) && timeoutMs > 0 ? new AbortController() : null;
   let timeoutId = null;
 
@@ -906,7 +1025,7 @@ async function postInternalJson({ endpoint, userId, internalApiKey, payload, tim
 
     const response = await fetch(endpoint, {
       method: 'POST',
-      headers: buildInternalServiceHeaders({ userId, internalApiKey }),
+      headers: buildInternalServiceHeaders({ userId, internalApiKey, teamId }),
       body: JSON.stringify(payload),
       signal: controller?.signal,
     });
@@ -935,6 +1054,22 @@ const buildTeamTokenSourceFromRow = (row) => ({
 });
 
 async function resolvePersonalLinkedInTokenSource(userId, user) {
+  const socialTokenResult = await pool.query(
+    `SELECT id, user_id, team_id, account_id, metadata, access_token, refresh_token, token_expires_at
+     FROM social_connected_accounts
+     WHERE user_id::text = $1::text
+       AND team_id IS NULL
+       AND platform = 'linkedin'
+       AND is_active = true
+     ORDER BY updated_at DESC NULLS LAST, id DESC
+     LIMIT 1`,
+    [userId]
+  );
+
+  if (socialTokenResult.rows.length > 0) {
+    return buildSocialTokenSourceFromRow(socialTokenResult.rows[0]);
+  }
+
   const personalTokenResult = await pool.query(
     `SELECT access_token, refresh_token, token_expires_at
      FROM linkedin_auth
@@ -958,6 +1093,29 @@ async function resolvePersonalLinkedInTokenSource(userId, user) {
 
 async function resolveDeleteLinkedInTokenSource({ post, userId, user }) {
   if (post?.linkedin_user_id) {
+    const socialTeamTokenResult = await pool.query(
+      `SELECT id, user_id, team_id, account_id, metadata, access_token, refresh_token, token_expires_at
+       FROM social_connected_accounts
+       WHERE platform = 'linkedin'
+         AND team_id IS NOT NULL
+         AND is_active = true
+         AND COALESCE(
+               NULLIF(metadata->>'linkedin_user_id', ''),
+               CASE
+                 WHEN account_id LIKE 'org:%' THEN NULL
+                 ELSE account_id
+               END
+             ) = $1
+       ORDER BY updated_at DESC NULLS LAST, id DESC
+       LIMIT 1`,
+      [post.linkedin_user_id]
+    );
+
+    if (socialTeamTokenResult.rows.length > 0) {
+      console.log('[DELETE POST] Using team social account token for linkedin_user_id:', post.linkedin_user_id);
+      return buildSocialTokenSourceFromRow(socialTeamTokenResult.rows[0]);
+    }
+
     const teamTokenResult = await pool.query(
       `SELECT id, access_token, refresh_token, token_expires_at
        FROM linkedin_team_accounts
@@ -980,9 +1138,109 @@ async function resolveDeleteLinkedInTokenSource({ post, userId, user }) {
   return resolvePersonalLinkedInTokenSource(userId, user);
 }
 
+async function markLinkedInTokenSourceDisconnected(tokenSource) {
+  if (!tokenSource) return;
+
+  if ((tokenSource.kind === 'team_social' || tokenSource.kind === 'personal_social') && tokenSource.socialId) {
+    await pool.query(
+      `UPDATE social_connected_accounts
+       SET is_active = false,
+           access_token = NULL,
+           refresh_token = NULL,
+           token_expires_at = NULL,
+           updated_at = NOW()
+       WHERE id::text = $1::text`,
+      [String(tokenSource.socialId)]
+    );
+
+    if (tokenSource.sourceTable === 'linkedin_team_accounts' && tokenSource.legacyTeamAccountId) {
+      await pool.query(
+        `UPDATE linkedin_team_accounts
+         SET active = false,
+             access_token = NULL,
+             refresh_token = NULL,
+             token_expires_at = NULL,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [tokenSource.legacyTeamAccountId]
+      );
+    } else if (tokenSource.sourceTable === 'linkedin_auth' && tokenSource.legacyPersonalRowId) {
+      await pool.query(
+        `UPDATE linkedin_auth
+         SET access_token = NULL,
+             refresh_token = NULL,
+             token_expires_at = NULL,
+             updated_at = NOW()
+         WHERE id::text = $1::text`,
+        [tokenSource.legacyPersonalRowId]
+      );
+    } else if (tokenSource.userId) {
+      await pool.query(
+        `UPDATE linkedin_auth
+         SET access_token = NULL,
+             refresh_token = NULL,
+             token_expires_at = NULL,
+             updated_at = NOW()
+         WHERE user_id = $1`,
+        [tokenSource.userId]
+      );
+    }
+
+    return;
+  }
+
+  if (tokenSource.kind === 'team' && tokenSource.id) {
+    await pool.query(
+      `UPDATE linkedin_team_accounts
+       SET active = false,
+           access_token = NULL,
+           refresh_token = NULL,
+           token_expires_at = NULL,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [tokenSource.id]
+    );
+    return;
+  }
+
+  if (tokenSource.kind === 'personal' && tokenSource.userId) {
+    await pool.query(
+      `UPDATE linkedin_auth
+       SET access_token = NULL,
+           refresh_token = NULL,
+           token_expires_at = NULL,
+           updated_at = NOW()
+       WHERE user_id = $1`,
+      [tokenSource.userId]
+    );
+  }
+}
+
 // CHANGE 1: Added postMode and threadParts parameters for X thread support
-async function crossPostToX({ userId, content, postMode = 'single', threadParts = [], mediaDetected = false, media = [] }) {
-  const tweetGenieUrl = String(process.env.TWEET_GENIE_URL || '').trim();
+function resolveTweetGenieInternalBaseUrl() {
+  const configuredUrl = String(process.env.TWEET_GENIE_URL || '').trim();
+  if (configuredUrl) {
+    return configuredUrl;
+  }
+
+  if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+    return 'http://localhost:3002';
+  }
+
+  return '';
+}
+
+async function crossPostToX({
+  userId,
+  teamId = null,
+  targetAccountId = null,
+  content,
+  postMode = 'single',
+  threadParts = [],
+  mediaDetected = false,
+  media = [],
+}) {
+  const tweetGenieUrl = resolveTweetGenieInternalBaseUrl();
   const internalApiKey = String(process.env.INTERNAL_API_KEY || '').trim();
 
   if (!tweetGenieUrl || !internalApiKey) {
@@ -996,6 +1254,7 @@ async function crossPostToX({ userId, content, postMode = 'single', threadParts 
     const { response, body } = await postInternalJson({
       endpoint,
       userId,
+      teamId,
       internalApiKey,
       timeoutMs: X_CROSSPOST_TIMEOUT_MS,
       // CHANGE 2: Pass postMode and threadParts through to Tweet Genie
@@ -1006,6 +1265,7 @@ async function crossPostToX({ userId, content, postMode = 'single', threadParts 
         mediaDetected: Boolean(mediaDetected),
         sourcePlatform: 'linkedin',
         media: Array.isArray(media) ? media : [],
+        ...(targetAccountId ? { targetAccountId: String(targetAccountId) } : {}),
       },
     });
 
@@ -1016,6 +1276,12 @@ async function crossPostToX({ userId, content, postMode = 'single', threadParts 
       }
       if (response.status === 401 && String(body?.code || '').toUpperCase().includes('TOKEN_EXPIRED')) {
         return { status: 'not_connected' };
+      }
+      if (
+        (response.status === 404 && String(body?.code || '').toUpperCase().includes('TARGET_ACCOUNT_NOT_FOUND')) ||
+        (response.status === 403 && String(body?.code || '').toUpperCase().includes('TARGET_ACCOUNT_FORBIDDEN'))
+      ) {
+        return { status: 'target_not_found' };
       }
       if (response.status === 400 && String(body?.code || '').toUpperCase() === 'X_POST_TOO_LONG') {
         return { status: 'failed_too_long' };
@@ -1044,8 +1310,19 @@ async function crossPostToX({ userId, content, postMode = 'single', threadParts 
   }
 }
 
-async function saveToTweetHistory({ userId, content, tweetId = null, sourcePlatform = 'platform', mediaDetected = false }) {
-  const tweetGenieUrl = String(process.env.TWEET_GENIE_URL || '').trim();
+async function saveToTweetHistory({
+  userId,
+  teamId = null,
+  targetAccountId = null,
+  content,
+  tweetId = null,
+  sourcePlatform = 'platform',
+  mediaDetected = false,
+  media = [],
+  postMode = 'single',
+  threadParts = [],
+}) {
+  const tweetGenieUrl = resolveTweetGenieInternalBaseUrl();
   const internalApiKey = String(process.env.INTERNAL_API_KEY || '').trim();
 
   if (!tweetGenieUrl || !internalApiKey) {
@@ -1058,12 +1335,17 @@ async function saveToTweetHistory({ userId, content, tweetId = null, sourcePlatf
     await postInternalJson({
       endpoint,
       userId,
+      teamId,
       internalApiKey,
       payload: {
         content,
         tweetId,
         mediaDetected: Boolean(mediaDetected),
         sourcePlatform,
+        media: Array.isArray(media) ? media : [],
+        postMode,
+        threadParts: Array.isArray(threadParts) ? threadParts : [],
+        ...(targetAccountId ? { targetAccountId: String(targetAccountId) } : {}),
       },
     });
   } catch (error) {
@@ -1074,7 +1356,15 @@ async function saveToTweetHistory({ userId, content, tweetId = null, sourcePlatf
   }
 }
 
-async function crossPostToThreads({ userId, content, mediaDetected = false, optimizeCrossPost = true, media = [] }) {
+async function crossPostToThreads({
+  userId,
+  teamId = null,
+  targetAccountId = null,
+  content,
+  mediaDetected = false,
+  optimizeCrossPost = true,
+  media = [],
+}) {
   const socialGenieUrl = String(process.env.SOCIAL_GENIE_URL || '').trim();
   const internalApiKey = String(process.env.INTERNAL_API_KEY || '').trim();
 
@@ -1089,6 +1379,7 @@ async function crossPostToThreads({ userId, content, mediaDetected = false, opti
     const { response, body } = await postInternalJson({
       endpoint,
       userId,
+      teamId,
       internalApiKey,
       timeoutMs: THREADS_CROSSPOST_TIMEOUT_MS,
       payload: {
@@ -1099,6 +1390,7 @@ async function crossPostToThreads({ userId, content, mediaDetected = false, opti
         optimizeCrossPost: optimizeCrossPost !== false,
         mediaDetected: Boolean(mediaDetected),
         media: Array.isArray(media) ? media : [],
+        ...(targetAccountId ? { targetAccountId: String(targetAccountId) } : {}),
       },
     });
 
@@ -1190,10 +1482,13 @@ export async function createPost(req, res) {
       optimizeCrossPost = true,
       postToTwitter = false,
       postToX = false,
+      crossPostTargetAccountIds = null,
       crossPostMedia = [],
     } = req.body;
     const normalizedCrossPostTargets = normalizeCrossPostTargets({ crossPostTargets, postToTwitter, postToX });
+    const normalizedCrossPostTargetAccountIds = normalizeCrossPostTargetAccountIds({ crossPostTargetAccountIds });
     const normalizedCrossPostMedia = normalizeCrossPostMedia(crossPostMedia);
+    const crossPostTeamId = selectedTeamAccount?.team_id ? String(selectedTeamAccount.team_id) : null;
     // If posting to a team account, set company_id to selectedAccountId
     if (selectedTeamAccount) {
       company_id = selectedTeamAccount.team_id;
@@ -1250,65 +1545,69 @@ export async function createPost(req, res) {
     });
 
     if (normalizedCrossPostTargets.x || normalizedCrossPostTargets.threads) {
-      if (selectedTeamAccount) {
-        if (normalizedCrossPostTargets.x) crossPostResult.x.status = 'skipped_individual_only';
-        if (normalizedCrossPostTargets.threads) crossPostResult.threads.status = 'skipped_individual_only';
-      } else {
-        const formattedCrossPost = buildCrossPostPayloads({
-          content: post_content,
-          optimizeCrossPost,
-        });
+      const formattedCrossPost = buildCrossPostPayloads({
+        content: post_content,
+        optimizeCrossPost,
+      });
 
-        if (normalizedCrossPostTargets.x) {
-          try {
-            // CHANGE 3: Pass postMode and threadParts from optimizer output
-            const xCrossPost = await crossPostToX({
+      if (normalizedCrossPostTargets.x) {
+        try {
+          // CHANGE 3: Pass postMode and threadParts from optimizer output
+          const xCrossPost = await crossPostToX({
+            userId: req.user.id,
+            teamId: crossPostTeamId,
+            targetAccountId: normalizedCrossPostTargetAccountIds.x,
+            content: formattedCrossPost.x.content,
+            postMode: formattedCrossPost.x.postMode,
+            threadParts: formattedCrossPost.x.threadParts || [],
+            mediaDetected,
+            media: normalizedCrossPostMedia,
+          });
+          crossPostResult.x = {
+            ...crossPostResult.x,
+            ...xCrossPost,
+            status: xCrossPost?.status || 'failed',
+          };
+
+          if (crossPostResult.x.status === 'posted') {
+            await saveToTweetHistory({
               userId: req.user.id,
+              teamId: crossPostTeamId,
+              targetAccountId: normalizedCrossPostTargetAccountIds.x,
               content: formattedCrossPost.x.content,
+              tweetId: xCrossPost?.tweetId || null,
+              sourcePlatform: 'linkedin',
+              mediaDetected,
+              media: normalizedCrossPostMedia,
               postMode: formattedCrossPost.x.postMode,
               threadParts: formattedCrossPost.x.threadParts || [],
-              mediaDetected,
-              media: normalizedCrossPostMedia,
             });
-            crossPostResult.x = {
-              ...crossPostResult.x,
-              ...xCrossPost,
-              status: xCrossPost?.status || 'failed',
-            };
-
-            if (crossPostResult.x.status === 'posted') {
-              await saveToTweetHistory({
-                userId: req.user.id,
-                content: formattedCrossPost.x.content,
-                tweetId: xCrossPost?.tweetId || null,
-                sourcePlatform: 'platform',
-                mediaDetected,
-              });
-            }
-          } catch (crossErr) {
-            logger.error('[CREATE POST] X cross-post error', { userId: req.user.id, error: crossErr?.message || String(crossErr) });
-            crossPostResult.x.status = 'failed';
           }
+        } catch (crossErr) {
+          logger.error('[CREATE POST] X cross-post error', { userId: req.user.id, error: crossErr?.message || String(crossErr) });
+          crossPostResult.x.status = 'failed';
         }
+      }
 
-        if (normalizedCrossPostTargets.threads) {
-          try {
-            const threadsCrossPost = await crossPostToThreads({
-              userId: req.user.id,
-              content: formattedCrossPost.threads.content,
-              mediaDetected,
-              optimizeCrossPost,
-              media: normalizedCrossPostMedia,
-            });
-            crossPostResult.threads = {
-              ...crossPostResult.threads,
-              ...threadsCrossPost,
-              status: threadsCrossPost?.status || 'failed',
-            };
-          } catch (crossErr) {
-            logger.error('[CREATE POST] Threads cross-post error', { userId: req.user.id, error: crossErr?.message || String(crossErr) });
-            crossPostResult.threads.status = 'failed';
-          }
+      if (normalizedCrossPostTargets.threads) {
+        try {
+          const threadsCrossPost = await crossPostToThreads({
+            userId: req.user.id,
+            teamId: crossPostTeamId,
+            targetAccountId: normalizedCrossPostTargetAccountIds.threads,
+            content: formattedCrossPost.threads.content,
+            mediaDetected,
+            optimizeCrossPost,
+            media: normalizedCrossPostMedia,
+          });
+          crossPostResult.threads = {
+            ...crossPostResult.threads,
+            ...threadsCrossPost,
+            status: threadsCrossPost?.status || 'failed',
+          };
+        } catch (crossErr) {
+          logger.error('[CREATE POST] Threads cross-post error', { userId: req.user.id, error: crossErr?.message || String(crossErr) });
+          crossPostResult.threads.status = 'failed';
         }
       }
     }
@@ -1346,8 +1645,8 @@ export async function getPosts(req, res) {
       whereClause = 'WHERE company_id::text = ANY($1::text[])';
       params = [[String(selectedTeamAccount.team_id), String(selectedTeamAccount.id)]];
     } else {
-      // Personal fallback: always show user's posts (prevents stale browser headers from hiding data).
-      whereClause = 'WHERE user_id = $1';
+      // Personal fallback: only show personal-scope posts.
+      whereClause = `WHERE user_id = $1 AND (company_id IS NULL OR company_id::text = '')`;
       params = [req.user.id];
     }
     if (status && status !== 'all') {
@@ -1488,30 +1787,7 @@ export async function deletePost(req, res) {
           if (reconnectRequired) {
             // Mark the linked account as disconnected in DB to avoid future retries
             try {
-              if (tokenSource?.kind === 'team' && tokenSource?.id) {
-                console.warn('[DELETE POST] Marking team LinkedIn account inactive due to revoked token', { teamAccountId: tokenSource.id });
-                await pool.query(
-                  `UPDATE linkedin_team_accounts
-                   SET active = false,
-                       access_token = NULL,
-                       refresh_token = NULL,
-                       token_expires_at = NULL,
-                       updated_at = NOW()
-                   WHERE id = $1`,
-                  [tokenSource.id]
-                );
-              } else if (tokenSource?.kind === 'personal' && tokenSource?.userId) {
-                console.warn('[DELETE POST] Clearing personal LinkedIn tokens due to revoked token', { userId: tokenSource.userId });
-                await pool.query(
-                  `UPDATE linkedin_auth
-                   SET access_token = NULL,
-                       refresh_token = NULL,
-                       token_expires_at = NULL,
-                       updated_at = NOW()
-                   WHERE user_id = $1`,
-                  [tokenSource.userId]
-                );
-              }
+              await markLinkedInTokenSourceDisconnected(tokenSource);
             } catch (dbErr) {
               console.error('[DELETE POST] Failed to mark LinkedIn account disconnected in DB', { error: dbErr?.message || String(dbErr) });
             }
@@ -1551,30 +1827,7 @@ export async function deletePost(req, res) {
       if (isLinkedInUnauthorizedError(apiError)) {
         // Attempt to mark the linked account disconnected in DB to avoid further failed calls
         try {
-          if (tokenSource?.kind === 'team' && tokenSource?.id) {
-            console.warn('[DELETE POST] Marking team LinkedIn account inactive due to unauthorized API error', { teamAccountId: tokenSource.id });
-            await pool.query(
-              `UPDATE linkedin_team_accounts
-               SET active = false,
-                   access_token = NULL,
-                   refresh_token = NULL,
-                   token_expires_at = NULL,
-                   updated_at = NOW()
-               WHERE id = $1`,
-              [tokenSource.id]
-            );
-          } else if (tokenSource?.kind === 'personal' && tokenSource?.userId) {
-            console.warn('[DELETE POST] Clearing personal LinkedIn tokens due to unauthorized API error', { userId: tokenSource.userId });
-            await pool.query(
-              `UPDATE linkedin_auth
-               SET access_token = NULL,
-                   refresh_token = NULL,
-                   token_expires_at = NULL,
-                   updated_at = NOW()
-               WHERE user_id = $1`,
-              [tokenSource.userId]
-            );
-          }
+          await markLinkedInTokenSourceDisconnected(tokenSource);
         } catch (dbErr) {
           console.error('[DELETE POST] Failed to mark LinkedIn account disconnected in DB', { error: dbErr?.message || String(dbErr) });
         }

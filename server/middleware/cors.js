@@ -17,7 +17,15 @@ const allowedOrigins = [
 const corsOptions = {
   origin: allowedOrigins,
   credentials: true,
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Selected-Account-Id'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-CSRF-Token',
+    'X-Selected-Account-Id',
+    'x-selected-account-id',
+    'X-Team-Id',
+    'x-team-id'
+  ],
   exposedHeaders: ['Set-Cookie'],
 };
 

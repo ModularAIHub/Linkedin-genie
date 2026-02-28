@@ -32,6 +32,24 @@ function normalizeScheduledCrossPostTargets({ crossPostTargets = null, postToTwi
   };
 }
 
+function normalizeScheduledCrossPostTargetAccountIds({ crossPostTargetAccountIds = null } = {}) {
+  const raw =
+    crossPostTargetAccountIds && typeof crossPostTargetAccountIds === 'object' && !Array.isArray(crossPostTargetAccountIds)
+      ? crossPostTargetAccountIds
+      : {};
+
+  const normalize = (value) => {
+    if (value === undefined || value === null) return null;
+    const trimmed = String(value).trim();
+    return trimmed || null;
+  };
+
+  return {
+    x: normalize(raw.x ?? raw.twitter),
+    threads: normalize(raw.threads),
+  };
+}
+
 function normalizeScheduledCrossPostMedia(value) {
   if (!Array.isArray(value)) return [];
   return value
@@ -40,7 +58,7 @@ function normalizeScheduledCrossPostMedia(value) {
     .slice(0, 4);
 }
 
-function buildScheduledCrossPostMetadata({ targets, optimizeCrossPost = true, media = [] } = {}) {
+function buildScheduledCrossPostMetadata({ targets, optimizeCrossPost = true, routing = null, media = [] } = {}) {
   const x = Boolean(targets?.x);
   const threads = Boolean(targets?.threads);
   if (!x && !threads) return null;
@@ -56,6 +74,7 @@ function buildScheduledCrossPostMetadata({ targets, optimizeCrossPost = true, me
         x,
         threads,
       },
+      ...(routing && typeof routing === 'object' ? { routing } : {}),
       ...(normalizedMedia.length > 0 ? { media: normalizedMedia } : {}),
     },
   };
@@ -196,6 +215,22 @@ function mapTweetGenieLinkedInCrossScheduleStatus(row) {
   return 'scheduled';
 }
 
+function resolveTweetGenieLinkedInTargetAccountId(metadata) {
+  const crossPostMeta =
+    metadata?.cross_post && typeof metadata.cross_post === 'object' ? metadata.cross_post : {};
+  const routing =
+    crossPostMeta?.routing && typeof crossPostMeta.routing === 'object' ? crossPostMeta.routing : {};
+  const linkedinRoute =
+    routing?.linkedin && typeof routing.linkedin === 'object' ? routing.linkedin : null;
+
+  if (linkedinRoute?.targetAccountId !== undefined && linkedinRoute?.targetAccountId !== null) {
+    const normalized = String(linkedinRoute.targetAccountId).trim();
+    return normalized || null;
+  }
+
+  return null;
+}
+
 function buildExternalLinkedInScheduledRow(row) {
   const metadata = parseJsonObject(row?.metadata, {});
   const linkedinCrossPostMeta =
@@ -205,15 +240,22 @@ function buildExternalLinkedInScheduledRow(row) {
     typeof linkedinCrossPostMeta.last_result.linkedin === 'object'
       ? linkedinCrossPostMeta.last_result.linkedin
       : null;
+  const targetAccountId = resolveTweetGenieLinkedInTargetAccountId(metadata);
+  const fallbackTeamId =
+    row?.team_id !== undefined && row?.team_id !== null && String(row.team_id).trim()
+      ? String(row.team_id).trim()
+      : null;
+  const companyId = targetAccountId || fallbackTeamId;
+  const fallbackMedia = Array.isArray(linkedinCrossPostMeta?.media) ? linkedinCrossPostMeta.media : [];
 
   const mappedStatus = mapTweetGenieLinkedInCrossScheduleStatus(row);
 
   return {
     id: `tgx-${row.id}`,
     post_content: row.content || '',
-    media_urls: JSON.stringify([]),
+    media_urls: row.media_urls || JSON.stringify(fallbackMedia),
     post_type: 'single_post',
-    company_id: null,
+    company_id: companyId,
     scheduled_time: toUtcIso(row.scheduled_for) || row.scheduled_for,
     timezone: row.timezone || null,
     status: mappedStatus,
@@ -234,6 +276,8 @@ function buildExternalLinkedInScheduledRow(row) {
       source_status: row.status || null,
       linkedin_status: linkedinLastResult?.status || null,
       last_attempted_at: linkedinCrossPostMeta?.last_attempted_at || null,
+      target_account_id: targetAccountId,
+      team_id: fallbackTeamId,
     },
   };
 }
@@ -279,6 +323,14 @@ function buildExternalLinkedInScheduledRowFromSocial(row) {
     typeof crossPostMeta.last_result.linkedin === 'object'
       ? crossPostMeta.last_result.linkedin
       : null;
+  const routing =
+    crossPostMeta?.routing && typeof crossPostMeta.routing === 'object' ? crossPostMeta.routing : {};
+  const linkedinRoute =
+    routing?.linkedin && typeof routing.linkedin === 'object' ? routing.linkedin : null;
+  const targetAccountId =
+    linkedinRoute?.targetAccountId !== undefined && linkedinRoute?.targetAccountId !== null
+      ? String(linkedinRoute.targetAccountId).trim() || null
+      : null;
   const mappedStatus = mapSocialThreadsLinkedInCrossScheduleStatus(row);
 
   return {
@@ -286,7 +338,7 @@ function buildExternalLinkedInScheduledRowFromSocial(row) {
     post_content: row.caption || '',
     media_urls: row.media_urls || JSON.stringify([]),
     post_type: 'single_post',
-    company_id: row.team_id || null,
+    company_id: targetAccountId || row.team_id || null,
     scheduled_time: toUtcIso(row.scheduled_for) || row.scheduled_for,
     timezone: null,
     status: mappedStatus,
@@ -307,39 +359,73 @@ function buildExternalLinkedInScheduledRowFromSocial(row) {
       source_status: row.status || null,
       linkedin_status: linkedinLastResult?.status || null,
       last_attempted_at: crossPostMeta?.last_attempted_at || null,
+      target_account_id: targetAccountId,
+      team_id: row.team_id || null,
     },
   };
 }
 
-async function fetchExternalTweetGenieLinkedInCrossSchedules(userId, { status, limit = EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT } = {}) {
+async function fetchExternalTweetGenieLinkedInCrossSchedules(
+  userId,
+  {
+    status,
+    limit = EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT,
+    teamId = null,
+    scopedCompanyIds = [],
+  } = {}
+) {
   const safeLimit = Math.max(1, Math.min(EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT, Number(limit) || EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT));
+  const normalizedTeamId = teamId ? String(teamId).trim() : null;
+  const ownerClause = normalizedTeamId
+    ? `team_id::text = $1::text`
+    : `user_id = $1 AND team_id IS NULL`;
+  const ownerValue = normalizedTeamId || userId;
+  const normalizedScopedCompanyIds = Array.isArray(scopedCompanyIds)
+    ? scopedCompanyIds.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
 
   const { rows } = await pool.query(
-    `SELECT id, user_id, content, scheduled_for, timezone, status, error_message, metadata, created_at, updated_at, posted_at
+    `SELECT id, user_id, team_id, content, media_urls, scheduled_for, timezone, status, error_message, metadata, created_at, updated_at, posted_at
      FROM scheduled_tweets
-     WHERE user_id = $1
-       AND team_id IS NULL
+     WHERE ${ownerClause}
        AND (
          metadata->'cross_post'->'targets'->>'linkedin' = 'true'
        )
      ORDER BY scheduled_for DESC
      LIMIT $2`,
-    [userId, safeLimit]
+    [ownerValue, safeLimit]
   );
 
-  const mapped = rows.map(buildExternalLinkedInScheduledRow);
+  const mapped = rows
+    .map(buildExternalLinkedInScheduledRow)
+    .filter((row) => {
+      if (normalizedScopedCompanyIds.length === 0) return true;
+      const companyId = row?.company_id !== undefined && row?.company_id !== null ? String(row.company_id).trim() : '';
+      return companyId ? normalizedScopedCompanyIds.includes(companyId) : false;
+    });
   if (!status) return mapped;
 
   const normalizedStatus = String(status).toLowerCase();
   return mapped.filter((row) => String(row.status || '').toLowerCase() === normalizedStatus);
 }
 
-async function fetchExternalSocialGenieLinkedInCrossSchedules(userId, { status, limit = EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT, teamId = null } = {}) {
+async function fetchExternalSocialGenieLinkedInCrossSchedules(
+  userId,
+  {
+    status,
+    limit = EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT,
+    teamId = null,
+    scopedCompanyIds = [],
+  } = {}
+) {
   const safeLimit = Math.max(1, Math.min(EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT, Number(limit) || EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT));
   const ownerClause = teamId
     ? `team_id::text = $1`
     : `user_id = $1 AND (team_id IS NULL OR team_id::text = '')`;
   const ownerParam = teamId ? String(teamId) : userId;
+  const normalizedScopedCompanyIds = Array.isArray(scopedCompanyIds)
+    ? scopedCompanyIds.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
 
   const { rows } = await pool.query(
     `SELECT *
@@ -357,7 +443,12 @@ async function fetchExternalSocialGenieLinkedInCrossSchedules(userId, { status, 
       const targets = metadata?.cross_post?.targets;
       return Boolean(targets?.linkedin || targets?.linkedIn);
     })
-    .map(buildExternalLinkedInScheduledRowFromSocial);
+    .map(buildExternalLinkedInScheduledRowFromSocial)
+    .filter((row) => {
+      if (normalizedScopedCompanyIds.length === 0) return true;
+      const companyId = row?.company_id !== undefined && row?.company_id !== null ? String(row.company_id).trim() : '';
+      return companyId ? normalizedScopedCompanyIds.includes(companyId) : false;
+    });
 
   if (!status) return mapped;
   const normalizedStatus = String(status).toLowerCase();
@@ -382,6 +473,8 @@ export async function schedulePost(req, res) {
       optimizeCrossPost = true,
       postToTwitter = false,
       postToX = false,
+      crossPostTargetAccountIds = null,
+      crossPostTargetAccountLabels = null,
       crossPostMedia = [],
     } = req.body;
     if (!post_content || !scheduled_time) return res.status(400).json({ error: 'Missing post content or scheduled time' });
@@ -433,13 +526,39 @@ export async function schedulePost(req, res) {
       postToTwitter,
       postToX,
     });
-    // Keep parity with current immediate-post behavior: team LinkedIn accounts do not schedule cross-posts.
-    const effectiveCrossPostTargets = teamAccount
-      ? { x: false, threads: false }
-      : requestedCrossPostTargets;
+    const normalizedCrossPostTargetAccountIds = normalizeScheduledCrossPostTargetAccountIds({
+      crossPostTargetAccountIds,
+    });
+    const getTargetLabel = (key) =>
+      crossPostTargetAccountLabels &&
+      typeof crossPostTargetAccountLabels === 'object' &&
+      !Array.isArray(crossPostTargetAccountLabels) &&
+      crossPostTargetAccountLabels[key] !== undefined &&
+      crossPostTargetAccountLabels[key] !== null
+        ? String(crossPostTargetAccountLabels[key]).trim().slice(0, 255) || null
+        : null;
+    const crossPostRouting = (() => {
+      const routing = {};
+      if (requestedCrossPostTargets.x && normalizedCrossPostTargetAccountIds.x) {
+        routing.x = {
+          targetAccountId: normalizedCrossPostTargetAccountIds.x,
+          ...(getTargetLabel('x') ? { targetLabel: getTargetLabel('x') } : {}),
+        };
+      }
+      if (requestedCrossPostTargets.threads && normalizedCrossPostTargetAccountIds.threads) {
+        routing.threads = {
+          targetAccountId: normalizedCrossPostTargetAccountIds.threads,
+          ...(getTargetLabel('threads') ? { targetLabel: getTargetLabel('threads') } : {}),
+        };
+      }
+      return Object.keys(routing).length > 0 ? routing : null;
+    })();
+
+    const effectiveCrossPostTargets = requestedCrossPostTargets;
     const crossPostMetadata = buildScheduledCrossPostMetadata({
       targets: effectiveCrossPostTargets,
       optimizeCrossPost,
+      routing: crossPostRouting,
       media: crossPostMedia,
     });
 
@@ -499,11 +618,14 @@ export async function getScheduledPosts(req, res) {
         fetchExternalTweetGenieLinkedInCrossSchedules(userId, {
           status,
           limit: EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT,
+          teamId: teamAccount ? teamAccount.team_id : null,
+          scopedCompanyIds: teamAccount ? companyIds : [],
         }),
         fetchExternalSocialGenieLinkedInCrossSchedules(userId, {
           status,
           limit: EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT,
           teamId: teamAccount ? teamAccount.team_id : null,
+          scopedCompanyIds: teamAccount ? companyIds : [],
         }),
       ]);
       externalPosts = [...tweetGenieExternalPosts, ...socialGenieExternalPosts];

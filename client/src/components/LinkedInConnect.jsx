@@ -8,10 +8,13 @@ import { useAccount } from '../contexts/AccountContext';
 const OAUTH_RESULT_KEY = 'linkedin_oauth_result';
 
 const LinkedInConnect = () => {
-  const { accounts, loading: accountsLoading, refreshAccounts } = useAccount();
+  const { accounts, teams, loading: accountsLoading, refreshAccounts } = useAccount();
   const [connecting, setConnecting] = useState(false);
   const oauthMessageReceivedRef = useRef(false);
   const popupPollRef = useRef(null);
+  const isInTeam = Array.isArray(teams) && teams.length > 0;
+  const personalAccounts = accounts.filter((acc) => !acc.isTeamAccount);
+  const teamAccounts = accounts.filter((acc) => acc.isTeamAccount);
 
   const refreshAccountsWithRetry = async () => {
     try {
@@ -102,6 +105,11 @@ const LinkedInConnect = () => {
   }, [refreshAccounts]);
 
   const handleConnect = async () => {
+    if (isInTeam) {
+      toast.error('Personal LinkedIn connection is disabled in team mode. Use Team -> Social Accounts.');
+      return;
+    }
+
     oauthMessageReceivedRef.current = false;
     setConnecting(true);
     try {
@@ -151,7 +159,7 @@ const LinkedInConnect = () => {
   return (
     <div className="space-y-4">
       {/* Personal Accounts */}
-      {accounts.filter(acc => !acc.isTeamAccount).map((account) => (
+      {!isInTeam && personalAccounts.map((account) => (
         <div key={account.id} className="card p-4 flex items-center gap-4">
           <Linkedin className="h-8 w-8 text-blue-700" />
           <div className="flex-1">
@@ -194,7 +202,7 @@ const LinkedInConnect = () => {
       ))}
 
       {/* Team Accounts */}
-      {accounts.filter(acc => acc.isTeamAccount).map((account) => (
+      {teamAccounts.map((account) => (
         <div key={`${account.team_id}-${account.account_id}`} className="card p-4 flex items-center gap-4 bg-blue-50 border-blue-200">
           <Users className="h-8 w-8 text-blue-700" />
           <div className="flex-1">
@@ -223,7 +231,7 @@ const LinkedInConnect = () => {
       ))}
 
       {/* Connect New Account Button */}
-      {accounts.length === 0 && !accountsLoading && (
+      {!isInTeam && personalAccounts.length === 0 && !accountsLoading && (
         <div className="card p-6 flex flex-col items-center gap-4 bg-gradient-to-br from-blue-50 to-white border border-blue-100 shadow-lg rounded-xl text-center">
           <div className="flex flex-col items-center gap-2">
             <div className="bg-blue-100 rounded-full p-4 mb-2">
@@ -240,6 +248,16 @@ const LinkedInConnect = () => {
               {connecting ? 'Connecting...' : 'Connect LinkedIn'}
             </button>
           </div>
+        </div>
+      )}
+
+      {isInTeam && teamAccounts.length === 0 && !accountsLoading && (
+        <div className="card p-5 bg-yellow-50 border border-yellow-200 rounded-xl">
+          <h4 className="font-semibold text-yellow-900 mb-2">Team Mode Active</h4>
+          <p className="text-sm text-yellow-800">
+            Personal LinkedIn accounts are hidden in team mode. Connect LinkedIn accounts from the main
+            platform Team page (SuiteGenie Dashboard - Team - Social Accounts).
+          </p>
         </div>
       )}
 
