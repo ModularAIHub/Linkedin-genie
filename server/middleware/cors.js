@@ -4,14 +4,16 @@ const allowedOrigins = [
   'http://localhost:5175', // LinkedIn Genie frontend
   'http://localhost:5173', // Platform frontend
   'http://localhost:5174', // Tweet Genie frontend
+  'http://localhost:5176', // Social Genie frontend
   'https://suitegenie.in',
   'https://tweet.suitegenie.in',
   'https://linkedin.suitegenie.in',
-  'https://byok.suitegenie.in',
+  'https://linkedin.suitgenie.in',
+  'https://meta.suitegenie.in',
   'https://api.suitegenie.in',
-  'https://new-platform.suitegenie.in', // Add new-platform domain
-  'https://apitweet.suitegenie.in',     // Tweet API domain
+  'https://tweetapi.suitegenie.in',
   'https://apilinkedin.suitegenie.in',  // LinkedIn API domain
+  'https://metaapi.suitegenie.in',
 ];
 
 const corsOptions = {

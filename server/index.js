@@ -123,10 +123,14 @@ app.use(helmet());
 // CORS configuration
 const allowedOrigins = [
   'https://suitegenie.in',
-  'https://platform.suitegenie.in',
+  'https://tweet.suitegenie.in',
   'https://linkedin.suitegenie.in',
+  'https://linkedin.suitgenie.in',
+  'https://meta.suitegenie.in',
   'https://apilinkedin.suitegenie.in',
-  'https://api.suitegenie.in'
+  'https://api.suitegenie.in',
+  'https://tweetapi.suitegenie.in',
+  'https://metaapi.suitegenie.in'
 ];
 
 const isAllowedCorsOrigin = (origin) => {
@@ -145,8 +149,15 @@ const isAllowedCorsOrigin = (origin) => {
       return true;
     }
 
+    if (hostname === 'suitgenie.in' || hostname.endsWith('.suitgenie.in')) {
+      return true;
+    }
+
     // Allow Vercel preview deployments for this team/project namespace.
-    if (hostname.endsWith('.vercel.app') && hostname.includes('suitegenies-projects')) {
+    if (
+      hostname.endsWith('.vercel.app') &&
+      (hostname.includes('suitegenies-projects') || process.env.ALLOW_VERCEL_PREVIEWS === 'true')
+    ) {
       return true;
     }
 
@@ -161,8 +172,11 @@ if (process.env.NODE_ENV === 'development' || !process.env.NODE_ENV) {
     'http://localhost:5173',
     'http://localhost:5174',
     'http://localhost:5175',
+    'http://localhost:5176',
     'http://localhost:3000',
-    'http://localhost:3004'
+    'http://localhost:3002',
+    'http://localhost:3004',
+    'http://localhost:3006'
   );
 }
 app.use(cors({
