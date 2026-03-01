@@ -480,9 +480,10 @@ export async function schedulePost(req, res) {
     let teamAccount = shouldResolveSelectedTeamAccount
       ? await resolveTeamAccountForUser(userId, selectedAccountId)
       : null;
-    if (!teamAccount && !isMeaningfulAccountId(selectedAccountId)) {
-      teamAccount = await resolveDefaultTeamAccountForUser(userId, { preferredTeamIds });
-    }
+    // Do NOT auto-fallback to team mode on schedule creation.
+    // Only enter team mode when the client explicitly sends a meaningful
+    // account_id / X-Selected-Account-Id. Otherwise personal scheduled posts
+    // silently get company_id set, vanishing from the personal schedule view.
 
     if (shouldResolveSelectedTeamAccount && !teamAccount) {
       return res.status(403).json({ error: 'Selected LinkedIn team account not found or access denied' });
@@ -808,9 +809,8 @@ export async function getSchedulerStatus(req, res) {
     let teamAccount = shouldResolveSelectedTeamAccount
       ? await resolveTeamAccountForUser(userId, selectedAccountId)
       : null;
-    if (!teamAccount && !isMeaningfulAccountId(selectedAccountId)) {
-      teamAccount = await resolveDefaultTeamAccountForUser(userId, { preferredTeamIds });
-    }
+    // Do NOT auto-fallback to team mode on read. Only enter team mode when
+    // the client explicitly sends a meaningful X-Selected-Account-Id.
     const companyIds = teamAccount
       ? [String(teamAccount.team_id), String(teamAccount.id)]
       : undefined;
@@ -914,9 +914,9 @@ export async function bulkSchedulePosts(req, res) {
     let teamAccount = shouldResolveSelectedTeamAccount
       ? await resolveTeamAccountForUser(userId, selectedAccountId)
       : null;
-    if (!teamAccount && !isMeaningfulAccountId(selectedAccountId)) {
-      teamAccount = await resolveDefaultTeamAccountForUser(userId, { preferredTeamIds });
-    }
+    // Do NOT auto-fallback to team mode on bulk schedule creation.
+    // Only enter team mode when the client explicitly sends a meaningful
+    // account_id / X-Selected-Account-Id.
 
     if (shouldResolveSelectedTeamAccount && !teamAccount) {
       return res.status(403).json({ error: 'Selected LinkedIn team account not found or access denied' });

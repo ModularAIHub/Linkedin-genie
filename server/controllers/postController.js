@@ -1444,10 +1444,10 @@ export async function createPost(req, res) {
     let selectedTeamAccount = shouldResolveSelectedTeamAccount
       ? await resolveTeamAccountForUser(user.id, accountId)
       : null;
-
-    if (!selectedTeamAccount && !isMeaningfulAccountId(accountId)) {
-      selectedTeamAccount = await resolveDefaultTeamAccountForUser(user.id, { preferredTeamIds });
-    }
+    // Do NOT auto-fallback to team mode. Only enter team mode when the client
+    // explicitly sends a meaningful account_id / X-Selected-Account-Id that
+    // resolves to a team account. Otherwise personal posts silently get
+    // company_id set, vanishing from the personal history view.
     
     let accessToken, authorUrn, teamAccountResult;
     
