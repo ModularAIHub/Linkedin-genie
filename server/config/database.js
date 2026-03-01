@@ -54,12 +54,15 @@ const config = databaseUrl
 
 Object.assign(config, {
   max: Number.parseInt(process.env.DB_POOL_MAX || '20', 10),
-  idleTimeoutMillis: Number.parseInt(process.env.DB_POOL_IDLE_TIMEOUT_MS || '30000', 10),
+  // Default below Supabase's 30-second idle connection reaper so the pool drops
+  // connections before the DB kills them (avoids "Connection terminated" errors).
+  idleTimeoutMillis: Number.parseInt(process.env.DB_POOL_IDLE_TIMEOUT_MS || '20000', 10),
   connectionTimeoutMillis: Number.parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT_MS || '10000', 10),
   statement_timeout: Number.parseInt(process.env.DB_STATEMENT_TIMEOUT_MS || '30000', 10),
   query_timeout: Number.parseInt(process.env.DB_QUERY_TIMEOUT_MS || '30000', 10),
   maxUses: Number.isFinite(DB_POOL_MAX_USES) && DB_POOL_MAX_USES > 0 ? DB_POOL_MAX_USES : 7500,
   keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
 });
 
 dbDebug('LinkedIn Genie Database config:', {

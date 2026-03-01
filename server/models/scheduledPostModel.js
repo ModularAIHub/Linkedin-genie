@@ -116,15 +116,18 @@ export async function findByUser(user_id, { limit = 20, offset = 0, status, comp
 
   if (Array.isArray(companyIds) && companyIds.length > 0) {
     const companyIdx = params.push(companyIds.map(String)); // e.g. $1
-    const userIdx = params.push(user_id);                   // e.g. $2
-    // Include rows that belong to one of the scoped company IDs, OR rows the
-    // user created without a company_id (e.g. before team accounts were set up).
+    // Team mode: only show rows that belong to one of the scoped company IDs.
+    // Do NOT include personal rows (company_id IS NULL) — those belong to
+    // the personal view and should not leak into the team view.
     filters.push(
-      `(company_id::text = ANY($${companyIdx}::text[]) OR (company_id IS NULL AND user_id = $${userIdx}))`
+      `company_id::text = ANY($${companyIdx}::text[])`
     );
   } else {
     params.push(user_id);
     filters.push(`user_id = $${params.length}`);
+    // Personal mode: exclude team-scoped rows so team scheduled posts
+    // don't leak into the personal view.
+    filters.push(`(company_id IS NULL OR company_id::text = '')`);
   }
 
   if (status) {

@@ -1639,14 +1639,13 @@ export async function getPosts(req, res) {
     const { page = 1, limit = 20, status } = req.query;
     const offset = (page - 1) * limit;
     const selectedAccountId = req.headers['x-selected-account-id'];
-    const preferredTeamIds = getUserTeamHints(req.user);
     const shouldResolveSelectedTeamAccount = shouldResolveLinkedInTeamAccount(selectedAccountId);
     let selectedTeamAccount = shouldResolveSelectedTeamAccount
       ? await resolveTeamAccountForUser(req.user.id, selectedAccountId)
       : null;
-    if (!selectedTeamAccount && !isMeaningfulAccountId(selectedAccountId)) {
-      selectedTeamAccount = await resolveDefaultTeamAccountForUser(req.user.id, { preferredTeamIds });
-    }
+    // Do NOT auto-fallback to team mode when no account is selected.
+    // Only enter team mode when the client explicitly sends a meaningful
+    // X-Selected-Account-Id that resolves to a team account.
     let whereClause;
     let params = [];
     if (selectedTeamAccount) {

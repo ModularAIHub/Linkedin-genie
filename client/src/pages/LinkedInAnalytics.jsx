@@ -1,15 +1,18 @@
 ﻿import React, { useState, useEffect, useCallback } from 'react';
-import { 
+import {
   BarChart3, TrendingUp, Users, Heart, MessageCircle, Share2, Eye, Calendar,
   RefreshCw, Target, Award, Activity, Hash, Clock, Brain, Lightbulb, AlertCircle,
   CheckCircle, Sparkles, Megaphone, BookOpen, Sunrise, Sun, Moon, Star, Lock
 } from 'lucide-react';
-import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid,
-  Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import {
+  LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid,
+  Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell
+} from 'recharts';
 import { analytics } from '../utils/api';
 import LoadingSpinner from '../components/LoadingSpinner';
 import AccountSelector from '../components/AccountSelector';
 import { useAuth } from '../contexts/AuthContext';
+import { useAccount } from '../contexts/AccountContext';
 import { hasProPlanAccess } from '../utils/planAccess';
 import { getSuiteGenieProUpgradeUrl } from '../utils/upgradeUrl';
 import toast from 'react-hot-toast';
@@ -31,10 +34,8 @@ const LinkedInAnalytics = () => {
   const hasUserProPlan = hasProPlanAccess(user);
   const upgradeUrl = getSuiteGenieProUpgradeUrl();
 
-  // Account selector context
-  const { accounts, selectedAccount } = typeof window !== 'undefined' && window.AccountContext 
-    ? window.AccountContext 
-    : { accounts: [], selectedAccount: null };
+  // Account context — use proper React hook instead of obsolete window.AccountContext
+  const { accounts, selectedAccount } = useAccount();
 
   const [analyticsData, setAnalyticsData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -46,10 +47,15 @@ const LinkedInAnalytics = () => {
   const hasServerProPlan = analyticsData?.plan?.pro === true;
   const isProPlan = hasUserProPlan || hasServerProPlan;
 
+  // Stable account identifier that works for both personal and team accounts
+  const accountScopeKey = selectedAccount
+    ? (selectedAccount.account_id || selectedAccount.id || null)
+    : null;
+
   // Unified filter persistence for timeframe
   useEffect(() => {
-    if (!selectedAccount?.id) return;
-    const loaded = loadFilters('analyticsFilters', selectedAccount.id, {
+    if (!accountScopeKey) return;
+    const loaded = loadFilters('analyticsFilters', accountScopeKey, {
       timeframe: String(hasUserProPlan ? DEFAULT_DAYS : FREE_DAYS),
     });
     const savedTimeframe = String(loaded?.timeframe || '');
@@ -57,12 +63,12 @@ const LinkedInAnalytics = () => {
       ? (PRO_TIMEFRAME_OPTIONS.includes(savedTimeframe) ? savedTimeframe : String(DEFAULT_DAYS))
       : String(FREE_DAYS);
     setTimeframe(normalizedTimeframe);
-  }, [selectedAccount?.id, hasUserProPlan]);
+  }, [accountScopeKey, hasUserProPlan]);
 
   useEffect(() => {
-    if (!selectedAccount?.id) return;
-    saveFilters('analyticsFilters', selectedAccount.id, { timeframe });
-  }, [timeframe, selectedAccount?.id]);
+    if (!accountScopeKey) return;
+    saveFilters('analyticsFilters', accountScopeKey, { timeframe });
+  }, [timeframe, accountScopeKey]);
 
   useEffect(() => {
     if (!isProPlan && timeframe !== String(FREE_DAYS)) {
@@ -80,9 +86,13 @@ const LinkedInAnalytics = () => {
         ? String(timeframe)
         : String(FREE_DAYS);
       const params = { days: requestedDays };
-      if (selectedAccount?.id && selectedAccount?.account_type) {
-        params.account_id = selectedAccount.id;
-        params.account_type = selectedAccount.account_type;
+      if (selectedAccount) {
+        const accountId = selectedAccount.account_id || selectedAccount.id;
+        const accountType = selectedAccount.isTeamAccount ? 'team' : selectedAccount.account_type;
+        if (accountId && accountType) {
+          params.account_id = accountId;
+          params.account_type = accountType;
+        }
       }
 
       const response = await analytics.getOverview(params);
@@ -95,7 +105,7 @@ const LinkedInAnalytics = () => {
     } finally {
       setLoading(false);
     }
-  }, [timeframe, selectedAccount?.id, selectedAccount?.account_type, isProPlan]);
+  }, [timeframe, selectedAccount?.id, selectedAccount?.account_id, selectedAccount?.isTeamAccount, selectedAccount?.account_type, isProPlan]);
 
   const syncAnalytics = async () => {
     if (!isProPlan) {
@@ -109,27 +119,31 @@ const LinkedInAnalytics = () => {
       setSyncing(true);
       setError(null);
       const loadingToast = toast.loading('Syncing analytics from LinkedIn...');
-      
+
       const syncPayload = {};
-      if (selectedAccount?.id && selectedAccount?.account_type) {
-        syncPayload.account_id = selectedAccount.id;
-        syncPayload.account_type = selectedAccount.account_type;
+      if (selectedAccount) {
+        const accountId = selectedAccount.account_id || selectedAccount.id;
+        const accountType = selectedAccount.isTeamAccount ? 'team' : selectedAccount.account_type;
+        if (accountId && accountType) {
+          syncPayload.account_id = accountId;
+          syncPayload.account_type = accountType;
+        }
       }
 
       const response = await analytics.sync(syncPayload);
       console.log('Sync response:', response.data);
-      
+
       toast.dismiss(loadingToast);
-      
+
       if (response.data.success) {
         const updated = response.data.updated || 0;
         const total = response.data.total || 0;
         toast.success(`Analytics synced! Updated ${updated}/${total} post${total !== 1 ? 's' : ''}`);
-        
+
         if (response.data.updatedPostIds) {
           setUpdatedPostIds(new Set(response.data.updatedPostIds));
         }
-        
+
         await fetchAnalytics();
       }
     } catch (err) {
@@ -181,10 +195,10 @@ const LinkedInAnalytics = () => {
   const selectedDays = isProPlan && PRO_TIMEFRAME_OPTIONS.includes(String(timeframe))
     ? Number.parseInt(timeframe, 10)
     : FREE_DAYS;
-  
+
   // Calculate engagement quality score (0-100)
   const engagementScore = Math.min(100, Math.max(0, Math.round((parseFloat(avgEngagement) || 0) * 5 + 50)));
-  
+
   // Determine performance level
   const getPerformanceLevel = () => {
     const avg = parseFloat(avgEngagement);
@@ -193,7 +207,7 @@ const LinkedInAnalytics = () => {
     if (avg >= 5) return { level: 'moderate', color: 'yellow', message: 'Room for improvement' };
     return { level: 'low', color: 'red', message: 'Needs attention' };
   };
-  
+
   const performance = getPerformanceLevel();
 
   // Generate smart recommendations based on actual data
@@ -382,7 +396,7 @@ const LinkedInAnalytics = () => {
       const mid = Math.floor(dailyMetrics.length / 2);
       const recentAvg = dailyMetrics.slice(0, mid).reduce((sum, d) => sum + (parseInt(d.likes) || 0) + (parseInt(d.comments) || 0) + (parseInt(d.shares) || 0), 0) / mid;
       const olderAvg = dailyMetrics.slice(mid).reduce((sum, d) => sum + (parseInt(d.likes) || 0) + (parseInt(d.comments) || 0) + (parseInt(d.shares) || 0), 0) / (dailyMetrics.length - mid);
-      
+
       if (recentAvg > olderAvg * 1.3) {
         recommendations.push({
           icon: TrendingUp,
@@ -419,99 +433,99 @@ const LinkedInAnalytics = () => {
 
   const enhancedStats = isProPlan
     ? [
-        {
-          name: 'Total Posts',
-          value: totalPosts,
-          icon: MessageCircle,
-          color: 'text-blue-600',
-          bgColor: 'bg-blue-50',
-          subtitle: 'Published posts',
-          trend: null,
-        },
-        {
-          name: 'Total Engagement',
-          value: totalEngagement,
-          icon: Activity,
-          color: 'text-purple-600',
-          bgColor: 'bg-purple-50',
-          subtitle: 'All interactions',
-          trend: null,
-        },
-        {
-          name: 'Avg Engagement',
-          value: avgEngagement,
-          icon: Target,
-          color: 'text-orange-600',
-          bgColor: 'bg-orange-50',
-          subtitle: 'Per post',
-          trend: performance.level,
-        },
-        {
-          name: 'Total Likes',
-          value: totalLikes,
-          icon: Heart,
-          color: 'text-pink-600',
-          bgColor: 'bg-pink-50',
-          subtitle: `Avg ${avgLikes}/post`,
-          trend: null,
-        },
-        {
-          name: 'Total Comments',
-          value: totalComments,
-          icon: MessageCircle,
-          color: 'text-blue-600',
-          bgColor: 'bg-blue-50',
-          subtitle: `Avg ${avgComments}/post`,
-          trend: null,
-        },
-        {
-          name: 'Total Shares',
-          value: totalShares,
-          icon: Share2,
-          color: 'text-green-600',
-          bgColor: 'bg-green-50',
-          subtitle: totalShares > 0 ? 'Great reach!' : 'Encourage sharing',
-          trend: null,
-        },
-      ]
+      {
+        name: 'Total Posts',
+        value: totalPosts,
+        icon: MessageCircle,
+        color: 'text-blue-600',
+        bgColor: 'bg-blue-50',
+        subtitle: 'Published posts',
+        trend: null,
+      },
+      {
+        name: 'Total Engagement',
+        value: totalEngagement,
+        icon: Activity,
+        color: 'text-purple-600',
+        bgColor: 'bg-purple-50',
+        subtitle: 'All interactions',
+        trend: null,
+      },
+      {
+        name: 'Avg Engagement',
+        value: avgEngagement,
+        icon: Target,
+        color: 'text-orange-600',
+        bgColor: 'bg-orange-50',
+        subtitle: 'Per post',
+        trend: performance.level,
+      },
+      {
+        name: 'Total Likes',
+        value: totalLikes,
+        icon: Heart,
+        color: 'text-pink-600',
+        bgColor: 'bg-pink-50',
+        subtitle: `Avg ${avgLikes}/post`,
+        trend: null,
+      },
+      {
+        name: 'Total Comments',
+        value: totalComments,
+        icon: MessageCircle,
+        color: 'text-blue-600',
+        bgColor: 'bg-blue-50',
+        subtitle: `Avg ${avgComments}/post`,
+        trend: null,
+      },
+      {
+        name: 'Total Shares',
+        value: totalShares,
+        icon: Share2,
+        color: 'text-green-600',
+        bgColor: 'bg-green-50',
+        subtitle: totalShares > 0 ? 'Great reach!' : 'Encourage sharing',
+        trend: null,
+      },
+    ]
     : [
-        {
-          name: 'Total Posts',
-          value: totalPosts,
-          icon: MessageCircle,
-          color: 'text-blue-600',
-          bgColor: 'bg-blue-50',
-          subtitle: 'Last 7 days',
-          trend: null,
-        },
-        {
-          name: 'Total Likes',
-          value: totalLikes,
-          icon: Heart,
-          color: 'text-pink-600',
-          bgColor: 'bg-pink-50',
-          subtitle: 'Last 7 days',
-          trend: null,
-        },
-        {
-          name: 'Total Comments',
-          value: totalComments,
-          icon: MessageCircle,
-          color: 'text-blue-600',
-          bgColor: 'bg-blue-50',
-          subtitle: 'Last 7 days',
-          trend: null,
-        },
-        {
-          name: 'Total Shares',
-          value: totalShares,
-          icon: Share2,
-          color: 'text-green-600',
-          bgColor: 'bg-green-50',
-          subtitle: 'Last 7 days',
-          trend: null,
-        },
-      ];
+      {
+        name: 'Total Posts',
+        value: totalPosts,
+        icon: MessageCircle,
+        color: 'text-blue-600',
+        bgColor: 'bg-blue-50',
+        subtitle: 'Last 7 days',
+        trend: null,
+      },
+      {
+        name: 'Total Likes',
+        value: totalLikes,
+        icon: Heart,
+        color: 'text-pink-600',
+        bgColor: 'bg-pink-50',
+        subtitle: 'Last 7 days',
+        trend: null,
+      },
+      {
+        name: 'Total Comments',
+        value: totalComments,
+        icon: MessageCircle,
+        color: 'text-blue-600',
+        bgColor: 'bg-blue-50',
+        subtitle: 'Last 7 days',
+        trend: null,
+      },
+      {
+        name: 'Total Shares',
+        value: totalShares,
+        icon: Share2,
+        color: 'text-green-600',
+        bgColor: 'bg-green-50',
+        subtitle: 'Last 7 days',
+        trend: null,
+      },
+    ];
 
   const chartData = dailyMetrics.map(day => ({
     ...day,
@@ -586,11 +600,10 @@ const LinkedInAnalytics = () => {
           <button
             onClick={isProPlan ? syncAnalytics : handleUpgradeClick}
             disabled={isProPlan && syncing}
-            className={`px-5 py-2.5 rounded-xl flex items-center gap-2 text-sm font-semibold shadow-lg transition-all ${
-              isProPlan
+            className={`px-5 py-2.5 rounded-xl flex items-center gap-2 text-sm font-semibold shadow-lg transition-all ${isProPlan
                 ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white hover:from-blue-700 hover:to-blue-800 hover:shadow-xl transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed'
                 : 'bg-amber-100 text-amber-800 border border-amber-200 hover:bg-amber-200'
-            }`}
+              }`}
           >
             {isProPlan ? (
               <RefreshCw className={`h-4 w-4 ${syncing ? 'animate-spin' : ''}`} />
@@ -603,16 +616,19 @@ const LinkedInAnalytics = () => {
       </div>
 
       {/* Info note */}
-      <div className="bg-gradient-to-r from-blue-50 to-cyan-50 border-l-4 border-blue-400 p-5 rounded-xl shadow-sm">
-        <div className="flex">
-          <AlertCircle className="h-5 w-5 text-blue-500 flex-shrink-0 mt-0.5" />
-          <div className="ml-3">
-            <p className="text-sm text-blue-800 leading-relaxed">
-              <strong className="font-semibold">Note:</strong> LinkedIn's API provides engagement metrics (likes, comments, shares) but does not provide view/impression counts for personal profiles. Views are only available for organization pages.
-            </p>
+      {/* Info note - Only show for personal accounts */}
+      {(!selectedAccount || (!selectedAccount.isTeamAccount && selectedAccount.account_type !== 'team')) && (
+        <div className="bg-gradient-to-r from-blue-50 to-cyan-50 border-l-4 border-blue-400 p-5 rounded-xl shadow-sm">
+          <div className="flex">
+            <AlertCircle className="h-5 w-5 text-blue-500 flex-shrink-0 mt-0.5" />
+            <div className="ml-3">
+              <p className="text-sm text-blue-800 leading-relaxed">
+                <strong className="font-semibold">Note:</strong> LinkedIn's API provides engagement metrics (likes, comments, shares) but does not provide view/impression counts for personal profiles. Views are only available for organization pages.
+              </p>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {!isProPlan && (
         <div className="bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200 rounded-xl p-5 shadow-sm">
@@ -643,21 +659,20 @@ const LinkedInAnalytics = () => {
             const Icon = tab.icon;
             const isLocked = tab.proOnly && !isProPlan;
             return (
-              <button 
-                key={tab.id} 
+              <button
+                key={tab.id}
                 onClick={() => {
                   setActiveTab(tab.id);
                   if (isLocked) {
                     toast.error(`${tab.label} is available on Pro. Upgrade to unlock.`);
                   }
                 }}
-                className={`py-4 px-2 border-b-2 font-semibold text-sm whitespace-nowrap flex items-center transition-all ${
-                  activeTab === tab.id 
+                className={`py-4 px-2 border-b-2 font-semibold text-sm whitespace-nowrap flex items-center transition-all ${activeTab === tab.id
                     ? 'border-blue-600 text-blue-600'
                     : isLocked
                       ? 'border-transparent text-gray-400 hover:text-gray-600 hover:border-gray-200'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                }`}
+                  }`}
               >
                 <Icon className="h-4 w-4 mr-2" />
                 {tab.label}
@@ -1029,15 +1044,14 @@ const LinkedInAnalytics = () => {
                       const dayData = timingData.byDayOfWeek.find(d => parseInt(d.day_of_week) === dayIndex);
                       const avgEng = dayData ? parseFloat(dayData.avg_engagement) : 0;
                       const postsCount = dayData ? parseInt(dayData.posts_count) : 0;
-                      
+
                       const maxEng = Math.max(...timingData.byDayOfWeek.map(d => parseFloat(d.avg_engagement)));
                       const isBest = avgEng > 0 && avgEng >= maxEng * 0.9;
                       const isGood = avgEng > 0 && avgEng >= maxEng * 0.6;
-                      
+
                       return (
-                        <div key={day} className={`p-3 rounded-lg text-center text-sm font-medium transition-all ${
-                          isBest ? 'bg-blue-600 text-white shadow-lg' : isGood ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-500'
-                        }`}>
+                        <div key={day} className={`p-3 rounded-lg text-center text-sm font-medium transition-all ${isBest ? 'bg-blue-600 text-white shadow-lg' : isGood ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-500'
+                          }`}>
                           <div className="font-bold">{day}</div>
                           {postsCount > 0 && (
                             <>
@@ -1065,19 +1079,18 @@ const LinkedInAnalytics = () => {
                       const hourData = timingData.byHour.find(h => parseInt(h.hour_of_day) === hour);
                       const avgEng = hourData ? parseFloat(hourData.avg_engagement) : 0;
                       const postsCount = hourData ? parseInt(hourData.posts_count) : 0;
-                      
+
                       const maxEng = Math.max(...timingData.byHour.map(h => parseFloat(h.avg_engagement)));
                       const isBest = avgEng > 0 && avgEng >= maxEng * 0.9;
                       const isGood = avgEng > 0 && avgEng >= maxEng * 0.6;
-                      
+
                       const hourLabel = hour === 0 ? '12a' : hour < 12 ? `${hour}a` : hour === 12 ? '12p' : `${hour - 12}p`;
-                      
+
                       return (
                         <div
                           key={hour}
-                          className={`p-2 rounded-lg text-center text-xs font-medium transition-all ${
-                            isBest ? 'bg-green-600 text-white shadow-lg' : isGood ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-500'
-                          }`}
+                          className={`p-2 rounded-lg text-center text-xs font-medium transition-all ${isBest ? 'bg-green-600 text-white shadow-lg' : isGood ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-500'
+                            }`}
                           title={postsCount > 0 ? `${postsCount} posts, ${avgEng.toFixed(1)} avg engagement` : 'No posts'}
                         >
                           <div className="font-bold">{hourLabel}</div>
@@ -1103,7 +1116,7 @@ const LinkedInAnalytics = () => {
                     const postsPerWeek = totalPosts > 0 ? (totalPosts / daysInPeriod * 7).toFixed(1) : 0;
                     const daysWithPosts = dailyMetrics.filter(d => d.posts_count > 0).length;
                     const avgPostsPerDay = daysWithPosts > 0 ? (totalPosts / daysWithPosts).toFixed(1) : 0;
-                    
+
                     return (
                       <>
                         <div className="flex items-center justify-between p-4 bg-blue-50 rounded-lg">
@@ -1139,7 +1152,7 @@ const LinkedInAnalytics = () => {
               <h3 className="text-lg font-semibold text-gray-900 mb-2">No Timing Data Yet</h3>
               <p className="text-gray-600 mb-4">
                 Post content and sync analytics to see your best posting times and patterns.
-x``              </p>
+                x``              </p>
               <button
                 onClick={syncAnalytics}
                 disabled={syncing}
@@ -1321,11 +1334,10 @@ x``              </p>
             <button
               onClick={isProPlan ? syncAnalytics : handleUpgradeClick}
               disabled={isProPlan && syncing}
-              className={`mt-4 px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 mx-auto ${
-                isProPlan
+              className={`mt-4 px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 mx-auto ${isProPlan
                   ? 'bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50'
                   : 'bg-amber-100 text-amber-800 border border-amber-200 hover:bg-amber-200'
-              }`}
+                }`}
             >
               {isProPlan ? (
                 <RefreshCw className={`h-4 w-4 ${syncing ? 'animate-spin' : ''}`} />
@@ -1357,12 +1369,12 @@ x``              </p>
                       <span className="text-xs text-gray-500">
                         {post.created_at
                           ? new Date(post.created_at).toLocaleString('en-IN', {
-                              day: 'numeric',
-                              month: 'short',
-                              year: 'numeric',
-                              hour: '2-digit',
-                              minute: '2-digit'
-                            })
+                            day: 'numeric',
+                            month: 'short',
+                            year: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit'
+                          })
                           : 'Unknown date'}
                       </span>
                       <div className="flex items-center gap-2 flex-wrap justify-end">

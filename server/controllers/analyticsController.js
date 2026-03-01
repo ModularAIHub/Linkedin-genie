@@ -8,9 +8,8 @@ const FREE_TOP_POSTS_LIMIT = 5;
 const PRO_TOP_POSTS_LIMIT = 20;
 
 // Helper: Get LinkedIn access token for user
-async function getLinkedInAuthForUser(userId) {
-  const { rows: socialRows } = await pool.query(
-    `SELECT access_token,
+async function getLinkedInAuthForUser(userId, accountId = null) {
+  let query = `SELECT access_token,
             COALESCE(
               NULLIF(metadata->>'linkedin_user_id', ''),
               CASE
@@ -22,11 +21,17 @@ async function getLinkedInAuthForUser(userId) {
      WHERE user_id::text = $1::text
        AND team_id IS NULL
        AND platform = 'linkedin'
-       AND is_active = true
-     ORDER BY updated_at DESC NULLS LAST, id DESC
-     LIMIT 1`,
-    [userId]
-  );
+       AND is_active = true`;
+  
+  const params = [userId];
+  if (accountId) {
+    query += ` AND account_id = $2`;
+    params.push(String(accountId));
+  }
+  query += ` ORDER BY updated_at DESC NULLS LAST, id DESC LIMIT 1`;
+
+  const { rows: socialRows } = await pool.query(query, params);
+  
   if (socialRows[0]) {
     return socialRows[0];
   }
@@ -65,11 +70,20 @@ async function resolveAnalyticsScope({ userId, accountId = null, accountType = n
     };
   }
 
+  const auth = await getLinkedInAuthForUser(userId, accountId && accountType !== 'team' ? String(accountId) : null);
+  let scopeClause = `user_id = $1 AND (company_id IS NULL OR company_id::text = '')`;
+  const scopeParams = [userId];
+
+  if (accountId && accountType !== 'team') {
+    scopeClause += ` AND linkedin_user_id = $2`;
+    scopeParams.push(String(accountId));
+  }
+
   return {
-    auth: await getLinkedInAuthForUser(userId),
-    scopeClause: `user_id = $1 AND (company_id IS NULL OR company_id::text = '')`,
-    scopeParams: [userId],
-    scopeAccountId: null,
+    auth,
+    scopeClause,
+    scopeParams,
+    scopeAccountId: accountId && accountType !== 'team' ? String(accountId) : null,
     teamAccount: null,
   };
 }
@@ -111,7 +125,8 @@ async function fetchSocialActions(accessToken, postUrn) {
         Authorization: `Bearer ${accessToken}`,
         'X-Restli-Protocol-Version': '2.0.0',
         'LinkedIn-Version': '202405'
-      }
+      },
+      timeout: 15000
     });
     const data = res.data || {};
     return {
@@ -133,28 +148,43 @@ async function fetchSocialActions(accessToken, postUrn) {
   }
 }
 
-// Helper: Fetch view count for UGC posts
-// NOTE: LinkedIn API does not provide impression/view statistics for personal profiles
-// Views are only available for organization pages with r_organization_social scope
-async function fetchUgcPostViews(accessToken, ugcPostUrn, linkedinUserId) {
-  // LinkedIn's API limitation: Personal profile posts don't have view statistics available
-  // Only organization pages can access impression counts
-  console.log('[LinkedIn Analytics] View statistics not available for personal profile posts');
-  return 0;
-}
-
-// Helper: Fetch view count via Share Statistics API
-// NOTE: LinkedIn API does not provide impression/view statistics for personal profiles
-// Views are only available for organization pages with r_organization_social scope
-async function fetchShareViews(accessToken, linkedinUserId, shareUrn) {
-  // LinkedIn's API limitation: Personal profile posts don't have view statistics available
-  // Only organization pages can access impression counts
-  console.log('[LinkedIn Analytics] View statistics not available for personal profile posts');
-  return 0;
+// Helper: Fetch view count for UGC and Share posts
+async function fetchViewsForOrganization(accessToken, postUrn, linkedinUserId, isOrganization) {
+  if (!isOrganization || !linkedinUserId) {
+    console.log('[LinkedIn Analytics] View statistics not available for personal profile posts');
+    return 0;
+  }
+  
+  const orgUrn = linkedinUserId.startsWith('urn:li:organization:') 
+    ? linkedinUserId 
+    : `urn:li:organization:${linkedinUserId}`;
+    
+  const url = `https://api.linkedin.com/v2/organizationalEntityShareStatistics?q=organizationalEntity&organizationalEntity=${encodeURIComponent(orgUrn)}&shares[0]=${encodeURIComponent(postUrn)}`;
+  
+  try {
+    const res = await axios.get(url, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'X-Restli-Protocol-Version': '2.0.0',
+        'LinkedIn-Version': '202405'
+      },
+      timeout: 10000
+    });
+    
+    const elements = res.data?.elements || [];
+    if (elements.length > 0) {
+      return elements[0].totalShareStatistics?.uniqueImpressionsCount || 
+             elements[0].totalShareStatistics?.impressionCount || 0;
+    }
+    return 0;
+  } catch (error) {
+    console.error('[LinkedIn Analytics] Error fetching views for', postUrn, error.message);
+    return 0;
+  }
 }
 
 // Main: Fetch all analytics for a post
-async function fetchLinkedInPostAnalytics(accessToken, postId, linkedinUserId) {
+async function fetchLinkedInPostAnalytics(accessToken, postId, linkedinUserId, isOrganization) {
   const type = classifyPostId(postId);
   if (!type) {
     console.warn('[LinkedIn Analytics] Unknown post ID format:', postId);
@@ -181,11 +211,7 @@ async function fetchLinkedInPostAnalytics(accessToken, postId, linkedinUserId) {
   // Both ugcPost and share use organizationalEntityShareStatistics API
   let views = 0;
   if (linkedinUserId) {
-    if (postUrn.startsWith('urn:li:ugcPost:')) {
-      views = await fetchUgcPostViews(accessToken, postUrn, linkedinUserId);
-    } else if (postUrn.startsWith('urn:li:share:')) {
-      views = await fetchShareViews(accessToken, linkedinUserId, postUrn);
-    }
+    views = await fetchViewsForOrganization(accessToken, postUrn, linkedinUserId, isOrganization);
   }
 
   return {
@@ -238,31 +264,46 @@ export async function syncAnalytics(req, res) {
     const updatedPostIds = [];
     const deletedPostIds = [];
 
-    for (const post of posts) {
-      // Skip demo/test posts
-      if (!post.linkedin_post_id ||
-          post.linkedin_post_id.includes('DEMO') ||
-          post.linkedin_post_id.includes('test')) {
-        console.log(`[Analytics Sync] Skipping demo/test post ${post.id}`);
-        continue;
-      }
+    // Process in parallel batches of 3 to avoid LinkedIn rate limits
+    const SYNC_CONCURRENCY = 3;
+    for (let i = 0; i < posts.length; i += SYNC_CONCURRENCY) {
+      const batch = posts.slice(i, i + SYNC_CONCURRENCY);
+      const results = await Promise.allSettled(
+        batch.map(async (post) => {
+          if (!post.linkedin_post_id ||
+              post.linkedin_post_id.includes('DEMO') ||
+              post.linkedin_post_id.includes('test')) {
+            console.log(`[Analytics Sync] Skipping demo/test post ${post.id}`);
+            return { postId: post.id, status: 'skipped' };
+          }
 
-      const result = await fetchLinkedInPostAnalytics(accessToken, post.linkedin_post_id, linkedinUserId);
-      console.log(`[Analytics Sync] Result for post ${post.linkedin_post_id}:`, result);
+          const result = await fetchLinkedInPostAnalytics(accessToken, post.linkedin_post_id, linkedinUserId, !!scope.teamAccount);
+          console.log(`[Analytics Sync] Result for post ${post.linkedin_post_id}:`, result);
+          return { postId: post.id, result };
+        })
+      );
 
-      if (result?.deleted) {
-        // Post no longer exists on LinkedIn — mark as deleted
-        await markPostAsDeleted(post.id, post.linkedin_post_id);
-        deleted++;
-        deletedPostIds.push(post.id);
-        console.log(`[Analytics Sync] Post ${post.id} marked as deleted`);
-      } else if (result) {
-        await updatePostAnalytics(post.id, result);
-        updated++;
-        updatedPostIds.push(post.id);
-        console.log(`[Analytics Sync] Updated post ${post.id}`);
-      } else {
-        console.log(`[Analytics Sync] No analytics available for post ${post.id} - skipping`);
+      for (const settled of results) {
+        if (settled.status === 'rejected') {
+          console.error('[Analytics Sync] Post sync failed:', settled.reason?.message);
+          continue;
+        }
+        const { postId, result, status: skipStatus } = settled.value;
+        if (skipStatus === 'skipped') continue;
+
+        if (result?.deleted) {
+          await markPostAsDeleted(postId, posts.find(p => p.id === postId)?.linkedin_post_id);
+          deleted++;
+          deletedPostIds.push(postId);
+          console.log(`[Analytics Sync] Post ${postId} marked as deleted`);
+        } else if (result) {
+          await updatePostAnalytics(postId, result);
+          updated++;
+          updatedPostIds.push(postId);
+          console.log(`[Analytics Sync] Updated post ${postId}`);
+        } else {
+          console.log(`[Analytics Sync] No analytics available for post ${postId} - skipping`);
+        }
       }
     }
 

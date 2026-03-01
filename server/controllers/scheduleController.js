@@ -592,14 +592,12 @@ export async function getScheduledPosts(req, res) {
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     const { status, limit, offset } = req.query;
     const selectedAccountId = req.headers['x-selected-account-id'];
-    const preferredTeamIds = getUserTeamHints(req.user);
     const shouldResolveSelectedTeamAccount = shouldResolveLinkedInTeamAccount(selectedAccountId);
     let teamAccount = shouldResolveSelectedTeamAccount
       ? await resolveTeamAccountForUser(userId, selectedAccountId)
       : null;
-    if (!teamAccount && !isMeaningfulAccountId(selectedAccountId)) {
-      teamAccount = await resolveDefaultTeamAccountForUser(userId, { preferredTeamIds });
-    }
+    // Do NOT auto-fallback to team mode. Only enter team mode when the client
+    // explicitly sends a meaningful X-Selected-Account-Id that maps to a team account.
     const companyIds = teamAccount
       ? [String(teamAccount.team_id), String(teamAccount.id)]
       : undefined;
