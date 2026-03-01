@@ -34,6 +34,19 @@ const resolveTeamLinkedInSocialAccountId = (row = {}) => {
   return normalizeString(row.linkedin_user_id, 255);
 };
 
+const buildLinkedInAccountDedupKey = (row = {}) => {
+  const teamId = normalizeString(row.team_id, 128);
+  const accountType = normalizeString(row.account_type, 50) || 'personal';
+  const organizationId = normalizeString(row.organization_id, 255);
+  const linkedinUserId = normalizeString(row.linkedin_user_id, 255);
+
+  if (accountType === 'organization' && organizationId) {
+    return `${teamId || 'personal'}:org:${organizationId}`;
+  }
+
+  return `${teamId || 'personal'}:person:${linkedinUserId || normalizeString(row.id, 255) || 'unknown'}`;
+};
+
 async function upsertTeamLinkedInSocialAccount({
   userId,
   teamId,
@@ -151,8 +164,97 @@ export async function getAccounts(req, res) {
     // If user is in a team, ONLY return team accounts (no personal account access)
     if (userTeams.length > 0) {
       console.log('[getAccounts] User is in team, returning ONLY team accounts');
-      
-      // Get all team LinkedIn accounts for teams the user belongs to
+
+      const teamIds = userTeams.map(tm => String(tm.team_id));
+
+      // Primary source: social_connected_accounts (canonical table — stores BOTH personal + org pages)
+      const { rows: socialRows } = await pool.query(
+        `SELECT
+          sca.id,
+          sca.user_id,
+          sca.team_id,
+          sca.account_id,
+          sca.account_username,
+          sca.account_display_name,
+          sca.profile_image_url,
+          sca.followers_count,
+          sca.metadata
+         FROM social_connected_accounts sca
+         WHERE sca.team_id::text = ANY($1::text[])
+           AND sca.platform = 'linkedin'
+           AND sca.is_active = true
+         ORDER BY sca.updated_at DESC NULLS LAST, sca.id DESC`,
+        [teamIds]
+      );
+
+      // Cache team names to avoid duplicate DB queries
+      const teamNameCache = {};
+      const getTeamName = async (teamId) => {
+        if (teamNameCache[teamId]) return teamNameCache[teamId];
+        try {
+          const { rows } = await newPlatformPool.query(`SELECT name FROM teams WHERE id = $1`, [teamId]);
+          teamNameCache[teamId] = rows[0]?.name || 'Unknown Team';
+        } catch {
+          teamNameCache[teamId] = 'Unknown Team';
+        }
+        return teamNameCache[teamId];
+      };
+
+      if (socialRows.length > 0) {
+        // Deduplicate by social row UUID
+        const seen = new Set();
+        const unique = socialRows.filter(row => {
+          if (seen.has(String(row.id))) return false;
+          seen.add(String(row.id));
+          return true;
+        });
+
+        const teamAccounts = await Promise.all(unique.map(async (row) => {
+          const teamMember = userTeams.find(tm => String(tm.team_id) === String(row.team_id));
+          const teamName = await getTeamName(row.team_id);
+          const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+
+          const accountId = normalizeString(row.account_id, 255);
+          const isOrg = (normalizeString(metadata.account_type, 40) || (accountId && accountId.startsWith('org:') ? 'organization' : 'personal')) === 'organization';
+          const accountType = isOrg ? 'organization' : 'personal';
+          const organizationId = isOrg
+            ? (normalizeString(metadata.organization_id, 255) || (accountId && accountId.startsWith('org:') ? accountId.replace('org:', '') : null))
+            : null;
+          const linkedinUserId = normalizeString(metadata.linkedin_user_id, 255) || (isOrg ? null : accountId);
+
+          const effectiveDisplayName = isOrg
+            ? (normalizeString(metadata.organization_name, 255) || normalizeString(row.account_display_name, 255) || `Org ${organizationId}`)
+            : (normalizeString(row.account_display_name, 255) || normalizeString(row.account_username, 255));
+          const effectiveUsername = isOrg
+            ? (normalizeString(metadata.organization_vanity_name, 255) || (organizationId ? `org-${organizationId}` : null))
+            : normalizeString(row.account_username, 255);
+
+          return {
+            account_type: accountType,
+            account_id: String(row.id),
+            team_id: row.team_id,
+            team_name: teamName,
+            id: String(row.id),
+            linkedin_user_id: linkedinUserId,
+            linkedin_username: effectiveUsername,
+            linkedin_display_name: effectiveDisplayName,
+            linkedin_profile_image_url: normalizeString(row.profile_image_url, 2048),
+            connections_count: row.followers_count || 0,
+            headline: null,
+            organization_id: organizationId,
+            organization_name: isOrg ? normalizeString(metadata.organization_name, 255) : null,
+            organization_vanity_name: isOrg ? normalizeString(metadata.organization_vanity_name, 255) : null,
+            user_role: teamMember?.role,
+            label: `${effectiveDisplayName || effectiveUsername} (${isOrg ? 'Organization Page' : 'Personal Profile'} • Team: ${teamName})`,
+            isTeamAccount: true,
+          };
+        }));
+
+        return res.json({ accounts: teamAccounts });
+      }
+
+      // Fallback: legacy linkedin_team_accounts (for users not yet migrated to social_connected_accounts)
+      console.log('[getAccounts] social_connected_accounts empty, falling back to linkedin_team_accounts');
       const { rows: allTeamAccounts } = await pool.query(
         `SELECT 
           lta.id,
@@ -164,52 +266,64 @@ export async function getAccounts(req, res) {
           lta.linkedin_profile_image_url,
           lta.connections_count,
           lta.headline,
-          lta.active
+          lta.active,
+          COALESCE(lta.account_type, 'personal') AS account_type,
+          lta.organization_id,
+          lta.organization_name,
+          lta.organization_vanity_name,
+          lta.updated_at,
+          lta.created_at
          FROM linkedin_team_accounts lta
-         WHERE lta.active = true
-         ORDER BY lta.created_at DESC`
+         WHERE lta.team_id::text = ANY($1::text[])
+           AND lta.active = true
+         ORDER BY lta.updated_at DESC NULLS LAST, lta.created_at DESC NULLS LAST, lta.id DESC`,
+        [teamIds]
       );
 
-      // Filter team accounts to only those in user's teams and enrich with team info
-      const teamAccounts = await Promise.all(
-        allTeamAccounts
-          .filter(acc => userTeams.some(tm => tm.team_id === acc.team_id))
-          .map(async (acc) => {
-            const teamMember = userTeams.find(tm => tm.team_id === acc.team_id);
-            // Try to get team name from new-platform database
-            let teamName = 'Unknown Team';
-            try {
-              const { rows: teamRows } = await newPlatformPool.query(
-                `SELECT name FROM teams WHERE id = $1`,
-                [acc.team_id]
-              );
-              if (teamRows.length > 0) {
-                teamName = teamRows[0].name;
-              }
-            } catch (err) {
-              console.warn('[getAccounts] Could not fetch team name for:', acc.team_id);
-            }
-            
-            return {
-              account_type: 'team',
-              account_id: acc.id,
-              team_id: acc.team_id,
-              team_name: teamName,
-              id: acc.id,
-              linkedin_user_id: acc.linkedin_user_id,
-              linkedin_username: acc.linkedin_username,
-              linkedin_display_name: acc.linkedin_display_name,
-              linkedin_profile_image_url: acc.linkedin_profile_image_url,
-              connections_count: acc.connections_count,
-              headline: acc.headline,
-              user_role: teamMember?.role,
-              label: `${acc.linkedin_display_name || acc.linkedin_username} (Team: ${teamName})`,
-              isTeamAccount: true
-            };
-          })
-      );
+      const dedupedLegacy = [];
+      const seenLegacyKeys = new Set();
+      for (const account of allTeamAccounts) {
+        const dedupKey = buildLinkedInAccountDedupKey(account);
+        if (seenLegacyKeys.has(dedupKey)) continue;
+        seenLegacyKeys.add(dedupKey);
+        dedupedLegacy.push(account);
+      }
 
-      return res.json({ accounts: teamAccounts });
+      const legacyAccounts = await Promise.all(dedupedLegacy.map(async (acc) => {
+        const teamMember = userTeams.find(tm => String(tm.team_id) === String(acc.team_id));
+        const teamName = await getTeamName(acc.team_id);
+        const normalizedAccountType = normalizeString(acc.account_type, 50) || 'personal';
+        const organizationId = normalizeString(acc.organization_id, 255);
+        const isOrganization = normalizedAccountType === 'organization' && organizationId;
+        const effectiveDisplayName = isOrganization
+          ? (normalizeString(acc.organization_name, 255) || acc.linkedin_display_name || acc.linkedin_username)
+          : (acc.linkedin_display_name || acc.linkedin_username);
+        const effectiveUsername = isOrganization
+          ? (normalizeString(acc.organization_vanity_name, 255) || `org-${organizationId}`)
+          : acc.linkedin_username;
+
+        return {
+          account_type: normalizedAccountType,
+          account_id: String(acc.id),
+          team_id: acc.team_id,
+          team_name: teamName,
+          id: String(acc.id),
+          linkedin_user_id: acc.linkedin_user_id,
+          linkedin_username: effectiveUsername,
+          linkedin_display_name: effectiveDisplayName,
+          linkedin_profile_image_url: acc.linkedin_profile_image_url,
+          connections_count: acc.connections_count,
+          headline: acc.headline,
+          organization_id: organizationId,
+          organization_name: normalizeString(acc.organization_name, 255),
+          organization_vanity_name: normalizeString(acc.organization_vanity_name, 255),
+          user_role: teamMember?.role,
+          label: `${effectiveDisplayName || effectiveUsername} (${isOrganization ? 'Organization Page' : 'Personal Profile'} • Team: ${teamName})`,
+          isTeamAccount: true,
+        };
+      }));
+
+      return res.json({ accounts: legacyAccounts });
     }
 
     // User is NOT in a team - return personal account only
@@ -232,12 +346,20 @@ export async function getAccounts(req, res) {
         headline
        FROM linkedin_auth 
        WHERE user_id = $1
-       ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC
-       LIMIT 1`,
+       ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC`,
       [userId]
     );
 
-    const accounts = personalAccounts.map(acc => {
+    const dedupedPersonalRows = [];
+    const seenPersonalKeys = new Set();
+    for (const account of personalAccounts) {
+      const dedupKey = buildLinkedInAccountDedupKey(account);
+      if (seenPersonalKeys.has(dedupKey)) continue;
+      seenPersonalKeys.add(dedupKey);
+      dedupedPersonalRows.push(account);
+    }
+
+    const accounts = dedupedPersonalRows.map(acc => {
       const isOrganization = acc.account_type === 'organization' && acc.organization_id;
       const effectiveAccountId = isOrganization ? `org:${acc.organization_id}` : null;
       const effectiveUsername = isOrganization ? `org-${acc.organization_id}` : acc.linkedin_username;

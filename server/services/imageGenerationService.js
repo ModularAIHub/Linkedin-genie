@@ -1,17 +1,19 @@
 import OpenAI from 'openai';
 import axios from 'axios';
 
-async function getUserPreferenceAndKeys(userToken) {
+async function getUserPreferenceAndKeys(userToken, cookieHeader = null) {
   const baseUrl = process.env.NEW_PLATFORM_API_URL || 'http://localhost:3000/api';
-  const prefRes = await axios.get(`${baseUrl}/byok/preference`, {
-    headers: { Authorization: `Bearer ${userToken}` }
-  });
+  const buildHeaders = () => {
+    const headers = {};
+    if (cookieHeader) headers['Cookie'] = cookieHeader;
+    if (userToken) headers['Authorization'] = `Bearer ${userToken}`;
+    return headers;
+  };
+  const prefRes = await axios.get(`${baseUrl}/byok/preference`, { headers: buildHeaders() });
   const preference = prefRes.data.api_key_preference;
   let userKeys = [];
   if (preference === 'byok') {
-    const keysRes = await axios.get(`${baseUrl}/byok/keys`, {
-      headers: { Authorization: `Bearer ${userToken}` }
-    });
+    const keysRes = await axios.get(`${baseUrl}/byok/keys`, { headers: buildHeaders() });
     userKeys = keysRes.data.keys;
   }
   return { preference, userKeys };
@@ -26,7 +28,7 @@ class ImageGenerationService {
     }
   }
 
-  async generateImage(prompt, style = 'natural', size = '1024x1024', userToken = null, userId = null) {
+  async generateImage(prompt, style = 'natural', size = '1024x1024', userToken = null, userId = null, cookieHeader = null) {
     // Determine which API key to use based on user preference
     let preference = 'platform';
     let userKeys = [];
@@ -34,7 +36,7 @@ class ImageGenerationService {
     
     if (userToken) {
       try {
-        const prefResult = await getUserPreferenceAndKeys(userToken);
+        const prefResult = await getUserPreferenceAndKeys(userToken, cookieHeader);
         preference = prefResult.preference;
         userKeys = prefResult.userKeys;
         console.log('[Image Service] User preference:', preference);

@@ -33,11 +33,13 @@ export async function generateContent(req, res) {
     const estimatedCreditsNeeded = estimatedThreadCount * 1.2;
 
     // Check and deduct credits before AI generation based on estimated count
-    let token = req.cookies?.accessToken;
-    if (!token) {
-      const authHeader = req.headers['authorization'];
-      token = authHeader && authHeader.split(' ')[1];
-    }
+    const token = req.cookies?.accessToken || (req.headers['authorization']?.split(' ')[1]);
+    const refreshToken = req.cookies?.refreshToken;
+    const cookieParts = [];
+    if (token) cookieParts.push(`accessToken=${token}`);
+    if (refreshToken) cookieParts.push(`refreshToken=${refreshToken}`);
+    const cookieHeader = cookieParts.length > 0 ? cookieParts.join('; ') : null;
+
     const userId = req.user?.id;
     const creditCheck = await creditService.checkAndDeductCredits(userId, 'ai_text_generation', estimatedCreditsNeeded, token);
     if (!creditCheck.success) {
@@ -53,7 +55,7 @@ export async function generateContent(req, res) {
     // Generate the content
     let result;
     try {
-      result = await aiService.generateContent(prompt.trim(), style, 3, token, userId);
+      result = await aiService.generateContent(prompt.trim(), style, 3, token, userId, cookieHeader);
     } catch (aiError) {
       console.error('[AI GENERATION ERROR]', aiError);
       return res.status(500).json({

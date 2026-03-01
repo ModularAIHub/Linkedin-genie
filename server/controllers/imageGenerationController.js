@@ -20,11 +20,12 @@ export async function generateImage(req, res) {
     }
 
     // Get user token and ID for BYOK/Platform mode detection
-    let token = req.cookies?.accessToken;
-    if (!token) {
-      const authHeader = req.headers['authorization'];
-      token = authHeader && authHeader.split(' ')[1];
-    }
+    const token = req.cookies?.accessToken || (req.headers['authorization']?.split(' ')[1]);
+    const refreshToken = req.cookies?.refreshToken;
+    const cookieParts = [];
+    if (token) cookieParts.push(`accessToken=${token}`);
+    if (refreshToken) cookieParts.push(`refreshToken=${refreshToken}`);
+    const cookieHeader = cookieParts.length > 0 ? cookieParts.join('; ') : null;
     const userId = req.user?.id;
     const creditCost = 2;
 
@@ -42,7 +43,7 @@ export async function generateImage(req, res) {
       });
     }
 
-    const result = await imageGenerationService.generateImage(prompt.trim(), style, 'natural', token, userId);
+    const result = await imageGenerationService.generateImage(prompt.trim(), style, 'natural', token, userId, cookieHeader);
     res.json({ success: true, ...result, creditsUsed: creditCost });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Failed to generate image' });

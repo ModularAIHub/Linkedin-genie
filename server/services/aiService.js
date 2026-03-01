@@ -32,14 +32,24 @@ function checkRateLimit(userId) {
   return { allowed: true };
 }
 
-// Fetch user BYOK preference and keys with retry logic
-async function getUserPreferenceAndKeys(userToken, maxRetries = 3) {
+// Fetch user BYOK preference and keys with retry logic.
+// cookieHeader should include both accessToken and refreshToken cookies so
+// new-platform's authenticateToken can run its refresh-token fallback when
+// the short-lived (15m) accessToken has expired.
+async function getUserPreferenceAndKeys(userToken, maxRetries = 3, cookieHeader = null) {
   const baseUrl = process.env.NEW_PLATFORM_API_URL || 'http://localhost:3000/api';
-  
+
+  const buildHeaders = () => {
+    const headers = {};
+    if (cookieHeader) headers['Cookie'] = cookieHeader;
+    if (userToken) headers['Authorization'] = `Bearer ${userToken}`;
+    return headers;
+  };
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const prefRes = await axios.get(`${baseUrl}/byok/preference`, {
-        headers: { Authorization: `Bearer ${userToken}` },
+        headers: buildHeaders(),
         timeout: 5000
       });
       const preference = prefRes.data.api_key_preference;
@@ -47,7 +57,7 @@ async function getUserPreferenceAndKeys(userToken, maxRetries = 3) {
       
       if (preference === 'byok') {
         const keysRes = await axios.get(`${baseUrl}/byok/keys`, {
-          headers: { Authorization: `Bearer ${userToken}` },
+          headers: buildHeaders(),
           timeout: 5000
         });
         userKeys = keysRes.data.keys;
@@ -99,7 +109,7 @@ class AIService {
     return trimmed;
   }
 
-  async generateContent(prompt, style = 'casual', maxRetries = 3, userToken = null, userId = null) {
+  async generateContent(prompt, style = 'casual', maxRetries = 3, userToken = null, userId = null, cookieHeader = null) {
     // FIXED: Validate input
     const validatedPrompt = this.validatePrompt(prompt);
     const sanitizedPrompt = sanitizeInput(validatedPrompt);
@@ -134,7 +144,7 @@ class AIService {
     let userKeys = [];
     if (userToken) {
       try {
-        const prefResult = await getUserPreferenceAndKeys(userToken);
+        const prefResult = await getUserPreferenceAndKeys(userToken, 3, cookieHeader);
         preference = prefResult.preference;
         userKeys = prefResult.userKeys;
         // FIXED: Don't log API keys, only metadata
@@ -462,7 +472,7 @@ Generate the post now:`;
     return content;
   }
 
-  async generateStrategyContent(prompt, style = 'professional', userToken = null, userId = null) {
+  async generateStrategyContent(prompt, style = 'professional', userToken = null, userId = null, cookieHeader = null) {
     const validatedPrompt = this.validatePrompt(prompt);
     const sanitizedPrompt = sanitizeInput(validatedPrompt);
 
@@ -478,7 +488,7 @@ Generate the post now:`;
 
     if (userToken) {
       try {
-        const prefResult = await getUserPreferenceAndKeys(userToken);
+        const prefResult = await getUserPreferenceAndKeys(userToken, 3, cookieHeader);
         preference = prefResult.preference;
         userKeys = prefResult.userKeys;
       } catch (err) {

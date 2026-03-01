@@ -6,15 +6,19 @@ export const getCurrentAccountId = (selectedAccount) => {
   if (!selectedAccount) return null;
   const accountId = selectedAccount.account_id || selectedAccount.id;
 
-  if (selectedAccount.account_type === 'organization' && selectedAccount.isTeamAccount === false) {
+  // Team accounts (both personal and org): always return the UUID so the server
+  // can route to the exact social_connected_accounts row.
+  if (selectedAccount.isTeamAccount === true) {
+    return accountId || null;
+  }
+
+  // Non-team org pages: return the account id (e.g. 'org:12345')
+  if (selectedAccount.account_type === 'organization') {
     return accountId;
   }
 
-  if (selectedAccount.account_type === 'personal' || selectedAccount.isTeamAccount === false) {
-    return null;
-  }
-
-  return accountId;
+  // Non-team personal accounts: no account id needed, server uses default.
+  return null;
 };
 
 const AccountContext = createContext();
@@ -34,6 +38,16 @@ export const AccountProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
   const [teams, setTeams] = useState([]);
   const accountsRequestInFlightRef = useRef(false);
+
+  const getDefaultAccount = useCallback((fetchedAccounts) => {
+    if (!Array.isArray(fetchedAccounts) || fetchedAccounts.length === 0) return null;
+
+    const organizationAccount = fetchedAccounts.find(
+      (account) => account?.account_type === 'organization'
+    );
+
+    return organizationAccount || fetchedAccounts[0];
+  }, []);
 
   const updateSelectedAccount = useCallback((account) => {
     setSelectedAccount(account);
@@ -97,7 +111,7 @@ export const AccountProvider = ({ children }) => {
       }
 
       if (!accountToSelect) {
-        accountToSelect = fetchedAccounts[0];
+        accountToSelect = getDefaultAccount(fetchedAccounts);
       }
 
       updateSelectedAccount(accountToSelect);
@@ -109,7 +123,7 @@ export const AccountProvider = ({ children }) => {
       setLoading(false);
       accountsRequestInFlightRef.current = false;
     }
-  }, [updateSelectedAccount]);
+  }, [getDefaultAccount, updateSelectedAccount]);
 
   useEffect(() => {
     if (authLoading) return;

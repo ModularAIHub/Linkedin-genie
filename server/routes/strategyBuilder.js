@@ -234,6 +234,11 @@ router.post('/:id/add-on', async (req, res) => {
 
       const authHeader = req.headers['authorization'];
       const token = req.cookies?.accessToken || (authHeader && authHeader.split(' ')[1]) || null;
+      const refreshToken = req.cookies?.refreshToken;
+      const cookieParts = [];
+      if (token) cookieParts.push(`accessToken=${token}`);
+      if (refreshToken) cookieParts.push(`refreshToken=${refreshToken}`);
+      const cookieHeader = cookieParts.length > 0 ? cookieParts.join('; ') : null;
 
       try {
         const aiPrompt = [
@@ -247,7 +252,8 @@ router.post('/:id/add-on', async (req, res) => {
           aiPrompt,
           'professional',
           token,
-          userId
+          userId,
+          cookieHeader
         );
 
         additions = parseAddonAIOutput(aiResult?.content || '');

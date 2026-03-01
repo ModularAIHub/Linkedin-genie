@@ -11,6 +11,12 @@ const AccountSwitcher = () => {
     setIsOpen(false);
   };
 
+  const getAccountScopeLabel = (account) => {
+    if (!account) return '';
+    if (account.account_type === 'organization') return 'Organization Page';
+    return account.isTeamAccount ? 'Team Personal Profile' : 'Personal Profile';
+  };
+
   if (!accounts || accounts.length === 0) {
     return null;
   }
@@ -80,11 +86,9 @@ const AccountSwitcher = () => {
                             <span className="text-sm font-medium text-gray-900">
                               {account.linkedin_display_name || account.linkedin_username}
                             </span>
-                            {account.headline && (
-                              <span className="text-xs text-gray-500 truncate max-w-[200px]">
-                                {account.headline}
-                              </span>
-                            )}
+                            <span className="text-xs text-gray-500 truncate max-w-[200px]">
+                              {getAccountScopeLabel(account)}
+                            </span>
                           </div>
                         </div>
                         {selectedAccount?.id === account.id && (
@@ -130,7 +134,7 @@ const AccountSwitcher = () => {
                               {account.linkedin_display_name || account.linkedin_username}
                             </span>
                             <span className="text-xs text-blue-600">
-                              Team: {account.team_name}
+                              {getAccountScopeLabel(account)} • Team: {account.team_name}
                             </span>
                           </div>
                         </div>

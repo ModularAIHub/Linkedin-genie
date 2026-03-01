@@ -19,6 +19,7 @@ const LinkedInConnect = () => {
   const oauthMessageReceivedRef = useRef(false);
   const popupPollRef = useRef(null);
   const autoClosingSelectionRef = useRef(false);
+  const refreshAccountsRef = useRef(refreshAccounts);
   const location = useLocation();
   const navigate = useNavigate();
   const isInTeam = Array.isArray(teams) && teams.length > 0;
@@ -77,11 +78,27 @@ const LinkedInConnect = () => {
     );
   };
 
+  const personalOrganizationIdsKey = getOrganizationIds(
+    personalAccounts.map((account) => ({
+      id:
+        account?.organization_id ||
+        (typeof account?.account_id === 'string' && account.account_id.startsWith('org:')
+          ? account.account_id.slice(4)
+          : null),
+    }))
+  ).join('|');
+
+  const availableOrganizationIdsKey = getOrganizationIds(availableOrganizations).join('|');
+
+  useEffect(() => {
+    refreshAccountsRef.current = refreshAccounts;
+  }, [refreshAccounts]);
+
   const refreshAccountsWithRetry = async () => {
     try {
-      await refreshAccounts();
+      await refreshAccountsRef.current?.();
       setTimeout(() => {
-        refreshAccounts().catch(() => {});
+        refreshAccountsRef.current?.()?.catch(() => {});
       }, 1200);
     } catch {
       // Ignore and let normal UI fetch cycle continue
@@ -143,8 +160,8 @@ const LinkedInConnect = () => {
       try {
         const parsed = JSON.parse(event.newValue);
         if (!parsed || Date.now() - (parsed.timestamp || 0) > 15 * 60 * 1000) return;
-        await handleOAuthResult(parsed);
         localStorage.removeItem(OAUTH_RESULT_KEY);
+        await handleOAuthResult(parsed);
       } catch {
         // Ignore malformed data.
       }
@@ -159,8 +176,8 @@ const LinkedInConnect = () => {
           localStorage.removeItem(OAUTH_RESULT_KEY);
           return;
         }
-        await handleOAuthResult(parsed);
         localStorage.removeItem(OAUTH_RESULT_KEY);
+        await handleOAuthResult(parsed);
       } catch {
         // Ignore malformed data.
       }
@@ -178,7 +195,7 @@ const LinkedInConnect = () => {
         popupPollRef.current = null;
       }
     };
-  }, [refreshAccounts]);
+  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -269,8 +286,8 @@ const LinkedInConnect = () => {
     location.search,
     showAccountSelection,
     pendingSelectionId,
-    availableOrganizations,
-    personalAccounts,
+    availableOrganizationIdsKey,
+    personalOrganizationIdsKey,
     navigate,
   ]);
 
@@ -295,7 +312,7 @@ const LinkedInConnect = () => {
     setPendingSelectionId(null);
     clearPendingSelection();
     navigate('/settings?linkedin_connected=true', { replace: true });
-  }, [showAccountSelection, availableOrganizations, personalAccounts, navigate]);
+  }, [showAccountSelection, availableOrganizationIdsKey, personalOrganizationIdsKey, navigate]);
 
   const handleAccountTypeSelection = async ({ accountType, organization = null }) => {
     setSelectingAccount(true);
