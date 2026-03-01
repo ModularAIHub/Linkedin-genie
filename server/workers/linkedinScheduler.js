@@ -952,6 +952,10 @@ async function processScheduledPost(post) {
   return linkedinResult?.id || linkedinResult?.urn || null;
 }
 
+export async function runSchedulerTick() {
+  return schedulerTick();
+}
+
 async function schedulerTick() {
   if (tickInProgress) return;
   if (nextAllowedTickAt && Date.now() < nextAllowedTickAt) {

@@ -269,42 +269,48 @@ const History = () => {
   }
 
   return (
-    <div className="space-y-6 p-4 sm:p-0">
+    <div className="space-y-6 pb-8">
       {/* Header & Account Selector */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 flex items-center">
-            <HistoryIcon className="h-6 w-6 sm:h-8 sm:w-8 mr-2 sm:mr-3 text-blue-600" />
-            LinkedIn Post History
-          </h1>
-          <p className="mt-2 text-sm sm:text-base text-gray-600">
-            View and analyze your posted LinkedIn content
-          </p>
+      <div className="bg-white rounded-lg p-6 border border-gray-200 shadow-sm">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <div className="flex items-center space-x-3 mb-2">
+              <div className="p-2.5 bg-blue-700 rounded-lg">
+                <HistoryIcon className="h-5 w-5 text-white" />
+              </div>
+              <h1 className="text-2xl font-semibold text-gray-900">
+                LinkedIn Post History
+              </h1>
+            </div>
+            <p className="text-gray-600 text-sm ml-12">
+              View and analyze your posted LinkedIn content
+            </p>
+          </div>
+          <AccountSelector
+            accounts={accounts || []}
+            selectedAccount={selectedAccount}
+            onSelect={account => {
+              if (typeof window !== 'undefined' && window.setSelectedAccount) {
+                window.setSelectedAccount(account);
+              } else {
+                window.location.reload();
+              }
+            }}
+            label="Account"
+          />
         </div>
-        <AccountSelector
-          accounts={accounts || []}
-          selectedAccount={selectedAccount}
-          onSelect={account => {
-            if (typeof window !== 'undefined' && window.setSelectedAccount) {
-              window.setSelectedAccount(account);
-            } else {
-              window.location.reload();
-            }
-          }}
-          label="Account"
-        />
       </div>
 
       {/* Filters and Controls */}
-      <div className="card">
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
         <div className="space-y-6">
           {/* First Row: Time Filter and Sort */}
-          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between space-y-4 lg:space-y-0">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
             {/* Time Filter */}
-            <div className="flex flex-col sm:flex-row sm:items-center space-y-2 sm:space-y-0 sm:space-x-4">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3">
               <div className="flex items-center space-x-2">
                 <Filter className="h-4 w-4 text-gray-500" />
-                <span className="text-sm font-medium text-gray-700">Time:</span>
+                <span className="text-sm font-medium text-gray-700">Time Period</span>
               </div>
               <div className="flex flex-wrap gap-2">
                 {[
@@ -316,10 +322,10 @@ const History = () => {
                   <button
                     key={option.value}
                     onClick={() => setFilter(option.value)}
-                    className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all cursor-pointer ${
                       filter === option.value
-                        ? 'bg-blue-100 text-blue-700 border border-blue-200'
-                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-transparent'
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                     }`}
                   >
                     {option.label}
@@ -329,12 +335,12 @@ const History = () => {
             </div>
 
             {/* Sort Options */}
-            <div className="flex items-center space-x-3">
-              <span className="text-sm font-medium text-gray-700">Sort:</span>
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-medium text-gray-700">Sort by</span>
               <select
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value)}
-                className="px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white cursor-pointer hover:border-gray-400 transition-colors"
               >
                 <option value="newest">Newest First</option>
                 <option value="oldest">Oldest First</option>
@@ -345,12 +351,12 @@ const History = () => {
           </div>
 
           {/* Second Row: Source and Status Filters */}
-          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between space-y-4 lg:space-y-0">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 pt-4 border-t border-gray-100">
             {/* Source Filter */}
-            <div className="flex flex-col sm:flex-row sm:items-center space-y-2 sm:space-y-0 sm:space-x-4">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3">
               <div className="flex items-center space-x-2">
                 <ExternalLink className="h-4 w-4 text-gray-500" />
-                <span className="text-sm font-medium text-gray-700">Source:</span>
+                <span className="text-sm font-medium text-gray-700">Source</span>
               </div>
               <div className="flex flex-wrap gap-2">
                 {[
@@ -361,10 +367,10 @@ const History = () => {
                   <button
                     key={option.value}
                     onClick={() => setSourceFilter(option.value)}
-                    className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all cursor-pointer ${
                       sourceFilter === option.value
-                        ? 'bg-green-100 text-green-700 border border-green-200'
-                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-transparent'
+                        ? 'bg-green-600 text-white shadow-sm'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                     }`}
                   >
                     {option.label}
@@ -374,10 +380,10 @@ const History = () => {
             </div>
 
             {/* Status Filter */}
-            <div className="flex flex-col sm:flex-row sm:items-center space-y-2 sm:space-y-0 sm:space-x-4">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3">
               <div className="flex items-center space-x-2">
                 <Calendar className="h-4 w-4 text-gray-500" />
-                <span className="text-sm font-medium text-gray-700">Status:</span>
+                <span className="text-sm font-medium text-gray-700">Status</span>
               </div>
               <div className="flex flex-wrap gap-2">
                 {[
@@ -388,10 +394,10 @@ const History = () => {
                   <button
                     key={option.value}
                     onClick={() => setStatusFilter(option.value)}
-                    className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all cursor-pointer ${
                       statusFilter === option.value
-                        ? 'bg-purple-100 text-purple-700 border border-purple-200'
-                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-transparent'
+                        ? 'bg-purple-600 text-white shadow-sm'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                     }`}
                   >
                     {option.label}
@@ -405,14 +411,18 @@ const History = () => {
 
       {/* Stats Summary */}
       {postedPosts.length > 0 && (
-        <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-4 gap-4 sm:gap-6">
-          <div className="card text-center">
-            <div className="text-2xl font-bold text-blue-600">
-              {postedPosts.length}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="bg-white rounded-lg border border-gray-200 p-4 hover:shadow-md transition-shadow">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-2xl font-semibold text-gray-900">
+                  {postedPosts.length}
+                </div>
+                <div className="text-sm text-gray-600 mt-1">Total Posts</div>
+              </div>
+              <MessageCircle className="h-8 w-8 text-blue-700" />
             </div>
-            <div className="text-sm text-gray-600">Total Posts</div>
           </div>
-          {/* Analytics summary removed from History page */}
         </div>
       )}
 
@@ -426,38 +436,59 @@ const History = () => {
             return (
               <div
                 key={postId}
-                className={`card p-4 sm:p-6 hover:shadow-md transition-shadow${idx !== postedPosts.length - 1 ? ' border-b-2 border-blue-200' : ''}`}
+                className="bg-white rounded-lg border border-gray-200 hover:shadow-md transition-all p-5"
               >
-                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+                <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     {/* Post Header */}
-                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 mb-3">
-                      <div className="flex items-center flex-wrap gap-2">
-                        <div className="h-8 w-8 bg-blue-700 rounded-sm flex items-center justify-center flex-shrink-0">
-                          <span className="text-white text-sm font-medium">in</span>
+                    <div className="flex flex-wrap items-center gap-2 mb-3">
+                      <div className="flex items-center space-x-2">
+                        <div className="h-9 w-9 bg-blue-700 rounded flex items-center justify-center">
+                          <span className="text-white text-sm font-semibold">in</span>
                         </div>
-                        {/* Source Indicator */}
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                      </div>
+                      
+                      {/* Badges Row */}
+                      <div className="flex flex-wrap items-center gap-2">
+                        {/* Source Badge */}
+                        <span className={`px-2.5 py-1 rounded-md text-xs font-medium ${
                           post.source === 'external' 
-                            ? 'bg-green-100 text-green-700' 
-                            : 'bg-blue-100 text-blue-700'
+                            ? 'bg-green-100 text-green-700 border border-green-200' 
+                            : 'bg-blue-100 text-blue-700 border border-blue-200'
                         }`}>
-                          {post.source === 'external' ? '🔗 LinkedIn' : '🚀 Platform'}
+                          {post.source === 'external' ? 'LinkedIn' : 'Platform'}
                         </span>
-                        {/* Status Indicator */}
+                        
+                        {/* Status Badge */}
                         {post.status === 'deleted' && (
-                          <span className="px-2 py-1 bg-red-100 text-red-700 rounded-full text-xs font-medium">
-                            🗑️ Deleted
+                          <span className="px-2.5 py-1 bg-red-100 text-red-700 border border-red-200 rounded-md text-xs font-medium">
+                            Deleted
                           </span>
                         )}
                         {post.status === 'posted' && (
-                          <span className="px-2 py-1 bg-green-100 text-green-700 rounded-full text-xs font-medium">
-                            ✅ Live
+                          <span className="px-2.5 py-1 bg-green-100 text-green-700 border border-green-200 rounded-md text-xs font-medium">
+                            Live
+                          </span>
+                        )}
+                        
+                        {/* AI Generated Badge */}
+                        {post.ai_generated && (
+                          <span className="px-2.5 py-1 bg-purple-100 text-purple-700 border border-purple-200 rounded-md text-xs font-medium">
+                            AI Generated
+                          </span>
+                        )}
+                        
+                        {/* Scheduled Badge */}
+                        {post.scheduled_for && (
+                          <span className="px-2.5 py-1 bg-amber-100 text-amber-700 border border-amber-200 rounded-md text-xs font-medium">
+                            Scheduled
                           </span>
                         )}
                       </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs sm:text-sm text-gray-500">
+                      
+                      {/* Time and Link */}
+                      <div className="flex items-center gap-2 ml-auto">
+                        <span className="text-xs text-gray-500 font-medium">
                           {formatDate(post.display_created_at || post.posted_at || post.created_at)}
                         </span>
                         {getPostUrl(post) && (
@@ -465,7 +496,7 @@ const History = () => {
                             href={getPostUrl(post)}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="text-blue-500 hover:text-blue-700"
+                            className="p-1.5 text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded-md transition-colors cursor-pointer"
                             title="View on LinkedIn"
                           >
                             <ExternalLink className="h-4 w-4" />
@@ -475,30 +506,31 @@ const History = () => {
                     </div>
                     
                     {/* Post Content */}
-                    <p className="text-sm sm:text-base text-gray-900 mb-4 whitespace-pre-wrap break-words">
+                    <p className="text-gray-900 mb-4 whitespace-pre-wrap leading-relaxed break-words">
                       {post.post_content}
                     </p>
 
                     {/* Media Indicators */}
                     {mediaCount > 0 && (
                       <div className="mb-4">
-                        <div className="flex items-center text-sm text-gray-500">
-                          <span>📷 {mediaCount} media file(s) attached</span>
+                        <div className="flex items-center gap-2 text-sm bg-blue-50 text-blue-700 px-3 py-2 rounded-md border border-blue-200 w-fit">
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                          </svg>
+                          <span className="font-medium">{mediaCount} media file(s)</span>
                         </div>
                       </div>
                     )}
-                    
-                    {/* Engagement/analytics metrics removed from History post cards */}
                   </div>
 
                   {/* Action Buttons */}
-                  <div className="ml-4 flex flex-col items-end space-y-2">
+                  <div className="flex flex-col items-end space-y-2">
                     {/* Delete Button - Only for platform posts */}
                     {post.source !== 'external' && (
                       <button
                         onClick={() => handleDeletePost(post)}
                         disabled={deletingPosts.has(postId)}
-                        className="flex items-center px-2 py-1 text-red-600 hover:text-red-800 hover:bg-red-50 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="flex items-center gap-2 px-3 py-2 text-red-600 hover:text-white hover:bg-red-600 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer border border-red-200 hover:border-red-600 font-medium"
                         title="Delete post from history"
                       >
                         {deletingPosts.has(postId) ? (
@@ -506,33 +538,23 @@ const History = () => {
                         ) : (
                           <Trash2 className="h-4 w-4" />
                         )}
-                        <span className="ml-1 text-xs">Delete</span>
+                        <span className="text-xs font-medium">Delete</span>
                       </button>
                     )}
 
                     {/* External Post Info */}
                     {post.source === 'external' && (
-                      <div className="text-xs text-gray-500 bg-gray-50 px-2 py-1 rounded">
-                        From LinkedIn
+                      <div className="text-xs text-gray-600 bg-gray-100 px-3 py-2 rounded-md font-medium border border-gray-200">
+                        Posted via LinkedIn
                       </div>
                     )}
-
-                    {/* Badges */}
-                    <div className="flex flex-col space-y-1">
-                      {post.scheduled_for && (
-                        <span className="badge badge-warning text-xs">Scheduled</span>
-                      )}
-                      {post.ai_generated && (
-                        <span className="badge badge-info text-xs">AI Generated</span>
-                      )}
-                    </div>
                   </div>
                 </div>
               </div>
             );
           })
         ) : (
-          <div className="card text-center py-12">
+          <div className="bg-white rounded-lg border border-gray-200 text-center py-12 px-6">
             <HistoryIcon className="h-12 w-12 text-gray-400 mx-auto mb-4" />
             <h3 className="text-lg font-medium text-gray-900 mb-2">
               No posted content found
@@ -545,7 +567,7 @@ const History = () => {
             </p>
             <a
               href="/compose"
-              className="btn btn-primary btn-md"
+              className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors cursor-pointer font-medium"
             >
               <MessageCircle className="h-4 w-4 mr-2" />
               Create Your First Post

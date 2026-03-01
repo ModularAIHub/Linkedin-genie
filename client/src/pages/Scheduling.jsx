@@ -1,6 +1,7 @@
 ﻿import React, { useState, useEffect } from 'react';
 import { Calendar, Clock, Trash2, Pause, CalendarCheck, AlertCircle, CheckCircle, XCircle, RefreshCw, RotateCcw } from 'lucide-react';
 import LoadingSpinner from '../components/LoadingSpinner';
+import toast from 'react-hot-toast';
 import { useAccountAwareAPI } from '../hooks/useAccountAwareAPI';
 
 const TIMEZONE_ALIAS_MAP = {
@@ -100,7 +101,11 @@ const Scheduling = () => {
     try {
       setLoading(true);
       const response = await fetchForCurrentAccount(`/api/schedule?status=${encodeURIComponent(filter)}`);
-      const data = response.ok ? await response.json() : { posts: [] };
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData?.error || 'Failed to load scheduled posts');
+      }
+      const data = await response.json();
       setScheduledPosts(data.posts || []);
 
       try {
@@ -110,8 +115,9 @@ const Scheduling = () => {
       } catch {
         setSchedulerInfo(null);
       }
-    } catch {
+    } catch (err) {
       setScheduledPosts([]);
+      toast.error(err?.message || 'Failed to load scheduled posts');
     } finally {
       setLoading(false);
     }
@@ -119,37 +125,52 @@ const Scheduling = () => {
 
   const handleCancel = async (scheduleId) => {
     try {
-      await fetchForCurrentAccount('/api/schedule/cancel', {
+      const response = await fetchForCurrentAccount('/api/schedule/cancel', {
         method: 'POST',
         body: JSON.stringify({ id: scheduleId })
       });
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData?.error || 'Failed to cancel post');
+      }
+      toast.success('Scheduled post cancelled');
       fetchScheduledPosts();
-    } catch {
-      // Keep page responsive even when cancel request fails.
+    } catch (err) {
+      toast.error(err?.message || 'Failed to cancel scheduled post');
     }
   };
 
   const handleDelete = async (scheduleId) => {
     if (!window.confirm('Are you sure you want to delete this scheduled post?')) return;
     try {
-      await fetchForCurrentAccount(`/api/schedule/${scheduleId}`, {
+      const response = await fetchForCurrentAccount(`/api/schedule/${scheduleId}`, {
         method: 'DELETE'
       });
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData?.error || 'Failed to delete post');
+      }
+      toast.success('Scheduled post deleted');
       fetchScheduledPosts();
-    } catch {
-      // Keep page responsive even when delete request fails.
+    } catch (err) {
+      toast.error(err?.message || 'Failed to delete scheduled post');
     }
   };
 
   const handleRetry = async (scheduleId) => {
     try {
-      await fetchForCurrentAccount('/api/schedule/retry', {
+      const response = await fetchForCurrentAccount('/api/schedule/retry', {
         method: 'POST',
         body: JSON.stringify({ id: scheduleId })
       });
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData?.error || 'Failed to retry post');
+      }
+      toast.success('Retry queued');
       fetchScheduledPosts();
-    } catch {
-      // Keep page responsive even when retry request fails.
+    } catch (err) {
+      toast.error(err?.message || 'Failed to retry scheduled post');
     }
   };
 
@@ -344,7 +365,19 @@ const Scheduling = () => {
                       </div>
                     </td>
                     <td className="px-6 py-4">
-                      {getStatusBadge(post.status)}
+                      <div className="space-y-1">
+                        {getStatusBadge(post.status)}
+                        {post.status === 'failed' && post.error_message && (
+                          <p className="text-xs text-red-600 max-w-xs truncate" title={post.error_message}>
+                            {post.error_message}
+                          </p>
+                        )}
+                        {['completed'].includes(post.status) && post.posted_at && (
+                          <p className="text-xs text-gray-500">
+                            Posted {formatTimePart(post.posted_at, displayTimezone)}
+                          </p>
+                        )}
+                      </div>
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex items-center justify-end gap-2">

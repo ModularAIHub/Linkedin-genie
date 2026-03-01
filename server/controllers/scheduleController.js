@@ -246,11 +246,10 @@ function buildExternalLinkedInScheduledRow(row) {
       ? linkedinCrossPostMeta.last_result.linkedin
       : null;
   const targetAccountId = resolveTweetGenieLinkedInTargetAccountId(metadata);
-  const fallbackTeamId =
-    row?.team_id !== undefined && row?.team_id !== null && String(row.team_id).trim()
-      ? String(row.team_id).trim()
-      : null;
-  const companyId = targetAccountId || fallbackTeamId;
+  // Do NOT fall back to row.team_id: that is a Twitter team ID, not a LinkedIn
+  // company/team ID. Using it would cause the LinkedIn team-mode company_id filter
+  // to never match, hiding cross-posted rows in team mode.
+  const companyId = targetAccountId || null;
   const fallbackMedia = Array.isArray(linkedinCrossPostMeta?.media) ? linkedinCrossPostMeta.media : [];
 
   const mappedStatus = mapTweetGenieLinkedInCrossScheduleStatus(row);
@@ -270,7 +269,7 @@ function buildExternalLinkedInScheduledRow(row) {
     error_message:
       row.error_message ||
       (linkedinLastResult?.status && linkedinLastResult.status !== 'posted'
-        ? `Tweet Genie cross-post status: ${linkedinLastResult.status}`
+        ? `LinkedIn cross-post status: ${linkedinLastResult.status}`
         : null),
     is_external_cross_post: true,
     external_source: 'tweet-genie',
@@ -282,7 +281,7 @@ function buildExternalLinkedInScheduledRow(row) {
       linkedin_status: linkedinLastResult?.status || null,
       last_attempted_at: linkedinCrossPostMeta?.last_attempted_at || null,
       target_account_id: targetAccountId,
-      team_id: fallbackTeamId,
+      team_id: null,
     },
   };
 }
@@ -375,39 +374,30 @@ async function fetchExternalTweetGenieLinkedInCrossSchedules(
   {
     status,
     limit = EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT,
-    teamId = null,
-    scopedCompanyIds = [],
   } = {}
 ) {
   const safeLimit = Math.max(1, Math.min(EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT, Number(limit) || EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT));
-  const normalizedTeamId = teamId ? String(teamId).trim() : null;
-  const ownerClause = normalizedTeamId
-    ? `team_id::text = $1::text`
-    : `user_id = $1 AND team_id IS NULL`;
-  const ownerValue = normalizedTeamId || userId;
-  const normalizedScopedCompanyIds = Array.isArray(scopedCompanyIds)
-    ? scopedCompanyIds.map((value) => String(value || '').trim()).filter(Boolean)
-    : [];
+  // Always query by user_id — scheduled_tweets.team_id is a Twitter-app team ID
+  // which has no relation to LinkedIn team IDs. Cross-app ownership is correctly
+  // established through the shared user_id.
 
   const { rows } = await pool.query(
     `SELECT id, user_id, team_id, content, media_urls, scheduled_for, timezone, status, error_message, metadata, created_at, updated_at, posted_at
      FROM scheduled_tweets
-     WHERE ${ownerClause}
+     WHERE user_id = $1
        AND (
          metadata->'cross_post'->'targets'->>'linkedin' = 'true'
        )
      ORDER BY scheduled_for DESC
      LIMIT $2`,
-    [ownerValue, safeLimit]
+    [userId, safeLimit]
   );
 
   const mapped = rows
-    .map(buildExternalLinkedInScheduledRow)
-    .filter((row) => {
-      if (normalizedScopedCompanyIds.length === 0) return true;
-      const companyId = row?.company_id !== undefined && row?.company_id !== null ? String(row.company_id).trim() : '';
-      return companyId ? normalizedScopedCompanyIds.includes(companyId) : false;
-    });
+    .map(buildExternalLinkedInScheduledRow);
+  // Note: company_id on external rows is the LinkedIn targetAccountId from metadata.
+  // We do NOT filter by scopedCompanyIds here – rows with company_id=null are shown
+  // because we cannot reliably map Twitter team IDs to LinkedIn company IDs.
   if (!status) return mapped;
 
   const normalizedStatus = String(status).toLowerCase();
@@ -614,10 +604,16 @@ export async function getScheduledPosts(req, res) {
       ? [String(teamAccount.team_id), String(teamAccount.id)]
       : undefined;
 
+    // Fetch internal posts with a wider window (internal + external cap) so that
+    // when external rows are merged and the final slice is applied, the page has
+    // enough rows to fill correctly without double-cutting.
+    const safeOffset = offset ? parseInt(offset) : 0;
+    const safeLimit = limit ? parseInt(limit) : 20;
+    const internalFetchLimit = safeLimit + EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT;
     const internalPosts = await findByUser(userId, {
       status,
-      limit: limit ? parseInt(limit) : 20,
-      offset: offset ? parseInt(offset) : 0,
+      limit: internalFetchLimit,
+      offset: 0,
       companyIds
     });
 
@@ -629,8 +625,6 @@ export async function getScheduledPosts(req, res) {
         fetchExternalTweetGenieLinkedInCrossSchedules(userId, {
           status,
           limit: EXTERNAL_CROSS_SCHEDULE_FETCH_LIMIT,
-          teamId: teamAccount ? teamAccount.team_id : null,
-          scopedCompanyIds: teamAccount ? companyIds : [],
         }),
         fetchExternalSocialGenieLinkedInCrossSchedules(userId, {
           status,
@@ -651,8 +645,6 @@ export async function getScheduledPosts(req, res) {
     const mergedPosts = [...internalPosts, ...externalPosts]
       .sort((a, b) => new Date(b.scheduled_time).getTime() - new Date(a.scheduled_time).getTime());
 
-    const safeOffset = offset ? parseInt(offset) : 0;
-    const safeLimit = limit ? parseInt(limit) : 20;
     const pagedPosts = mergedPosts.slice(safeOffset, safeOffset + safeLimit);
 
     res.json({ posts: pagedPosts });

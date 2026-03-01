@@ -19,6 +19,7 @@ import errorHandler from './middleware/errorHandler.js';
 import { logger } from './utils/logger.js';
 import internalAuth from './middleware/internalAuth.js';
 import pool from './config/database.js';
+import { runSchedulerTick } from './workers/linkedinScheduler.js';
 
 dotenv.config({ quiet: true });
 
@@ -254,6 +255,25 @@ app.use('/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 // Cleanup routes
 app.use('/api/cleanup', cleanupRoutes);
+
+// Vercel Cron trigger for the LinkedIn post scheduler.
+// Called every minute by Vercel (see server/vercel.json). Auth via CRON_SECRET.
+// setInterval workers are killed between Vercel requests — this is their replacement.
+app.post('/api/cron/scheduler', async (req, res) => {
+  const cronSecret = (process.env.CRON_SECRET || '').trim();
+  const authHeader = req.headers['authorization'] || '';
+  const providedToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+  if (!cronSecret || providedToken !== cronSecret) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    await runSchedulerTick();
+    return res.json({ ok: true });
+  } catch (error) {
+    logger.error('[LinkedInSchedulerCron] Tick failed', error);
+    return res.status(500).json({ ok: false, error: error?.message || 'unknown_error' });
+  }
+});
 
 // Internal auth runs first on all remaining requests
 app.use(internalAuth);

@@ -432,7 +432,7 @@ const useLinkedInPostComposer = () => {
       };
       
       // Use account-aware API to schedule with selected account
-      await postForCurrentAccount('/api/schedule', {
+      const scheduleResponse = await postForCurrentAccount('/api/schedule', {
         post_content: unicodeContent,
         media_urls,
         post_type: 'single_post',
@@ -454,9 +454,24 @@ const useLinkedInPostComposer = () => {
           ...(crossPostMedia.length > 0 ? { crossPostMedia } : {}),
         }),
       });
-      
+
+      // fetch() doesn't throw on HTTP errors — check response.ok explicitly
+      if (!scheduleResponse.ok) {
+        let serverError = 'Failed to schedule post';
+        try {
+          const errData = await scheduleResponse.json();
+          serverError = errData?.error || errData?.message || serverError;
+        } catch { /* ignore parse error */ }
+        throw new Error(serverError);
+      }
+
+      const scheduleData = await scheduleResponse.json().catch(() => ({}));
+      const needsApproval = scheduleData?.approval_status === 'pending_approval';
+
       const accountInfo = selectedAccount?.linkedin_display_name || selectedAccount?.linkedin_username || 'LinkedIn';
-      if (hasAnyCrossPostTarget) {
+      if (needsApproval) {
+        toast.success('Post submitted for approval. An admin will need to approve it before it publishes.');
+      } else if (hasAnyCrossPostTarget) {
         const labels = [];
         if (normalizedCrossPost.x) labels.push('X');
         if (normalizedCrossPost.threads) labels.push('Threads');
@@ -468,7 +483,8 @@ const useLinkedInPostComposer = () => {
       setContent('');
       setSelectedImages([]);
     } catch (err) {
-      toast.error('Failed to schedule post');
+      const errMsg = err?.message || 'Failed to schedule post';
+      toast.error(errMsg);
     } finally {
       setIsScheduling(false);
     }

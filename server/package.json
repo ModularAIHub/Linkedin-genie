@@ -5,6 +5,7 @@
   "description": "Backend for LinkedIn Genie (mirrored from Tweet Genie)",
   "main": "index.js",
   "scripts": {
+    "worker": "node scheduler.js",
     "start": "node index.js",
     "start:api": "node index.js",
     "start:scheduler": "node scheduler.js",

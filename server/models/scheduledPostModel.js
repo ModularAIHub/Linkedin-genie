@@ -115,8 +115,13 @@ export async function findByUser(user_id, { limit = 20, offset = 0, status, comp
   const filters = [];
 
   if (Array.isArray(companyIds) && companyIds.length > 0) {
-    params.push(companyIds.map(String));
-    filters.push(`company_id::text = ANY($${params.length}::text[])`);
+    const companyIdx = params.push(companyIds.map(String)); // e.g. $1
+    const userIdx = params.push(user_id);                   // e.g. $2
+    // Include rows that belong to one of the scoped company IDs, OR rows the
+    // user created without a company_id (e.g. before team accounts were set up).
+    filters.push(
+      `(company_id::text = ANY($${companyIdx}::text[]) OR (company_id IS NULL AND user_id = $${userIdx}))`
+    );
   } else {
     params.push(user_id);
     filters.push(`user_id = $${params.length}`);
