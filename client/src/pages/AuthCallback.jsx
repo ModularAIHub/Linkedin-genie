@@ -12,9 +12,17 @@ export default function AuthCallback() {
     const status = params.get('status') === 'error' ? 'error' : 'success';
     const reason = params.get('reason') || null;
     const message = params.get('message') || null;
+    const selectAccount = params.get('select_account') === 'true';
+    const selectionId = params.get('selectionId') || null;
+    const organizations = params.get('organizations') || null;
 
     const eventPayload = status === 'success'
-      ? { type: 'linkedin_auth_success' }
+      ? {
+          type: 'linkedin_auth_success',
+          selectAccount,
+          selectionId,
+          organizations: organizations ? JSON.parse(organizations) : undefined,
+        }
       : { type: 'linkedin_auth_error', reason, message };
 
     try {
@@ -24,6 +32,9 @@ export default function AuthCallback() {
           status,
           reason,
           message,
+          selectAccount,
+          selectionId,
+          organizations: organizations ? JSON.parse(organizations) : undefined,
           timestamp: Date.now()
         })
       );
@@ -41,7 +52,7 @@ export default function AuthCallback() {
     }
 
     if (status === 'success') {
-      navigate('/settings?linkedin_connected=true', { replace: true });
+      navigate(`/settings${location.search ? `?${params.toString()}` : '?linkedin_connected=true'}`, { replace: true });
       return;
     }
 

@@ -216,7 +216,10 @@ export async function getAccounts(req, res) {
     console.log('[getAccounts] User is not in team, returning personal account');
     const { rows: personalAccounts } = await pool.query(
       `SELECT 
-        'personal' as account_type,
+        COALESCE(account_type, 'personal') as account_type,
+        organization_id,
+        organization_name,
+        organization_vanity_name,
         NULL as account_id,
         NULL as team_id,
         NULL as team_name,
@@ -228,15 +231,29 @@ export async function getAccounts(req, res) {
         connections_count,
         headline
        FROM linkedin_auth 
-       WHERE user_id = $1`,
+       WHERE user_id = $1
+       ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC
+       LIMIT 1`,
       [userId]
     );
 
-    const accounts = personalAccounts.map(acc => ({
-      ...acc,
-      label: `${acc.linkedin_display_name || acc.linkedin_username} (Personal)`,
-      isTeamAccount: false
-    }));
+    const accounts = personalAccounts.map(acc => {
+      const isOrganization = acc.account_type === 'organization' && acc.organization_id;
+      const effectiveAccountId = isOrganization ? `org:${acc.organization_id}` : null;
+      const effectiveUsername = isOrganization ? `org-${acc.organization_id}` : acc.linkedin_username;
+      const effectiveDisplayName = isOrganization
+        ? (acc.organization_name || acc.linkedin_display_name || acc.linkedin_username)
+        : (acc.linkedin_display_name || acc.linkedin_username);
+
+      return {
+        ...acc,
+        account_id: effectiveAccountId,
+        linkedin_username: effectiveUsername,
+        linkedin_display_name: effectiveDisplayName,
+        label: `${effectiveDisplayName || 'LinkedIn'} (${isOrganization ? 'Organization Page' : 'Personal'})`,
+        isTeamAccount: false,
+      };
+    });
 
     res.json({ accounts });
   } catch (error) {
@@ -277,7 +294,11 @@ export async function connectTeamAccount(req, res) {
 
     // Get user's personal LinkedIn account
     const { rows: authRows } = await pool.query(
-      `SELECT * FROM linkedin_auth WHERE user_id = $1`,
+      `SELECT *
+       FROM linkedin_auth
+       WHERE user_id = $1
+       ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC
+       LIMIT 1`,
       [userId]
     );
 

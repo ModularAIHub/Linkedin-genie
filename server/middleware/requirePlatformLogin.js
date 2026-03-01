@@ -2,6 +2,7 @@
 import jwt from 'jsonwebtoken';
 import axios from 'axios';
 import { pool } from '../config/database.js';
+import { resolveLinkedInAuthorIdentity } from '../utils/linkedinAuthorIdentity.js';
 import { setAuthCookies, clearAuthCookies } from '../utils/cookieUtils.js';
 import dotenv from 'dotenv';
 dotenv.config({ quiet: true });
@@ -261,9 +262,9 @@ export async function requirePlatformLogin(req, res, next) {
     // Attach LinkedIn access token and URN if user is authenticated
     if (req.user && req.user.id && shouldAttachLinkedinAuth(req)) {
       try {
-        const linkedinCacheKey = req.user.id;
-        const cachedLinkedinAuth = getCacheValue(linkedinAuthCache, linkedinCacheKey);
-        let linkedinAuth = cachedLinkedinAuth;
+        // Always fetch the latest LinkedIn account shape from DB so switching
+        // between personal profile and organization page takes effect immediately.
+        let linkedinAuth = null;
 
         if (!linkedinAuth) {
           const { rows: socialRows } = await pool.query(
@@ -282,24 +283,29 @@ export async function requirePlatformLogin(req, res, next) {
             linkedinAuth = {
               access_token: socialRows[0].access_token,
               linkedin_user_id: resolveSocialLinkedinUserId(socialRows[0]),
+              account_id: socialRows[0].account_id,
+              metadata: socialRows[0].metadata,
             };
-            setCacheValue(linkedinAuthCache, linkedinCacheKey, linkedinAuth);
           }
         }
 
         if (!linkedinAuth) {
           const { rows } = await pool.query(
-            `SELECT access_token, linkedin_user_id FROM linkedin_auth WHERE user_id = $1`,
+            `SELECT access_token, linkedin_user_id, account_type, organization_id, organization_name
+             FROM linkedin_auth
+             WHERE user_id = $1`,
             [req.user.id]
           );
           linkedinAuth = rows[0] || null;
-          setCacheValue(linkedinAuthCache, linkedinCacheKey, linkedinAuth);
         }
 
-        if (linkedinAuth?.access_token && linkedinAuth?.linkedin_user_id) {
+        const authorIdentity = resolveLinkedInAuthorIdentity(linkedinAuth || {});
+        if (linkedinAuth?.access_token && authorIdentity.authorUrn) {
           req.user.linkedinAccessToken = linkedinAuth.access_token;
-          req.user.linkedinUrn = `urn:li:person:${linkedinAuth.linkedin_user_id}`;
+          req.user.linkedinUrn = authorIdentity.authorUrn;
           req.user.linkedinUserId = linkedinAuth.linkedin_user_id;
+          req.user.linkedinAccountType = authorIdentity.accountType;
+          req.user.linkedinOrganizationId = authorIdentity.organizationId;
         }
       } catch (err) {
         console.error('[requirePlatformLogin] Failed to fetch LinkedIn token/URN:', err);

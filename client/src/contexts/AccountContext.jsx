@@ -6,6 +6,10 @@ export const getCurrentAccountId = (selectedAccount) => {
   if (!selectedAccount) return null;
   const accountId = selectedAccount.account_id || selectedAccount.id;
 
+  if (selectedAccount.account_type === 'organization' && selectedAccount.isTeamAccount === false) {
+    return accountId;
+  }
+
   if (selectedAccount.account_type === 'personal' || selectedAccount.isTeamAccount === false) {
     return null;
   }
@@ -44,6 +48,8 @@ export const AccountProvider = ({ children }) => {
       JSON.stringify({
         id: account.id,
         account_id: account.account_id,
+        account_type: account.account_type,
+        organization_id: account.organization_id,
         team_id: account.team_id,
         username: account.linkedin_username,
         display_name: account.linkedin_display_name,

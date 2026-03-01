@@ -1,5 +1,6 @@
-import { pool } from '../config/database.js';
 import axios from 'axios';
+import { pool } from '../config/database.js';
+import { resolveLinkedInAuthorIdentity } from '../utils/linkedinAuthorIdentity.js';
 
 /**
  * Middleware to validate LinkedIn connection and handle team vs personal accounts
@@ -54,6 +55,8 @@ export const validateLinkedInConnection = async (req, res, next) => {
         linkedin_user_id: getSocialLinkedinUserId(row),
         linkedin_username: normalizeOptionalString(row.account_username, 255),
         linkedin_display_name: normalizeOptionalString(row.account_display_name, 255),
+        account_type: normalizeOptionalString(metadata?.account_type, 80),
+        organization_id: normalizeOptionalString(metadata?.organization_id, 255),
         source_table: normalizeOptionalString(metadata?.source_table, 80),
         legacy_team_account_id:
           parsePositiveInt(metadata?.legacy_team_account_id) ||
@@ -299,10 +302,14 @@ export const validateLinkedInConnection = async (req, res, next) => {
     }
 
     // Attach LinkedIn credentials to request
+    const authorIdentity = resolveLinkedInAuthorIdentity(linkedinAuthData);
+
     req.linkedinAccount = {
       accessToken: linkedinAuthData.access_token,
-      userUrn: `urn:li:person:${linkedinAuthData.linkedin_user_id}`,
+      userUrn: authorIdentity.authorUrn,
       linkedinUserId: linkedinAuthData.linkedin_user_id,
+      accountType: authorIdentity.accountType,
+      organizationId: authorIdentity.organizationId,
       username: linkedinAuthData.linkedin_username,
       displayName: linkedinAuthData.linkedin_display_name,
       isTeamAccount,

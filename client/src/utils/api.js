@@ -4,6 +4,7 @@ export const linkedin = {
   connect: ({ popup = true } = {}) => api.get('/api/linkedin/connect', { params: { popup: popup ? 'true' : 'false' } }),
   disconnect: () => api.post('/api/linkedin/disconnect'),
   getProfile: () => api.get('/api/linkedin/profile'),
+  selectAccountType: (payload) => api.post('/api/oauth/linkedin/select-account-type', payload),
   uploadImageBase64: (base64, mimetype, filename) =>
     api.post('/api/linkedin/upload-image-base64', { base64, mimetype, filename }),
 };

@@ -166,13 +166,13 @@ export async function createLinkedInPost(accessToken, authorUrn, post_content, m
     shareMediaCategory = 'IMAGE';
     media = media_urls.map(url => ({ status: 'READY', media: url }));
   }
-    // Fallback: Always use person URN for author unless company_id is confirmed valid
     let authorField = authorUrn;
-    // Optionally, add logic here to check if company_id is a valid LinkedIn org ID and user is admin
-    // If you want to force org posting, uncomment below and ensure company_id is valid
-    // if (company_id && company_id !== 'null' && company_id !== 'undefined' && String(company_id).match(/^[0-9]+$/)) {
-    //   authorField = `urn:li:organization:${company_id}`;
-    // }
+    if (!authorField && company_id && company_id !== 'null' && company_id !== 'undefined' && String(company_id).match(/^[0-9]+$/)) {
+      authorField = `urn:li:organization:${company_id}`;
+    }
+    if (!authorField) {
+      throw new Error('LinkedIn author URN is required');
+    }
     const body = {
       author: authorField,
       lifecycleState: 'PUBLISHED',

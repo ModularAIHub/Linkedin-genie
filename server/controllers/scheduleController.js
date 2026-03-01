@@ -8,8 +8,10 @@ import {
   getUserTeamHints,
   isMeaningfulAccountId,
   resolveDefaultTeamAccountForUser,
-  resolveTeamAccountForUser
+  resolveTeamAccountForUser,
+  shouldResolveLinkedInTeamAccount
 } from '../utils/teamAccountScope.js';
+import { resolveLinkedInAuthorIdentity } from '../utils/linkedinAuthorIdentity.js';
 // LinkedIn Genie Schedule Controller
 
 const MAX_BULK_SCHEDULE_ITEMS = 30;
@@ -84,9 +86,12 @@ async function resolveTeamAdminAccount(req, userId) {
   const selectedAccountId =
     req.headers['x-selected-account-id'] || req.body?.account_id || req.body?.company_id;
   const preferredTeamIds = getUserTeamHints(req.user);
-  let teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId, {
-    allowedRoles: ['owner', 'admin']
-  });
+  const shouldResolveSelectedTeamAccount = shouldResolveLinkedInTeamAccount(selectedAccountId);
+  let teamAccount = shouldResolveSelectedTeamAccount
+    ? await resolveTeamAccountForUser(userId, selectedAccountId, {
+        allowedRoles: ['owner', 'admin']
+      })
+    : null;
 
   if (!teamAccount && !isMeaningfulAccountId(selectedAccountId)) {
     teamAccount = await resolveDefaultTeamAccountForUser(userId, {
@@ -481,12 +486,15 @@ export async function schedulePost(req, res) {
 
     const selectedAccountId = account_id || req.headers['x-selected-account-id'] || company_id;
     const preferredTeamIds = getUserTeamHints(req.user);
-    let teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId);
+    const shouldResolveSelectedTeamAccount = shouldResolveLinkedInTeamAccount(selectedAccountId);
+    let teamAccount = shouldResolveSelectedTeamAccount
+      ? await resolveTeamAccountForUser(userId, selectedAccountId)
+      : null;
     if (!teamAccount && !isMeaningfulAccountId(selectedAccountId)) {
       teamAccount = await resolveDefaultTeamAccountForUser(userId, { preferredTeamIds });
     }
 
-    if (isMeaningfulAccountId(selectedAccountId) && !teamAccount) {
+    if (shouldResolveSelectedTeamAccount && !teamAccount) {
       return res.status(403).json({ error: 'Selected LinkedIn team account not found or access denied' });
     }
 
@@ -514,7 +522,7 @@ export async function schedulePost(req, res) {
 
     if (teamAccount) {
       linkedinAccessToken = teamAccount.access_token;
-      authorUrn = `urn:li:person:${teamAccount.linkedin_user_id}`;
+      authorUrn = resolveLinkedInAuthorIdentity(teamAccount).authorUrn;
     }
 
     if (!linkedinAccessToken || !authorUrn) {
@@ -595,8 +603,11 @@ export async function getScheduledPosts(req, res) {
     const { status, limit, offset } = req.query;
     const selectedAccountId = req.headers['x-selected-account-id'];
     const preferredTeamIds = getUserTeamHints(req.user);
-    let teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId);
-    if (!teamAccount) {
+    const shouldResolveSelectedTeamAccount = shouldResolveLinkedInTeamAccount(selectedAccountId);
+    let teamAccount = shouldResolveSelectedTeamAccount
+      ? await resolveTeamAccountForUser(userId, selectedAccountId)
+      : null;
+    if (!teamAccount && !isMeaningfulAccountId(selectedAccountId)) {
       teamAccount = await resolveDefaultTeamAccountForUser(userId, { preferredTeamIds });
     }
     const companyIds = teamAccount
@@ -803,8 +814,11 @@ export async function getSchedulerStatus(req, res) {
     const scheduler = getLinkedinSchedulerStatus();
     const selectedAccountId = req.headers['x-selected-account-id'];
     const preferredTeamIds = getUserTeamHints(req.user);
-    let teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId);
-    if (!teamAccount) {
+    const shouldResolveSelectedTeamAccount = shouldResolveLinkedInTeamAccount(selectedAccountId);
+    let teamAccount = shouldResolveSelectedTeamAccount
+      ? await resolveTeamAccountForUser(userId, selectedAccountId)
+      : null;
+    if (!teamAccount && !isMeaningfulAccountId(selectedAccountId)) {
       teamAccount = await resolveDefaultTeamAccountForUser(userId, { preferredTeamIds });
     }
     const companyIds = teamAccount
@@ -906,18 +920,21 @@ export async function bulkSchedulePosts(req, res) {
 
     const selectedAccountId = account_id || req.headers['x-selected-account-id'];
     const preferredTeamIds = getUserTeamHints(req.user);
-    let teamAccount = await resolveTeamAccountForUser(userId, selectedAccountId);
+    const shouldResolveSelectedTeamAccount = shouldResolveLinkedInTeamAccount(selectedAccountId);
+    let teamAccount = shouldResolveSelectedTeamAccount
+      ? await resolveTeamAccountForUser(userId, selectedAccountId)
+      : null;
     if (!teamAccount && !isMeaningfulAccountId(selectedAccountId)) {
       teamAccount = await resolveDefaultTeamAccountForUser(userId, { preferredTeamIds });
     }
 
-    if (isMeaningfulAccountId(selectedAccountId) && !teamAccount) {
+    if (shouldResolveSelectedTeamAccount && !teamAccount) {
       return res.status(403).json({ error: 'Selected LinkedIn team account not found or access denied' });
     }
 
     const linkedinAccessToken = teamAccount?.access_token || req.user?.linkedinAccessToken;
     const authorUrn = teamAccount
-      ? `urn:li:person:${teamAccount.linkedin_user_id}`
+      ? resolveLinkedInAuthorIdentity(teamAccount).authorUrn
       : req.user?.linkedinUrn;
     const companyId = teamAccount ? teamAccount.team_id : null;
 

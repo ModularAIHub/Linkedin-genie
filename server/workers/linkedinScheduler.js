@@ -3,6 +3,7 @@ import { pool } from '../config/database.js';
 import { createLinkedInPost } from '../services/linkedinService.js';
 import { logger } from '../utils/logger.js';
 import { buildCrossPostPayloads, detectCrossPostMedia } from '../utils/crossPostOptimizer.js';
+import { resolveLinkedInAuthorIdentity } from '../utils/linkedinAuthorIdentity.js';
 
 dotenv.config({ quiet: true });
 
@@ -526,17 +527,17 @@ async function resolvePublishingContext(post) {
       [String(post.company_id)]
     );
 
-    const socialTeamLinkedinUserId = resolveSocialLinkedinUserId(socialTeamRows[0] || {});
-    if (socialTeamRows[0]?.access_token && socialTeamLinkedinUserId) {
+    const socialTeamAuthorIdentity = resolveLinkedInAuthorIdentity(socialTeamRows[0] || {});
+    if (socialTeamRows[0]?.access_token && socialTeamAuthorIdentity.authorUrn) {
       return {
         accessToken: socialTeamRows[0].access_token,
-        authorUrn: `urn:li:person:${socialTeamLinkedinUserId}`,
-        linkedinUserId: socialTeamLinkedinUserId
+        authorUrn: socialTeamAuthorIdentity.authorUrn,
+        linkedinUserId: socialTeamAuthorIdentity.linkedinUserId
       };
     }
 
     const { rows: teamRows } = await pool.query(
-      `SELECT id, team_id, access_token, linkedin_user_id
+      `SELECT id, team_id, access_token, linkedin_user_id, account_type, organization_id, organization_name
        FROM linkedin_team_accounts
        WHERE active = true
          AND (team_id::text = $1 OR id::text = $1)
@@ -545,11 +546,12 @@ async function resolvePublishingContext(post) {
       [String(post.company_id)]
     );
 
-    if (teamRows[0]?.access_token && teamRows[0]?.linkedin_user_id) {
+    const teamAuthorIdentity = resolveLinkedInAuthorIdentity(teamRows[0] || {});
+    if (teamRows[0]?.access_token && teamAuthorIdentity.authorUrn) {
       return {
         accessToken: teamRows[0].access_token,
-        authorUrn: `urn:li:person:${teamRows[0].linkedin_user_id}`,
-        linkedinUserId: teamRows[0].linkedin_user_id
+        authorUrn: teamAuthorIdentity.authorUrn,
+        linkedinUserId: teamAuthorIdentity.linkedinUserId
       };
     }
   }

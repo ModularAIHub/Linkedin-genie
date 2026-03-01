@@ -1,4 +1,9 @@
 import { pool } from '../config/database.js';
+import {
+  getLinkedInAccountType,
+  getLinkedInOrganizationId,
+  getLinkedInUserId,
+} from './linkedinAuthorIdentity.js';
 
 export const isMeaningfulAccountId = (value) =>
   value !== undefined &&
@@ -6,6 +11,13 @@ export const isMeaningfulAccountId = (value) =>
   String(value) !== '' &&
   String(value) !== 'null' &&
   String(value) !== 'undefined';
+
+export const isLinkedInOrganizationAccountId = (value) =>
+  isMeaningfulAccountId(value) &&
+  String(value).trim().startsWith('org:');
+
+export const shouldResolveLinkedInTeamAccount = (value) =>
+  isMeaningfulAccountId(value) && !isLinkedInOrganizationAccountId(value);
 
 const normalizeTeamHints = (hints = []) =>
   Array.from(
@@ -47,15 +59,6 @@ const normalizeOptionalString = (value, maxLength = 255) => {
 const getSocialMetadata = (row = {}) =>
   row?.metadata && typeof row.metadata === 'object' ? row.metadata : {};
 
-const getSocialLinkedInUserId = (row = {}) => {
-  const metadata = getSocialMetadata(row);
-  const fromMetadata = normalizeOptionalString(metadata?.linkedin_user_id, 255);
-  if (fromMetadata) return fromMetadata;
-  const accountId = normalizeOptionalString(row?.account_id, 255);
-  if (!accountId || accountId.startsWith('org:')) return null;
-  return accountId;
-};
-
 const getSocialLegacyTeamAccountId = (row = {}) => {
   const metadata = getSocialMetadata(row);
   return (
@@ -75,7 +78,9 @@ const mapSocialTeamAccountRow = (row = {}) => {
     access_token: row.access_token,
     refresh_token: row.refresh_token,
     token_expires_at: row.token_expires_at,
-    linkedin_user_id: getSocialLinkedInUserId(row),
+    account_type: getLinkedInAccountType(row),
+    organization_id: getLinkedInOrganizationId(row),
+    linkedin_user_id: getLinkedInUserId(row),
     linkedin_username: normalizeOptionalString(row.account_username, 255),
     linkedin_display_name: normalizeOptionalString(row.account_display_name, 255),
     linkedin_profile_image_url: normalizeOptionalString(row.profile_image_url, 2048),
@@ -165,6 +170,10 @@ export async function resolveTeamAccountForUser(userId, rawAccountId, options = 
     return null;
   }
 
+  if (isLinkedInOrganizationAccountId(rawAccountId)) {
+    return null;
+  }
+
   const { allowedRoles } = options;
   const normalizedId = String(rawAccountId);
   const socialRow = await resolveSocialTeamAccountForUser(userId, normalizedId, options);
@@ -176,7 +185,10 @@ export async function resolveTeamAccountForUser(userId, rawAccountId, options = 
 
   if (isUUID) {
     const { rows } = await pool.query(
-      `SELECT lta.id, lta.team_id, lta.access_token, lta.linkedin_user_id, tm.role AS member_role
+      `SELECT lta.id, lta.team_id, lta.access_token, lta.refresh_token, lta.token_expires_at,
+              lta.linkedin_user_id, lta.linkedin_username, lta.linkedin_display_name,
+              lta.linkedin_profile_image_url, lta.account_type, lta.organization_id,
+              lta.organization_name, tm.role AS member_role
        FROM linkedin_team_accounts lta
        JOIN team_members tm ON tm.team_id = lta.team_id
        WHERE lta.team_id::text = $1
@@ -193,7 +205,10 @@ export async function resolveTeamAccountForUser(userId, rawAccountId, options = 
   }
 
   const { rows } = await pool.query(
-    `SELECT lta.id, lta.team_id, lta.access_token, lta.linkedin_user_id, tm.role AS member_role
+    `SELECT lta.id, lta.team_id, lta.access_token, lta.refresh_token, lta.token_expires_at,
+            lta.linkedin_user_id, lta.linkedin_username, lta.linkedin_display_name,
+            lta.linkedin_profile_image_url, lta.account_type, lta.organization_id,
+            lta.organization_name, tm.role AS member_role
      FROM linkedin_team_accounts lta
      JOIN team_members tm ON tm.team_id = lta.team_id
      WHERE lta.id = $1::int
@@ -219,7 +234,10 @@ export async function resolveDefaultTeamAccountForUser(userId, options = {}) {
 
   if (normalizedTeamIds.length > 0) {
     const { rows } = await pool.query(
-      `SELECT lta.id, lta.team_id, lta.access_token, lta.linkedin_user_id, tm.role AS member_role
+      `SELECT lta.id, lta.team_id, lta.access_token, lta.refresh_token, lta.token_expires_at,
+              lta.linkedin_user_id, lta.linkedin_username, lta.linkedin_display_name,
+              lta.linkedin_profile_image_url, lta.account_type, lta.organization_id,
+              lta.organization_name, tm.role AS member_role
        FROM linkedin_team_accounts lta
        JOIN team_members tm ON tm.team_id = lta.team_id
        WHERE lta.active = true
@@ -237,7 +255,10 @@ export async function resolveDefaultTeamAccountForUser(userId, options = {}) {
   }
 
   const { rows } = await pool.query(
-    `SELECT lta.id, lta.team_id, lta.access_token, lta.linkedin_user_id, tm.role AS member_role
+    `SELECT lta.id, lta.team_id, lta.access_token, lta.refresh_token, lta.token_expires_at,
+            lta.linkedin_user_id, lta.linkedin_username, lta.linkedin_display_name,
+            lta.linkedin_profile_image_url, lta.account_type, lta.organization_id,
+            lta.organization_name, tm.role AS member_role
      FROM linkedin_team_accounts lta
      JOIN team_members tm ON tm.team_id = lta.team_id
      WHERE lta.active = true

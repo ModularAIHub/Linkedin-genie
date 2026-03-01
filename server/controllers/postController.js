@@ -774,11 +774,14 @@ import { pool } from '../config/database.js';
 import * as linkedinService from '../services/linkedinService.js';
 import { logger } from '../utils/logger.js';
 import { buildCrossPostPayloads, detectCrossPostMedia } from '../utils/crossPostOptimizer.js';
+import { resolveLinkedInAuthorIdentity } from '../utils/linkedinAuthorIdentity.js';
 import {
   getUserTeamHints,
+  isLinkedInOrganizationAccountId,
   isMeaningfulAccountId,
   resolveDefaultTeamAccountForUser,
-  resolveTeamAccountForUser
+  resolveTeamAccountForUser,
+  shouldResolveLinkedInTeamAccount
 } from '../utils/teamAccountScope.js';
 
 const X_CROSSPOST_TIMEOUT_MS = Number.parseInt(process.env.X_CROSSPOST_TIMEOUT_MS || '10000', 10);
@@ -1437,7 +1440,10 @@ export async function createPost(req, res) {
     // Get account_id from request (for team accounts)
     const accountId = req.body.account_id || req.headers['x-selected-account-id'];
     const preferredTeamIds = getUserTeamHints(req.user);
-    let selectedTeamAccount = await resolveTeamAccountForUser(user.id, accountId);
+    const shouldResolveSelectedTeamAccount = shouldResolveLinkedInTeamAccount(accountId);
+    let selectedTeamAccount = shouldResolveSelectedTeamAccount
+      ? await resolveTeamAccountForUser(user.id, accountId)
+      : null;
 
     if (!selectedTeamAccount && !isMeaningfulAccountId(accountId)) {
       selectedTeamAccount = await resolveDefaultTeamAccountForUser(user.id, { preferredTeamIds });
@@ -1445,7 +1451,7 @@ export async function createPost(req, res) {
     
     let accessToken, authorUrn, teamAccountResult;
     
-    if (isMeaningfulAccountId(accountId) && !selectedTeamAccount) {
+    if (shouldResolveSelectedTeamAccount && !selectedTeamAccount) {
       return res.status(403).json({ error: 'Selected LinkedIn team account not found or access denied' });
     }
     
@@ -1453,7 +1459,7 @@ export async function createPost(req, res) {
     if (selectedTeamAccount) {
       teamAccountResult = { rows: [selectedTeamAccount] };
       accessToken = selectedTeamAccount.access_token;
-      authorUrn = `urn:li:person:${selectedTeamAccount.linkedin_user_id}`;
+      authorUrn = resolveLinkedInAuthorIdentity(selectedTeamAccount).authorUrn;
       console.log('[CREATE POST] Using team account credentials');
     } else {
       // Fallback to personal account
@@ -1501,8 +1507,8 @@ export async function createPost(req, res) {
     // Determine linkedin_user_id (the LinkedIn user who created the post)
     let linkedin_user_id = null;
     if (selectedTeamAccount) {
-      // Team account: get from teamAccountResult
-      linkedin_user_id = teamAccountResult.rows[0].linkedin_user_id;
+      // Team account: keep the actor row identity, but use organization author when applicable.
+      linkedin_user_id = resolveLinkedInAuthorIdentity(teamAccountResult.rows[0]).linkedinUserId;
     } else {
       // Personal account
       linkedin_user_id = user.linkedinUserId || user.linkedin_user_id;
@@ -1634,8 +1640,11 @@ export async function getPosts(req, res) {
     const offset = (page - 1) * limit;
     const selectedAccountId = req.headers['x-selected-account-id'];
     const preferredTeamIds = getUserTeamHints(req.user);
-    let selectedTeamAccount = await resolveTeamAccountForUser(req.user.id, selectedAccountId);
-    if (!selectedTeamAccount) {
+    const shouldResolveSelectedTeamAccount = shouldResolveLinkedInTeamAccount(selectedAccountId);
+    let selectedTeamAccount = shouldResolveSelectedTeamAccount
+      ? await resolveTeamAccountForUser(req.user.id, selectedAccountId)
+      : null;
+    if (!selectedTeamAccount && !isMeaningfulAccountId(selectedAccountId)) {
       selectedTeamAccount = await resolveDefaultTeamAccountForUser(req.user.id, { preferredTeamIds });
     }
     let whereClause;
@@ -1694,7 +1703,10 @@ export async function deletePost(req, res) {
     // Get account_id from headers only (DELETE requests don't have body)
     const accountId = req.headers['x-selected-account-id'];
     const preferredTeamIds = getUserTeamHints(req.user);
-    let selectedTeamAccount = await resolveTeamAccountForUser(userId, accountId, { allowedRoles: ['owner', 'admin'] });
+    const shouldResolveSelectedTeamAccount = shouldResolveLinkedInTeamAccount(accountId);
+    let selectedTeamAccount = shouldResolveSelectedTeamAccount
+      ? await resolveTeamAccountForUser(userId, accountId, { allowedRoles: ['owner', 'admin'] })
+      : null;
     if (!selectedTeamAccount && !isMeaningfulAccountId(accountId)) {
       selectedTeamAccount = await resolveDefaultTeamAccountForUser(userId, {
         allowedRoles: ['owner', 'admin'],

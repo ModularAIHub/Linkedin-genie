@@ -1,3 +1,7 @@
+import * as linkedinService from '../services/linkedinService.js';
+import { resolveLinkedInAuthorIdentity } from '../utils/linkedinAuthorIdentity.js';
+import { shouldResolveLinkedInTeamAccount } from '../utils/teamAccountScope.js';
+
 // POST /api/linkedin/upload-image-base64
 export async function uploadImageBase64(req, res) {
   try {
@@ -13,7 +17,7 @@ export async function uploadImageBase64(req, res) {
     let accessToken, authorUrn;
     
     // If account_id is provided and not null, fetch team account credentials
-    if (accountId && accountId !== 'null' && accountId !== 'undefined') {
+    if (shouldResolveLinkedInTeamAccount(accountId)) {
       const { pool } = await import('../config/database.js');
       // Ensure accountId is a string before calling includes
       const accountIdStr = typeof accountId === 'string' ? accountId : String(accountId);
@@ -24,14 +28,19 @@ export async function uploadImageBase64(req, res) {
         // Query by team_id if it's a UUID
         console.log('[UPLOAD IMAGE BASE64] Account ID is UUID, querying by team_id:', accountIdStr);
         teamAccountResult = await pool.query(
-          `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE team_id = $1 AND active = true LIMIT 1`,
+          `SELECT access_token, linkedin_user_id, account_type, organization_id, organization_name
+           FROM linkedin_team_accounts
+           WHERE team_id = $1 AND active = true
+           LIMIT 1`,
           [accountIdStr]
         );
       } else {
         // Query by id if it's an integer
         console.log('[UPLOAD IMAGE BASE64] Account ID is integer, querying by id:', accountIdStr);
         teamAccountResult = await pool.query(
-          `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE id = $1 AND active = true`,
+          `SELECT access_token, linkedin_user_id, account_type, organization_id, organization_name
+           FROM linkedin_team_accounts
+           WHERE id = $1 AND active = true`,
           [accountIdStr]
         );
       }
@@ -42,7 +51,7 @@ export async function uploadImageBase64(req, res) {
       }
       
       accessToken = teamAccountResult.rows[0].access_token;
-      authorUrn = `urn:li:person:${teamAccountResult.rows[0].linkedin_user_id}`;
+      authorUrn = resolveLinkedInAuthorIdentity(teamAccountResult.rows[0]).authorUrn;
       console.log('[UPLOAD IMAGE BASE64] Using team account credentials');
     } else {
       // Fallback to personal account
@@ -94,7 +103,6 @@ export async function uploadImageBase64(req, res) {
     res.status(500).json({ error: error.message || 'Failed to upload image to LinkedIn', details: error });
   }
 }
-import * as linkedinService from '../services/linkedinService.js';
 
 // POST /api/linkedin/upload-image
 export async function uploadImage(req, res) {
@@ -108,7 +116,7 @@ export async function uploadImage(req, res) {
     let accessToken, authorUrn;
     
     // If account_id is provided and not null, fetch team account credentials
-    if (accountId && accountId !== 'null' && accountId !== 'undefined') {
+    if (shouldResolveLinkedInTeamAccount(accountId)) {
       const { pool } = await import('../config/database.js');
       // Check if accountId looks like a UUID (has hyphens) vs an integer
       const isUUID = accountId.includes('-');
@@ -118,14 +126,19 @@ export async function uploadImage(req, res) {
         // Query by team_id if it's a UUID
         console.log('[UPLOAD IMAGE] Account ID is UUID, querying by team_id:', accountId);
         teamAccountResult = await pool.query(
-          `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE team_id = $1 AND active = true LIMIT 1`,
+          `SELECT access_token, linkedin_user_id, account_type, organization_id, organization_name
+           FROM linkedin_team_accounts
+           WHERE team_id = $1 AND active = true
+           LIMIT 1`,
           [accountId]
         );
       } else {
         // Query by id if it's an integer
         console.log('[UPLOAD IMAGE] Account ID is integer, querying by id:', accountId);
         teamAccountResult = await pool.query(
-          `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE id = $1 AND active = true`,
+          `SELECT access_token, linkedin_user_id, account_type, organization_id, organization_name
+           FROM linkedin_team_accounts
+           WHERE id = $1 AND active = true`,
           [accountId]
         );
       }
@@ -136,7 +149,7 @@ export async function uploadImage(req, res) {
       }
       
       accessToken = teamAccountResult.rows[0].access_token;
-      authorUrn = `urn:li:person:${teamAccountResult.rows[0].linkedin_user_id}`;
+      authorUrn = resolveLinkedInAuthorIdentity(teamAccountResult.rows[0]).authorUrn;
       console.log('[UPLOAD IMAGE] Using team account credentials');
     } else {
       // Fallback to personal account
@@ -187,7 +200,7 @@ export async function uploadDocumentBase64(req, res) {
     let accessToken, authorUrn;
     
     // If account_id is provided and not null, fetch team account credentials
-    if (accountId && accountId !== 'null' && accountId !== 'undefined') {
+    if (shouldResolveLinkedInTeamAccount(accountId)) {
       const { pool } = await import('../config/database.js');
       const accountIdStr = typeof accountId === 'string' ? accountId : String(accountId);
       const isUUID = accountIdStr.includes('-');
@@ -196,13 +209,18 @@ export async function uploadDocumentBase64(req, res) {
       if (isUUID) {
         console.log('[UPLOAD DOCUMENT BASE64] Account ID is UUID, querying by team_id:', accountIdStr);
         teamAccountResult = await pool.query(
-          `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE team_id = $1 AND active = true LIMIT 1`,
+          `SELECT access_token, linkedin_user_id, account_type, organization_id, organization_name
+           FROM linkedin_team_accounts
+           WHERE team_id = $1 AND active = true
+           LIMIT 1`,
           [accountIdStr]
         );
       } else {
         console.log('[UPLOAD DOCUMENT BASE64] Account ID is integer, querying by id:', accountIdStr);
         teamAccountResult = await pool.query(
-          `SELECT access_token, linkedin_user_id FROM linkedin_team_accounts WHERE id = $1 AND active = true`,
+          `SELECT access_token, linkedin_user_id, account_type, organization_id, organization_name
+           FROM linkedin_team_accounts
+           WHERE id = $1 AND active = true`,
           [accountIdStr]
         );
       }
@@ -213,7 +231,7 @@ export async function uploadDocumentBase64(req, res) {
       }
       
       accessToken = teamAccountResult.rows[0].access_token;
-      authorUrn = `urn:li:person:${teamAccountResult.rows[0].linkedin_user_id}`;
+      authorUrn = resolveLinkedInAuthorIdentity(teamAccountResult.rows[0]).authorUrn;
       console.log('[UPLOAD DOCUMENT BASE64] Using team account credentials');
     } else {
       // Fallback to personal account

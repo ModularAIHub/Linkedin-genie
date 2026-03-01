@@ -1,6 +1,7 @@
 // LinkedIn Genie OAuth routes
 import express from 'express';
 import * as oauthController from '../controllers/oauthController.mjs';
+import { requirePlatformLogin } from '../middleware/requirePlatformLogin.js';
 
 const router = express.Router();
 
@@ -12,9 +13,9 @@ router.get('/linkedin/callback', oauthController.handleOAuthCallback);
 router.get('/linkedin/team-connect', oauthController.startTeamOAuth);
 
 // Select account type (personal vs organization) - for personal accounts
-router.post('/linkedin/select-account-type', oauthController.selectAccountType);
+router.post('/linkedin/select-account-type', requirePlatformLogin, oauthController.selectAccountType);
 
 // Complete team account selection (personal vs organization page)
-router.post('/linkedin/complete-team-selection', oauthController.completeTeamAccountSelection);
+router.post('/linkedin/complete-team-selection', requirePlatformLogin, oauthController.completeTeamAccountSelection);
 
 export default router;

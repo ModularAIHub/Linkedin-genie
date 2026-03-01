@@ -2,6 +2,7 @@ import express from 'express';
 import { pool } from '../config/database.js';
 import { createLinkedInPost, refreshLinkedInAccessToken, uploadImageToLinkedIn } from '../services/linkedinService.js';
 import { logger } from '../utils/logger.js';
+import { resolveLinkedInAuthorIdentity } from '../utils/linkedinAuthorIdentity.js';
 
 const router = express.Router();
 const TEAM_ADMIN_ROLES = new Set(['owner', 'admin']);
@@ -804,7 +805,7 @@ router.post('/cross-post', async (req, res) => {
 
       targetTeamAccount = targetResolution.targetRow;
       postingAccount = targetTeamAccount;
-      authorUrn = `urn:li:person:${postingAccount.linkedin_user_id}`;
+      authorUrn = resolveLinkedInAuthorIdentity(postingAccount).authorUrn;
       isTeamTarget = true;
     } else {
       // Team mode fallback: if requester is in team context and no explicit target was sent,
@@ -826,7 +827,7 @@ router.post('/cross-post', async (req, res) => {
           if (!targetResolution.error) {
             targetTeamAccount = targetResolution.targetRow;
             postingAccount = targetTeamAccount;
-            authorUrn = `urn:li:person:${postingAccount.linkedin_user_id}`;
+            authorUrn = resolveLinkedInAuthorIdentity(postingAccount).authorUrn;
             isTeamTarget = true;
           }
         }
@@ -860,15 +861,19 @@ router.post('/cross-post', async (req, res) => {
       }
     }
 
-    const resolvedLinkedInUserId = normalizeOptionalString(postingAccount?.linkedin_user_id, 255);
-    if (!resolvedLinkedInUserId) {
+    const authorIdentity = resolveLinkedInAuthorIdentity(postingAccount || {});
+    const resolvedLinkedInUserId = normalizeOptionalString(
+      authorIdentity.linkedinUserId || postingAccount?.linkedin_user_id,
+      255
+    );
+    if (!authorIdentity.authorUrn) {
       return res.status(400).json({
-        error: 'LinkedIn account is missing a usable user identifier.',
+        error: 'LinkedIn account is missing a usable posting identity.',
         code: 'LINKEDIN_ACCOUNT_INVALID',
       });
     }
 
-    authorUrn = `urn:li:person:${resolvedLinkedInUserId}`;
+    authorUrn = authorIdentity.authorUrn;
 
     let linkedinResult;
     let uploadedMediaAssets = [];
