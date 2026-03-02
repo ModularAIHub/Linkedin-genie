@@ -260,10 +260,11 @@ const useLinkedInPostComposer = () => {
         style: aiStyle
       });
       if (res.data && res.data.content) {
-        // If multiple posts are returned, split and use the first one by default
-        const posts = res.data.content.split(/\n?---+\n?/).map(p => p.trim()).filter(Boolean);
         // Sanitize to remove markdown (**bold**, *italic*, etc.)
-        const clean = sanitizeAIContent(posts[0] || res.data.content, { allowMarkdown: false });
+        // NOTE: Do NOT split by --- here — the server handles thread splitting
+        // when isThread is true. Splitting here discards content after any
+        // horizontal-rule separator the AI may include.
+        const clean = sanitizeAIContent(res.data.content, { allowMarkdown: false });
         setContent(clean);
         setShowAIPrompt(false);
         toast.success('AI content generated!');
