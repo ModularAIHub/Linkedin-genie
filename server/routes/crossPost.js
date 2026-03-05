@@ -29,6 +29,15 @@ const normalizeOptionalString = (value, maxLength = 255) => {
   return normalized.slice(0, maxLength);
 };
 
+const normalizeLinkedInActorId = (value) => {
+  const normalized = normalizeOptionalString(value, 255);
+  if (!normalized) return null;
+  if (normalized.startsWith('org:')) return normalized.slice(4) || null;
+  if (normalized.startsWith('urn:li:organization:')) return normalized.slice('urn:li:organization:'.length) || null;
+  if (normalized.startsWith('urn:li:person:')) return normalized.slice('urn:li:person:'.length) || null;
+  return normalized;
+};
+
 const normalizeCrossPostMediaInputs = (value) => {
   if (!Array.isArray(value)) return [];
 
@@ -875,9 +884,12 @@ router.post('/cross-post', async (req, res) => {
     }
 
     const authorIdentity = resolveLinkedInAuthorIdentity(postingAccount || {});
-    const resolvedLinkedInUserId = normalizeOptionalString(
-      authorIdentity.linkedinUserId || postingAccount?.linkedin_user_id,
-      255
+    const resolvedLinkedInUserId = normalizeLinkedInActorId(
+      authorIdentity.linkedinUserId ||
+      authorIdentity.organizationId ||
+      postingAccount?.linkedin_user_id ||
+      postingAccount?.organization_id ||
+      postingAccount?.account_id
     );
     if (!authorIdentity.authorUrn) {
       return res.status(400).json({

@@ -817,16 +817,26 @@ const normalizeOptionalString = (value, maxLength = 255) => {
   return normalized.slice(0, maxLength);
 };
 
+const normalizeLinkedInActorId = (value) => {
+  const normalized = normalizeOptionalString(value, 255);
+  if (!normalized) return null;
+  if (normalized.startsWith('org:')) return normalized.slice(4) || null;
+  if (normalized.startsWith('urn:li:organization:')) return normalized.slice('urn:li:organization:'.length) || null;
+  if (normalized.startsWith('urn:li:person:')) return normalized.slice('urn:li:person:'.length) || null;
+  return normalized;
+};
+
 const getSocialLinkedInMetadata = (row = {}) =>
   row?.metadata && typeof row.metadata === 'object' ? row.metadata : {};
 
 const getSocialLinkedInUserId = (row = {}) => {
   const metadata = getSocialLinkedInMetadata(row);
-  const fromMetadata = normalizeOptionalString(metadata?.linkedin_user_id, 255);
+  const fromMetadata = normalizeLinkedInActorId(metadata?.linkedin_user_id);
   if (fromMetadata) return fromMetadata;
-  const accountId = normalizeOptionalString(row?.account_id, 255);
-  if (!accountId || accountId.startsWith('org:')) return null;
-  return accountId;
+  const organizationId = normalizeLinkedInActorId(metadata?.organization_id || row?.organization_id);
+  if (organizationId) return organizationId;
+  const accountId = normalizeLinkedInActorId(row?.account_id);
+  return accountId || null;
 };
 
 const getSocialLegacyTeamAccountId = (row = {}) => {
@@ -1508,10 +1518,18 @@ export async function createPost(req, res) {
     let linkedin_user_id = null;
     if (selectedTeamAccount) {
       // Team account: keep the actor row identity, but use organization author when applicable.
-      linkedin_user_id = resolveLinkedInAuthorIdentity(teamAccountResult.rows[0]).linkedinUserId;
+      const authorIdentity = resolveLinkedInAuthorIdentity(teamAccountResult.rows[0]);
+      linkedin_user_id = normalizeLinkedInActorId(
+        authorIdentity.linkedinUserId || authorIdentity.organizationId
+      );
     } else {
       // Personal account
-      linkedin_user_id = user.linkedinUserId || user.linkedin_user_id;
+      linkedin_user_id = normalizeLinkedInActorId(
+        user.linkedinUserId ||
+        user.linkedin_user_id ||
+        user.linkedinUrn ||
+        authorUrn
+      );
     }
 
     console.log('[CREATE POST] LinkedIn API success, saving to DB:', {

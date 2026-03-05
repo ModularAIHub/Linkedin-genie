@@ -7,14 +7,27 @@ const FREE_ANALYTICS_DAYS = 7;
 const FREE_TOP_POSTS_LIMIT = 5;
 const PRO_TOP_POSTS_LIMIT = 20;
 
+function normalizeLinkedInActorId(rawId) {
+  const value = String(rawId || '').trim();
+  if (!value) return null;
+  if (value.startsWith('org:')) return value.slice(4) || null;
+  if (value.startsWith('urn:li:organization:')) return value.slice('urn:li:organization:'.length) || null;
+  if (value.startsWith('urn:li:person:')) return value.slice('urn:li:person:'.length) || null;
+  return value;
+}
+
 // Helper: Get LinkedIn access token for user
 async function getLinkedInAuthForUser(userId, accountId = null) {
   let query = `SELECT access_token,
+            account_id,
+            account_type,
+            organization_id,
             COALESCE(
               NULLIF(metadata->>'linkedin_user_id', ''),
+              NULLIF(organization_id, ''),
               CASE
-                WHEN account_id LIKE 'org:%' THEN NULL
-                ELSE account_id
+                WHEN account_id LIKE 'org:%' THEN NULLIF(REPLACE(account_id, 'org:', ''), '')
+                ELSE NULLIF(account_id, '')
               END
             ) AS linkedin_user_id
      FROM social_connected_accounts
@@ -62,6 +75,8 @@ async function resolveAnalyticsScope({ userId, accountId = null, accountType = n
       auth: {
         access_token: teamAccount.access_token,
         linkedin_user_id: teamAccount.linkedin_user_id,
+        organization_id: teamAccount.organization_id || null,
+        account_id: teamAccount.account_id || null,
       },
       scopeClause,
       scopeParams,
@@ -75,8 +90,11 @@ async function resolveAnalyticsScope({ userId, accountId = null, accountType = n
   const scopeParams = [userId];
 
   if (accountId && accountType !== 'team') {
-    scopeClause += ` AND linkedin_user_id = $2`;
-    scopeParams.push(String(accountId));
+    const normalizedActorId = normalizeLinkedInActorId(accountId);
+    if (normalizedActorId) {
+      scopeClause += ` AND linkedin_user_id = $2`;
+      scopeParams.push(normalizedActorId);
+    }
   }
 
   return {
@@ -242,11 +260,14 @@ export async function syncAnalytics(req, res) {
     }
 
     const auth = scope.auth;
-    if (!auth || !auth.access_token || !auth.linkedin_user_id) {
+    const linkedinUserId = normalizeLinkedInActorId(
+      auth?.linkedin_user_id || auth?.organization_id || auth?.account_id
+    );
+
+    if (!auth || !auth.access_token || !linkedinUserId) {
       return res.status(400).json({ error: 'No LinkedIn account connected' });
     }
     const accessToken = auth.access_token;
-    const linkedinUserId = auth.linkedin_user_id;
 
     // Get all posted LinkedIn posts for the requested scope
     const { rows: posts } = await pool.query(
