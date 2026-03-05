@@ -32,8 +32,21 @@ const normalizeOptionalString = (value, maxLength = 255) => {
 const normalizeCrossPostMediaInputs = (value) => {
   if (!Array.isArray(value)) return [];
 
+  const normalizeMediaItem = (item) => {
+    if (typeof item === 'string') return item.trim();
+    if (!item || typeof item !== 'object') return '';
+
+    const urlLikeFields = ['url', 'mediaUrl', 'media_url', 'secure_url', 'src', 'href'];
+    for (const field of urlLikeFields) {
+      const candidate = typeof item[field] === 'string' ? item[field].trim() : '';
+      if (candidate) return candidate;
+    }
+
+    return '';
+  };
+
   return value
-    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .map((item) => normalizeMediaItem(item))
     .filter(Boolean)
     .slice(0, MAX_CROSSPOST_MEDIA_ITEMS);
 };
