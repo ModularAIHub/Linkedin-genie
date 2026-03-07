@@ -46,6 +46,7 @@ function App() {
                         <Route path="/dashboard" element={<Dashboard />} />
                         <Route path="/compose" element={<LinkedInPostComposer />} />
                         <Route path="/strategy" element={<StrategyBuilder />} />
+                        <Route path="/automation" element={<Navigate to="/strategy?tab=automation" replace />} />
                         <Route path="/strategy-builder" element={<Navigate to="/strategy" replace />} />
                         <Route path="/bulk-generation" element={<BulkGeneration />} />
                         <Route path="/scheduling" element={<Scheduling />} />

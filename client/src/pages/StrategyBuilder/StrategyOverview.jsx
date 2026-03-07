@@ -23,11 +23,105 @@ const CARD_STYLE = {
   amber: { iconBg: 'bg-amber-100', iconText: 'text-amber-600' },
 };
 
+const LONG_TEXT_MARKERS = ['what we do', 'key features', 'why suitegenie', 'perfect for'];
+
+const cleanText = (value = '') => String(value || '').replace(/\s+/g, ' ').trim();
+
+const truncateText = (value = '', max = 80) => {
+  const text = cleanText(value);
+  if (!text) return '';
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 3).trim()}...`;
+};
+
+const normalizeHeadline = (value = '') => {
+  let text = cleanText(value);
+  if (!text) return 'LinkedIn Growth Strategy';
+  const lower = text.toLowerCase();
+  for (const marker of LONG_TEXT_MARKERS) {
+    const index = lower.indexOf(marker);
+    if (index > 0) {
+      text = text.slice(0, index).trim();
+      break;
+    }
+  }
+  text = text.replace(/\s*[|:-]\s*/g, ' ').replace(/\s+/g, ' ').trim();
+  return truncateText(text || 'LinkedIn Growth Strategy', 72);
+};
+
+const sanitizeTags = (items = [], max = 18) => {
+  const seen = new Set();
+  const result = [];
+  for (const raw of Array.isArray(items) ? items : []) {
+    const item = cleanText(raw);
+    if (!item) continue;
+    if (/https?:\/\//i.test(item)) continue;
+    const key = item.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(truncateText(item, 48));
+    if (result.length >= max) break;
+  }
+  return result;
+};
+
+const TOPIC_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'for', 'from', 'in', 'is', 'of', 'on', 'or', 'the', 'to', 'with', 'your',
+  'social', 'platform', 'post', 'posts', 'team', 'one', 'now', 'hashtag', 'hashtags'
+]);
+
+const splitTopicCandidates = (value = '') =>
+  String(value || '')
+    .split(/\r?\n|,|;|\||\/|\u2022|\u25CF|\u25E6/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const normalizeTopic = (value = '') => {
+  const cleaned = String(value || '')
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/www\.\S+/gi, ' ')
+    .replace(/^#+/, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+
+  const words = cleaned
+    .split(' ')
+    .filter((word) => word.length >= 3 && !TOPIC_STOP_WORDS.has(word));
+
+  if (words.length === 0 || words.length > 4) return '';
+  const phrase = words.join(' ').trim();
+  if (phrase.length < 3 || phrase.length > 36) return '';
+  return phrase;
+};
+
+const sanitizeTopics = (items = [], max = 20) => {
+  const seen = new Set();
+  const result = [];
+  for (const raw of Array.isArray(items) ? items : []) {
+    const candidates = splitTopicCandidates(raw);
+    for (const candidate of candidates) {
+      const topic = normalizeTopic(candidate);
+      if (!topic) continue;
+      const key = topic.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(topic);
+      if (result.length >= max) break;
+    }
+    if (result.length >= max) break;
+  }
+  return result;
+};
+
 const InfoCard = ({ icon: Icon, label, value, tone = 'blue' }) => {
   const style = CARD_STYLE[tone] || CARD_STYLE.blue;
 
   return (
-    <div className="bg-white rounded-xl p-6 border border-gray-200 hover:shadow-md transition-shadow">
+    <div className="bg-white rounded-xl p-5 border border-gray-200 hover:shadow-sm transition-shadow">
       <div className="flex items-start justify-between">
         <div className="flex-1">
           <div className="flex items-center gap-2 mb-2">
@@ -36,7 +130,12 @@ const InfoCard = ({ icon: Icon, label, value, tone = 'blue' }) => {
             </div>
           </div>
           <p className="text-sm text-gray-600 mb-1">{label}</p>
-          <p className="text-lg font-semibold text-gray-900">{value}</p>
+          <p
+            className="text-base font-semibold text-gray-900 break-words"
+            style={{ display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
+          >
+            {value}
+          </p>
         </div>
       </div>
     </div>
@@ -194,35 +293,45 @@ const StrategyOverview = ({ strategy, onGeneratePrompts, onStrategyUpdated }) =>
   };
 
   const promptsStale = Boolean(strategy?.metadata?.prompts_stale);
+  const nicheDisplay = useMemo(() => normalizeHeadline(strategy?.niche || ''), [strategy?.niche]);
+  const audienceDisplay = useMemo(() => truncateText(strategy?.target_audience || '', 88), [strategy?.target_audience]);
+  const postingFrequencyDisplay = useMemo(
+    () => truncateText(strategy?.posting_frequency || '', 56) || 'Not set',
+    [strategy?.posting_frequency]
+  );
+  const toneDisplay = useMemo(() => truncateText(strategy?.tone_style || '', 56) || 'Not set', [strategy?.tone_style]);
+  const displayGoals = useMemo(() => sanitizeTags(strategy?.content_goals || [], 16), [strategy?.content_goals]);
+  const displayTopics = useMemo(() => sanitizeTopics(strategy?.topics || [], 24), [strategy?.topics]);
+  const hiddenTopicCount = Math.max(0, (Array.isArray(strategy?.topics) ? strategy.topics.length : 0) - displayTopics.length);
 
   const checklistItems = useMemo(
     () => [
       {
         label: 'Niche is defined clearly',
-        done: Boolean(strategy?.niche && strategy.niche.trim().length >= 3),
+        done: Boolean(cleanText(strategy?.niche || '').length >= 3),
       },
       {
         label: 'Target audience is defined',
-        done: Boolean(strategy?.target_audience && strategy.target_audience.trim().length >= 6),
+        done: Boolean(cleanText(strategy?.target_audience || '').length >= 6),
       },
       {
         label: 'At least 3 content goals',
-        done: Array.isArray(strategy?.content_goals) && strategy.content_goals.length >= 3,
+        done: displayGoals.length >= 3,
       },
       {
         label: 'At least 3 content topics',
-        done: Array.isArray(strategy?.topics) && strategy.topics.length >= 3,
+        done: displayTopics.length >= 3,
       },
       {
         label: 'Posting frequency is set',
-        done: Boolean(strategy?.posting_frequency && strategy.posting_frequency.trim().length > 0),
+        done: Boolean(cleanText(strategy?.posting_frequency || '').length > 0),
       },
       {
         label: 'Prompt library generated',
         done: promptCount > 0 && !promptsStale,
       },
     ],
-    [strategy, promptCount, promptsStale]
+    [strategy, promptCount, promptsStale, displayGoals.length, displayTopics.length]
   );
 
   const completedChecklistCount = checklistItems.filter((item) => item.done).length;
@@ -247,65 +356,55 @@ const StrategyOverview = ({ strategy, onGeneratePrompts, onStrategyUpdated }) =>
         </div>
       )}
 
-      <div className="bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl p-8 text-white shadow-xl">
-        <div className="flex items-start justify-between gap-6">
+      <div className="rounded-2xl border border-gray-200 bg-white p-5 sm:p-6 shadow-sm">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="flex-1">
             <div className="flex items-center gap-2 mb-2">
-              <Sparkles className="w-6 h-6" />
-              <span className="px-3 py-1 bg-white/20 rounded-full text-sm font-medium">Active Strategy</span>
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-blue-50 border border-blue-200 text-blue-700 text-xs font-semibold">
+                <Sparkles className="w-3.5 h-3.5" />
+                Strategy Snapshot
+              </span>
             </div>
-            <h2 className="text-3xl font-bold mb-2">{strategy.niche || 'Your LinkedIn Strategy'}</h2>
-            <p className="text-blue-100 text-lg">
-              Tailored content strategy for {strategy.target_audience || 'your audience'}
+            <h2 className="text-2xl font-bold text-gray-900">{nicheDisplay}</h2>
+            <p className="text-sm text-gray-600 mt-1">
+              Built for {audienceDisplay || 'your target audience'}.
             </p>
           </div>
-          <div className="flex flex-col items-end gap-3">
-            {promptCount === 0 || promptsStale ? (
-              <button
-                onClick={handleGeneratePrompts}
-                disabled={isGenerating}
-                className="px-6 py-3 bg-white text-blue-600 rounded-xl font-semibold hover:shadow-lg transition-all disabled:opacity-50 flex items-center gap-2"
-              >
-                {isGenerating ? (
-                  <>
-                    <div className="w-5 h-5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
-                    Generating...
-                  </>
-                ) : (
-                  <>
-                    <Sparkles className="w-5 h-5" />
-                    {promptCount === 0 ? 'Generate Prompts' : 'Regenerate Prompts'}
-                  </>
-                )}
-              </button>
-            ) : (
-              <div className="text-center">
-                <div className="text-4xl font-bold">{promptCount}</div>
-                <div className="text-sm text-blue-100">Prompts Ready</div>
-              </div>
-            )}
+
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-center min-w-[120px]">
+              <div className="text-2xl font-bold text-blue-700">{promptCount}</div>
+              <div className="text-xs text-blue-700">{promptsStale ? 'Prompts stale' : 'Prompts ready'}</div>
+            </div>
+            <button
+              onClick={handleGeneratePrompts}
+              disabled={isGenerating}
+              className="px-4 py-2.5 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50"
+            >
+              {isGenerating ? 'Generating...' : promptCount > 0 ? 'Regenerate prompts' : 'Generate prompts'}
+            </button>
           </div>
         </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <InfoCard icon={Target} label="Niche" value={strategy.niche || 'Not set'} tone="blue" />
+        <InfoCard icon={Target} label="Niche" value={nicheDisplay || 'Not set'} tone="blue" />
         <InfoCard
           icon={Users}
           label="Target Audience"
-          value={strategy.target_audience || 'Not set'}
+          value={audienceDisplay || 'Not set'}
           tone="indigo"
         />
         <InfoCard
           icon={Calendar}
           label="Posting Frequency"
-          value={strategy.posting_frequency || 'Not set'}
+          value={postingFrequencyDisplay}
           tone="emerald"
         />
         <InfoCard
           icon={MessageSquare}
           label="Tone and Style"
-          value={strategy.tone_style || 'Not set'}
+          value={toneDisplay}
           tone="amber"
         />
       </div>
@@ -368,7 +467,7 @@ const StrategyOverview = ({ strategy, onGeneratePrompts, onStrategyUpdated }) =>
           <TrendingUp className="w-5 h-5 text-blue-600" />
           Content Goals
         </h3>
-        <ArrayDisplay items={strategy.content_goals} icon={Star} emptyText="No goals defined yet" />
+        <ArrayDisplay items={displayGoals} icon={Star} emptyText="No goals defined yet" />
       </div>
 
       <div className="bg-white rounded-xl p-6 border border-gray-200">
@@ -376,7 +475,12 @@ const StrategyOverview = ({ strategy, onGeneratePrompts, onStrategyUpdated }) =>
           <MessageSquare className="w-5 h-5 text-indigo-600" />
           Content Topics
         </h3>
-        <ArrayDisplay items={strategy.topics} emptyText="No topics defined yet" />
+        <ArrayDisplay items={displayTopics} emptyText="No topics defined yet" />
+        {hiddenTopicCount > 0 && (
+          <p className="text-xs text-gray-500 mt-3">
+            Hidden {hiddenTopicCount} low-quality topic entr{hiddenTopicCount === 1 ? 'y' : 'ies'} from display.
+          </p>
+        )}
       </div>
 
       <div className="bg-white rounded-xl p-6 border border-gray-200">
@@ -466,8 +570,8 @@ const StrategyOverview = ({ strategy, onGeneratePrompts, onStrategyUpdated }) =>
       </div>
 
       {promptCount > 0 && (
-        <div className="bg-gradient-to-r from-green-50 to-emerald-50 rounded-xl p-6 border border-green-200">
-          <div className="flex items-center justify-between gap-4">
+        <div className="bg-white rounded-xl p-6 border border-green-200">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
               <h3 className="text-lg font-semibold text-gray-900 mb-1 flex items-center gap-2">
                 <Sparkles className="w-5 h-5 text-green-600" />
@@ -479,7 +583,7 @@ const StrategyOverview = ({ strategy, onGeneratePrompts, onStrategyUpdated }) =>
             </div>
             <button
               onClick={onGeneratePrompts}
-              className="px-6 py-3 bg-green-600 text-white rounded-xl font-semibold hover:bg-green-700 transition-colors flex items-center gap-2"
+              className="px-4 py-2.5 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition-colors flex items-center gap-2"
             >
               View Prompts
               <ArrowRight className="w-5 h-5" />
@@ -488,7 +592,7 @@ const StrategyOverview = ({ strategy, onGeneratePrompts, onStrategyUpdated }) =>
               onClick={() => {
                 window.location.href = '/bulk-generation';
               }}
-              className="px-6 py-3 bg-white text-green-700 border border-green-300 rounded-xl font-semibold hover:bg-green-50 transition-colors"
+              className="px-4 py-2.5 bg-white text-green-700 border border-green-300 rounded-lg font-semibold hover:bg-green-50 transition-colors"
             >
               Bulk Generate & Schedule
             </button>

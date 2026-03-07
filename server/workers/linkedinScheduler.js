@@ -103,6 +103,20 @@ const parseJsonObject = (value, fallback = {}) => {
   return { ...fallback };
 };
 
+const extractAutomationQueueReference = (post = {}) => {
+  const metadata = parseJsonObject(post?.metadata, {});
+  const automation =
+    metadata?.automation && typeof metadata.automation === 'object'
+      ? metadata.automation
+      : null;
+  const queueId = automation?.queueId ? String(automation.queueId).trim() : '';
+  if (!queueId) return null;
+  return {
+    queueId,
+    metadata,
+  };
+};
+
 const parseMediaUrls = (value) => {
   if (Array.isArray(value)) return value;
   if (typeof value === 'string' && value.trim()) {
@@ -695,6 +709,50 @@ async function markScheduledPostCompleted(postId, { metadata = undefined } = {})
   );
 }
 
+async function syncAutomationQueueStatus(post, { status, errorMessage = null } = {}) {
+  const reference = extractAutomationQueueReference(post);
+  if (!reference?.queueId) return;
+
+  const nextStatus = String(status || '').trim().toLowerCase();
+  if (!nextStatus) return;
+
+  const currentMeta = parseJsonObject(reference.metadata, {});
+  const nextMeta = {
+    ...currentMeta,
+    automation: {
+      ...(currentMeta.automation && typeof currentMeta.automation === 'object' ? currentMeta.automation : {}),
+      schedulerLastSyncAt: new Date().toISOString(),
+      schedulerStatus: nextStatus,
+      ...(errorMessage ? { schedulerError: String(errorMessage).slice(0, 400) } : {}),
+    },
+  };
+
+  try {
+    await pool.query(
+      `UPDATE linkedin_automation_queue
+       SET status = $3,
+           rejection_reason = CASE WHEN $3 = 'needs_approval' THEN $4 ELSE rejection_reason END,
+           metadata = $5::jsonb,
+           updated_at = NOW()
+       WHERE id = $1
+         AND user_id = $2`,
+      [
+        reference.queueId,
+        post.user_id,
+        nextStatus,
+        errorMessage ? String(errorMessage).slice(0, 400) : null,
+        JSON.stringify(nextMeta),
+      ]
+    );
+  } catch (error) {
+    if (error?.code === '42P01') {
+      logger.warn('[LinkedIn Scheduler] Automation queue table not available yet; skipping queue status sync');
+      return;
+    }
+    throw error;
+  }
+}
+
 async function scheduleRetryOrFail(post, error) {
   await detectRetrySchemaSupport();
 
@@ -948,6 +1006,7 @@ async function processScheduledPost(post) {
   }
 
   await markScheduledPostCompleted(post.id, { metadata: nextMetadata });
+  await syncAutomationQueueStatus(post, { status: 'posted' });
 
   return linkedinResult?.id || linkedinResult?.urn || null;
 }
@@ -1015,6 +1074,10 @@ async function schedulerTick() {
           schedulerStats.retriedPosts += 1;
           lastTickSummary.retried += 1;
         } else {
+          await syncAutomationQueueStatus(post, {
+            status: 'needs_approval',
+            errorMessage: retryResult?.error || 'Scheduling failed after retries',
+          });
           schedulerStats.failedPosts += 1;
           lastTickSummary.failed += 1;
         }

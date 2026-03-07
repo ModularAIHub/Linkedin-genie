@@ -18,7 +18,6 @@ const LinkedInConnect = () => {
   const [selectingAccount, setSelectingAccount] = useState(false);
   const oauthMessageReceivedRef = useRef(false);
   const popupPollRef = useRef(null);
-  const autoClosingSelectionRef = useRef(false);
   const refreshAccountsRef = useRef(refreshAccounts);
   const location = useLocation();
   const navigate = useNavigate();
@@ -78,17 +77,31 @@ const LinkedInConnect = () => {
     );
   };
 
-  const personalOrganizationIdsKey = getOrganizationIds(
-    personalAccounts.map((account) => ({
-      id:
-        account?.organization_id ||
-        (typeof account?.account_id === 'string' && account.account_id.startsWith('org:')
-          ? account.account_id.slice(4)
-          : null),
-    }))
-  ).join('|');
+  const stopPopupPolling = () => {
+    if (popupPollRef.current) {
+      clearInterval(popupPollRef.current);
+      popupPollRef.current = null;
+    }
+  };
 
-  const availableOrganizationIdsKey = getOrganizationIds(availableOrganizations).join('|');
+  const consumeCachedOAuthResult = async () => {
+    try {
+      const cached = localStorage.getItem(OAUTH_RESULT_KEY);
+      if (!cached) return false;
+
+      const parsed = JSON.parse(cached);
+      if (!parsed || Date.now() - (parsed.timestamp || 0) > 15 * 60 * 1000) {
+        localStorage.removeItem(OAUTH_RESULT_KEY);
+        return false;
+      }
+
+      localStorage.removeItem(OAUTH_RESULT_KEY);
+      await handleOAuthResult(parsed);
+      return true;
+    } catch {
+      return false;
+    }
+  };
 
   useEffect(() => {
     refreshAccountsRef.current = refreshAccounts;
@@ -109,8 +122,8 @@ const LinkedInConnect = () => {
     const status = result?.status || (result?.type === 'linkedin_auth_error' ? 'error' : 'success');
     if ((status === 'success' || result?.type === 'linkedin_auth_success') && result?.selectAccount && Array.isArray(result.organizations) && result.organizations.length > 0) {
       oauthMessageReceivedRef.current = true;
+      stopPopupPolling();
       setConnecting(false);
-      autoClosingSelectionRef.current = false;
       setAvailableOrganizations(result.organizations);
       setPendingSelectionId(result.selectionId || null);
       setShowAccountSelection(true);
@@ -124,6 +137,7 @@ const LinkedInConnect = () => {
 
     if (status === 'success' || result?.type === 'linkedin_auth_success') {
       oauthMessageReceivedRef.current = true;
+      stopPopupPolling();
       toast.success('LinkedIn account connected!');
       setConnecting(false);
       await refreshAccountsWithRetry();
@@ -131,6 +145,7 @@ const LinkedInConnect = () => {
     }
 
     oauthMessageReceivedRef.current = true;
+    stopPopupPolling();
     setConnecting(false);
     toast.error('LinkedIn authentication failed.');
   };
@@ -208,14 +223,6 @@ const LinkedInConnect = () => {
       try {
         const parsedOrganizations = JSON.parse(organizationsParam);
         if (Array.isArray(parsedOrganizations) && parsedOrganizations.length > 0) {
-          if (hasMatchingOrganizationAccount(parsedOrganizations)) {
-            clearPendingSelection();
-            if (location.search !== '?linkedin_connected=true') {
-              navigate('/settings?linkedin_connected=true', { replace: true });
-            }
-            return;
-          }
-
           const alreadyShowingSameSelection =
             showAccountSelection &&
             String(pendingSelectionId || '') === String(normalizedSelectionId || '') &&
@@ -257,11 +264,6 @@ const LinkedInConnect = () => {
       }
 
       if (Array.isArray(parsed.organizations) && parsed.organizations.length > 0) {
-        if (hasMatchingOrganizationAccount(parsed.organizations)) {
-          clearPendingSelection();
-          return;
-        }
-
         const cachedSelectionId = parsed.selectionId || null;
         const alreadyShowingSameSelection =
           showAccountSelection &&
@@ -272,7 +274,6 @@ const LinkedInConnect = () => {
           return;
         }
 
-        autoClosingSelectionRef.current = false;
         setAvailableOrganizations(parsed.organizations);
         setPendingSelectionId(cachedSelectionId);
         setShowAccountSelection(true);
@@ -286,33 +287,8 @@ const LinkedInConnect = () => {
     location.search,
     showAccountSelection,
     pendingSelectionId,
-    availableOrganizationIdsKey,
-    personalOrganizationIdsKey,
     navigate,
   ]);
-
-  useEffect(() => {
-    if (!showAccountSelection) {
-      autoClosingSelectionRef.current = false;
-      return;
-    }
-
-    if (!hasMatchingOrganizationAccount()) {
-      return;
-    }
-
-    if (autoClosingSelectionRef.current) {
-      return;
-    }
-
-    autoClosingSelectionRef.current = true;
-
-    setShowAccountSelection(false);
-    setAvailableOrganizations([]);
-    setPendingSelectionId(null);
-    clearPendingSelection();
-    navigate('/settings?linkedin_connected=true', { replace: true });
-  }, [showAccountSelection, availableOrganizationIdsKey, personalOrganizationIdsKey, navigate]);
 
   const handleAccountTypeSelection = async ({ accountType, organization = null }) => {
     setSelectingAccount(true);
@@ -368,9 +344,45 @@ const LinkedInConnect = () => {
     oauthMessageReceivedRef.current = false;
     setConnecting(true);
     try {
-      const response = await linkedin.connect({ popup: false });
+      const response = await linkedin.connect({ popup: true });
       const oauthUrl = response.data.url;
-      window.location.assign(oauthUrl);
+      const popupWidth = 560;
+      const popupHeight = 720;
+      const left = Math.max(0, Math.floor(window.screenX + (window.outerWidth - popupWidth) / 2));
+      const top = Math.max(0, Math.floor(window.screenY + (window.outerHeight - popupHeight) / 2));
+      const features = [
+        `width=${popupWidth}`,
+        `height=${popupHeight}`,
+        `left=${left}`,
+        `top=${top}`,
+        'resizable=yes',
+        'scrollbars=yes',
+      ].join(',');
+
+      const popup = window.open(oauthUrl, 'linkedin_oauth', features);
+      if (!popup) {
+        // Popup blocked by browser: fall back to full-page redirect.
+        window.location.assign(oauthUrl);
+        return;
+      }
+
+      popup.focus();
+      stopPopupPolling();
+      popupPollRef.current = setInterval(() => {
+        if (!popup || popup.closed) {
+          stopPopupPolling();
+          if (!oauthMessageReceivedRef.current) {
+            // Give postMessage/storage one more chance before showing a failure toast.
+            setTimeout(async () => {
+              if (oauthMessageReceivedRef.current) return;
+              const consumed = await consumeCachedOAuthResult();
+              if (consumed || oauthMessageReceivedRef.current) return;
+              setConnecting(false);
+              toast.error('LinkedIn connection was closed before completion.');
+            }, 700);
+          }
+        }
+      }, 500);
     } catch (error) {
       toast.error('Failed to initiate LinkedIn connection.');
       setConnecting(false);

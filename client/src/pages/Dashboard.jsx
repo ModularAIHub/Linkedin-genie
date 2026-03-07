@@ -126,7 +126,7 @@ const Dashboard = () => {
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        
+
         {/* Header */}
         <div className="mb-8">
           <div className="flex items-center justify-between mb-6">
@@ -140,7 +140,7 @@ const Dashboard = () => {
             </div>
             <Link
               to="/compose"
-              className="inline-flex items-center px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white font-semibold rounded-xl hover:from-blue-700 hover:to-blue-800 shadow-lg hover:shadow-xl transition-all transform hover:scale-105"
+              className="inline-flex items-center px-6 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold rounded-xl hover:from-blue-700 hover:to-indigo-700 shadow-md hover:shadow-xl transition-all transform hover:-translate-y-0.5"
             >
               <Plus className="h-5 w-5 mr-2" />
               Create Post
@@ -152,35 +152,35 @@ const Dashboard = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
           {analyticsLoading
             ? Array(4).fill(0).map((_, i) => (
-                <div key={i} className="bg-white rounded-xl shadow-sm p-6 animate-pulse">
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="h-12 w-12 bg-gray-200 rounded-lg" />
-                  </div>
-                  <div className="h-4 w-20 bg-gray-200 rounded mb-2" />
-                  <div className="h-8 w-16 bg-gray-300 rounded" />
+              <div key={i} className="bg-white rounded-xl shadow-sm p-6 animate-pulse">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="h-12 w-12 bg-gray-200 rounded-lg" />
                 </div>
-              ))
+                <div className="h-4 w-20 bg-gray-200 rounded mb-2" />
+                <div className="h-8 w-16 bg-gray-300 rounded" />
+              </div>
+            ))
             : stats.map((stat) => {
-                const Icon = stat.icon;
-                return (
-                  <div
-                    key={stat.name}
-                    className="bg-white rounded-xl shadow-sm hover:shadow-md transition-shadow p-6 border border-gray-100"
-                  >
-                    <div className="flex items-center justify-between mb-4">
-                      <div className={`p-3 rounded-lg ${stat.bgColor}`}>
-                        <Icon className={`h-6 w-6 ${stat.color}`} />
-                      </div>
+              const Icon = stat.icon;
+              return (
+                <div
+                  key={stat.name}
+                  className="bg-white/80 backdrop-blur-md rounded-2xl shadow-sm hover:shadow-lg transition-all p-6 border border-gray-100/80 hover:-translate-y-1"
+                >
+                  <div className="flex items-center justify-between mb-4">
+                    <div className={`p-3 rounded-lg ${stat.bgColor}`}>
+                      <Icon className={`h-6 w-6 ${stat.color}`} />
                     </div>
-                    <p className="text-sm font-medium text-gray-600 mb-1">
-                      {stat.name}
-                    </p>
-                    <p className="text-3xl font-bold text-gray-900">
-                      {stat.value.toLocaleString()}
-                    </p>
                   </div>
-                );
-              })}
+                  <p className="text-sm font-medium text-gray-600 mb-1">
+                    {stat.name}
+                  </p>
+                  <p className="text-3xl font-bold text-gray-900">
+                    {stat.value.toLocaleString()}
+                  </p>
+                </div>
+              );
+            })}
         </div>
 
         {/* Quick Actions */}
@@ -193,9 +193,9 @@ const Dashboard = () => {
                 <Link
                   key={action.name}
                   to={action.href}
-                  className="group bg-white rounded-xl shadow-sm hover:shadow-lg transition-all p-6 border border-gray-100"
+                  className="group bg-white/80 backdrop-blur-md rounded-2xl shadow-sm hover:shadow-xl transition-all p-6 border border-gray-100/80 hover:-translate-y-1 hover:border-blue-100"
                 >
-                  <div className={`inline-flex p-3 rounded-lg bg-gradient-to-r ${action.gradient} mb-4 group-hover:scale-110 transition-transform`}>
+                  <div className={`inline-flex p-3 rounded-xl bg-gradient-to-br ${action.gradient} mb-4 group-hover:scale-110 group-hover:rotate-3 transition-all duration-300 shadow-lg shadow-${action.gradient.split('-')[1]}/20`}>
                     <Icon className="h-6 w-6 text-white" />
                   </div>
                   <h3 className="text-lg font-semibold text-gray-900 mb-2 group-hover:text-blue-600 transition-colors">
@@ -216,33 +216,37 @@ const Dashboard = () => {
 
         {/* Credits & Settings */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl shadow-lg p-6 text-white">
-            <div className="flex items-center justify-between mb-4">
-              <div className="p-3 bg-white/20 rounded-lg backdrop-blur-sm">
-                <CreditCard className="h-6 w-6" />
+          <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl shadow-xl p-6 text-white relative overflow-hidden">
+            <div className="absolute top-0 right-0 -mt-4 -mr-4 w-32 h-32 bg-white/10 rounded-full blur-2xl"></div>
+            <div className="absolute bottom-0 left-0 -mb-4 -ml-4 w-24 h-24 bg-blue-400/20 rounded-full blur-xl"></div>
+            <div className="relative z-10">
+              <div className="flex items-center justify-between mb-4">
+                <div className="p-3 bg-white/20 rounded-lg backdrop-blur-sm">
+                  <CreditCard className="h-6 w-6 text-white" />
+                </div>
+                <Zap className="h-8 w-8 text-white/40" />
               </div>
-              <Zap className="h-8 w-8 opacity-50" />
+              <p className="text-blue-100 text-sm font-medium mb-2">
+                Credit Balance
+              </p>
+              {creditsLoading ? (
+                <div className="h-10 w-32 bg-white/20 rounded animate-pulse" />
+              ) : (
+                <p className="text-4xl font-bold mb-2">
+                  {creditBalance && typeof creditBalance === 'object'
+                    ? creditBalance.balance ?? '—'
+                    : creditBalance ?? '—'}
+                </p>
+              )}
+              {creditBalance?.creditsRemaining && (
+                <p className="text-blue-100 text-sm">
+                  {creditBalance.creditsRemaining} credits remaining
+                </p>
+              )}
             </div>
-            <p className="text-blue-100 text-sm font-medium mb-2">
-              Credit Balance
-            </p>
-            {creditsLoading ? (
-              <div className="h-10 w-32 bg-white/20 rounded animate-pulse" />
-            ) : (
-              <p className="text-4xl font-bold mb-2">
-                {creditBalance && typeof creditBalance === 'object'
-                  ? creditBalance.balance ?? '—'
-                  : creditBalance ?? '—'}
-              </p>
-            )}
-            {creditBalance?.creditsRemaining && (
-              <p className="text-blue-100 text-sm">
-                {creditBalance.creditsRemaining} credits remaining
-              </p>
-            )}
           </div>
 
-          <div className="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+          <div className="bg-white/80 backdrop-blur-md rounded-2xl shadow-sm p-6 border border-gray-100/80 hover:shadow-lg transition-shadow">
             <div className="flex items-center justify-between mb-4">
               <div className="p-3 bg-purple-50 rounded-lg">
                 <CheckCircle className="h-6 w-6 text-purple-600" />

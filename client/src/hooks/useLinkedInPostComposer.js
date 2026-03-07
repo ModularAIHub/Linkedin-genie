@@ -27,6 +27,7 @@ const useLinkedInPostComposer = () => {
   const [characterCount, setCharacterCount] = useState(0);
   const MAX_CROSSPOST_IMAGE_COUNT = 4;
   const MAX_CROSSPOST_MEDIA_TOTAL_BYTES = 6 * 1024 * 1024;
+  const MAX_LINKEDIN_POST_LENGTH = 3000;
 
   const fileToDataUrl = (file) => new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -264,10 +265,17 @@ const useLinkedInPostComposer = () => {
         // NOTE: Do NOT split by --- here — the server handles thread splitting
         // when isThread is true. Splitting here discards content after any
         // horizontal-rule separator the AI may include.
-        const clean = sanitizeAIContent(res.data.content, { allowMarkdown: false });
+        const clean = sanitizeAIContent(res.data.content, {
+          allowMarkdown: false,
+          maxLength: 12000,
+        });
         setContent(clean);
         setShowAIPrompt(false);
-        toast.success('AI content generated!');
+        if (clean.length > 3000) {
+          toast('AI generated more than 3000 characters. Edit before posting to LinkedIn.', { icon: '⚠️' });
+        } else {
+          toast.success('AI content generated!');
+        }
       } else {
         toast.error('AI did not return any content');
       }
@@ -294,6 +302,10 @@ const useLinkedInPostComposer = () => {
     try {
       // Convert HTML to Unicode-formatted plain text for LinkedIn
       const unicodeContent = htmlToUnicode(content);
+      if (unicodeContent.length > MAX_LINKEDIN_POST_LENGTH) {
+        toast.error(`LinkedIn post is too long (${unicodeContent.length}/${MAX_LINKEDIN_POST_LENGTH}). Please shorten it before posting.`);
+        return;
+      }
       // Prepare media as array of URLs or base64 (assume .url exists, fallback to file name)
       const media_urls = selectedImages.map(img => img.url || img.file?.name || '');
       const crossPostMedia = hasAnyCrossPostTarget ? await buildCrossPostMediaPayload() : [];
@@ -412,6 +424,10 @@ const useLinkedInPostComposer = () => {
     try {
       // Convert HTML to Unicode-formatted plain text for LinkedIn
       const unicodeContent = htmlToUnicode(content);
+      if (unicodeContent.length > MAX_LINKEDIN_POST_LENGTH) {
+        toast.error(`LinkedIn post is too long (${unicodeContent.length}/${MAX_LINKEDIN_POST_LENGTH}). Please shorten it before scheduling.`);
+        return;
+      }
       // Prepare media as array of URLs
       const media_urls = selectedImages.map(img => img.url || img.file?.name || '');
       const crossPostMedia = hasAnyCrossPostTarget ? await buildCrossPostMediaPayload() : [];

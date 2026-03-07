@@ -207,18 +207,20 @@ class AIService {
         
         const result = await provider.method(sanitizedPrompt, style);
         
-        // Convert markdown bold to Unicode
+        // Convert markdown bold to Unicode.
+        // Do not force LinkedIn's publish cap here; compose should receive full output.
         const convertedResult = convertMarkdownToUnicode(result);
-        
-        // FIXED: Enforce 3,000 character limit
-        const trimmedResult = convertedResult && convertedResult.length > 3000 
-          ? convertedResult.slice(0, 2997) + '...' 
-          : convertedResult;
+        const safeOutputCap = Number.parseInt(process.env.AI_OUTPUT_HARD_CAP || '12000', 10);
+        const normalizedResult = typeof convertedResult === 'string' ? convertedResult : '';
+        const output =
+          safeOutputCap > 0 && normalizedResult.length > safeOutputCap
+            ? normalizedResult.slice(0, safeOutputCap)
+            : normalizedResult;
         
         console.log(`✅ Content generated successfully with ${provider.name}`);
         
         return {
-          content: trimmedResult,
+          content: output,
           provider: provider.name,
           keyType: provider.keyType,
           success: true

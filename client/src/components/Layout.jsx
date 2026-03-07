@@ -72,7 +72,7 @@ const Layout = ({ children }) => {
       try {
         const response = await credits.getBalance();
         setCreditBalance(response.data.balance);
-      } catch (error) {}
+      } catch (error) { }
     };
 
     const interval = setInterval(refreshCredits, CREDITS_REFRESH_MS);
@@ -98,13 +98,11 @@ const Layout = ({ children }) => {
           onClick={() => setIsSidebarOpen(false)}
         />
       )}
-      {/* Sidebar */}
       <div
-        className={`fixed inset-y-0 left-0 z-50 w-64 bg-white shadow-lg transform transition-transform duration-300 ease-in-out lg:translate-x-0 lg:relative lg:flex lg:flex-col ${
-          isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
-        }`}
+        className={`fixed inset-y-0 left-0 z-50 w-64 bg-white/80 backdrop-blur-xl shadow-2xl border-r border-blue-100/50 transform transition-transform duration-300 ease-in-out lg:translate-x-0 lg:relative lg:flex lg:flex-col ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
+          }`}
       >
-        <div className="flex items-center justify-between h-16 px-6 border-b border-blue-200">
+        <div className="flex items-center justify-between h-16 px-6 border-b border-blue-100/50">
           <div className="flex items-center">
             <span className="text-xl font-bold gradient-text">LinkedIn Genie</span>
           </div>
@@ -124,11 +122,10 @@ const Layout = ({ children }) => {
                 <li key={item.name}>
                   <Link
                     to={item.href}
-                    className={`flex items-center justify-between px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
-                      isActive(item.href)
+                    className={`flex items-center justify-between px-4 py-2 text-sm font-medium rounded-lg transition-colors ${isActive(item.href)
                         ? 'bg-blue-50 text-[#0077B5] border-r-2 border-[#0077B5]'
                         : 'text-blue-700 hover:bg-blue-50 hover:text-[#0077B5]'
-                    }`}
+                      }`}
                     onClick={() => setIsSidebarOpen(false)}
                   >
                     <div className="flex items-center">
@@ -143,11 +140,10 @@ const Layout = ({ children }) => {
                       )}
                       {item.proOnly && (
                         <span
-                          className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-full ${
-                            isProLocked
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-full ${isProLocked
                               ? 'bg-amber-100 text-amber-800 border border-amber-200'
                               : 'bg-emerald-100 text-emerald-700 border border-emerald-200'
-                          }`}
+                            }`}
                         >
                           {isProLocked && <Lock className="h-3 w-3" />}
                           Pro
@@ -202,7 +198,7 @@ const Layout = ({ children }) => {
                   )}
                 </div>
               )}
-              
+
               <div className="relative">
                 <button
                   onClick={() => setIsUserMenuOpen(!isUserMenuOpen)}

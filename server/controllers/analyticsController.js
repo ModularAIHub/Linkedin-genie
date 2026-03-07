@@ -7,6 +7,28 @@ const FREE_ANALYTICS_DAYS = 7;
 const FREE_TOP_POSTS_LIMIT = 5;
 const PRO_TOP_POSTS_LIMIT = 20;
 
+let socialConnectedAccountsColumnCache = null;
+
+async function getSocialConnectedAccountsColumns() {
+  if (socialConnectedAccountsColumnCache instanceof Set) {
+    return socialConnectedAccountsColumnCache;
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT column_name
+       FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND table_name = 'social_connected_accounts'`
+    );
+    socialConnectedAccountsColumnCache = new Set((rows || []).map((row) => String(row.column_name || '').trim()));
+  } catch {
+    socialConnectedAccountsColumnCache = new Set();
+  }
+
+  return socialConnectedAccountsColumnCache;
+}
+
 function normalizeLinkedInActorId(rawId) {
   const value = String(rawId || '').trim();
   if (!value) return null;
@@ -18,13 +40,34 @@ function normalizeLinkedInActorId(rawId) {
 
 // Helper: Get LinkedIn access token for user
 async function getLinkedInAuthForUser(userId, accountId = null) {
+  const columns = await getSocialConnectedAccountsColumns();
+  const hasAccountType = columns.has('account_type');
+  const hasOrganizationId = columns.has('organization_id');
+
+  const accountTypeSelect = hasAccountType
+    ? 'account_type'
+    : `COALESCE(
+         NULLIF(metadata->>'account_type', ''),
+         CASE WHEN account_id LIKE 'org:%' THEN 'organization' ELSE 'personal' END
+       ) AS account_type`;
+
+  const organizationIdSelect = hasOrganizationId
+    ? 'organization_id'
+    : `COALESCE(
+         NULLIF(metadata->>'organization_id', ''),
+         CASE
+           WHEN account_id LIKE 'org:%' THEN NULLIF(REPLACE(account_id, 'org:', ''), '')
+           ELSE NULL
+         END
+       ) AS organization_id`;
+
   let query = `SELECT access_token,
             account_id,
-            account_type,
-            organization_id,
+            ${accountTypeSelect},
+            ${organizationIdSelect},
             COALESCE(
               NULLIF(metadata->>'linkedin_user_id', ''),
-              NULLIF(organization_id, ''),
+              ${hasOrganizationId ? "NULLIF(organization_id, '')" : 'NULL'},
               CASE
                 WHEN account_id LIKE 'org:%' THEN NULLIF(REPLACE(account_id, 'org:', ''), '')
                 ELSE NULLIF(account_id, '')

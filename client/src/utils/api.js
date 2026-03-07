@@ -184,5 +184,29 @@ export const strategy = {
   delete: (strategyId) => api.delete(`/api/strategy/${strategyId}`),
 };
 
+// Strategy analysis flow (Tweet Genie parity)
+export const profileAnalysis = {
+  analyse: (strategyId, options = {}) =>
+    api.post('/api/strategy/init-analysis', { strategyId, ...options }, { timeout: 120000 }),
+  getStatus: (analysisId) => api.get(`/api/strategy/analysis-status/${analysisId}`),
+  getLatest: (strategyId) => api.get('/api/strategy/latest-analysis', { params: { strategyId } }),
+  confirmStep: (analysisId, step, value) => api.post('/api/strategy/apply-analysis', { analysisId, step, value }),
+  analyseReferenceAccounts: (analysisId, handles) =>
+    api.post('/api/strategy/reference-analysis', { analysisId, handles }),
+  generatePrompts: (analysisId, strategyId) =>
+    api.post('/api/strategy/generate-analysis-prompts', { analysisId, strategyId }, { timeout: 120000 }),
+};
+
+// LinkedIn automation endpoints
+export const automationLinkedin = {
+  getProfileContext: () => api.get('/api/automation/linkedin/profile-context'),
+  saveProfileContext: (payload) => api.post('/api/automation/linkedin/profile-context', payload),
+  saveCompetitors: (payload) => api.put('/api/automation/linkedin/competitors', payload),
+  fetchLatest: (payload = {}) => api.post('/api/automation/linkedin/fetch-latest', payload),
+  run: (payload) => api.post('/api/automation/linkedin/run', payload),
+  getQueue: (params) => api.get('/api/automation/linkedin/queue', { params }),
+  patchQueueItem: (id, payload) => api.patch(`/api/automation/linkedin/queue/${id}`, payload),
+};
+
 export default api;
 // ...existing code for new Tweet Genie parity version only...

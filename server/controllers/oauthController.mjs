@@ -23,6 +23,7 @@ const newPlatformPool = new Pool({
 // In-memory store for team OAuth state (like Twitter's pkceStore)
 const stateStore = new Map();
 const SELECTION_STATE_TTL_MS = 10 * 60 * 1000;
+let oauthStateStoreEnsured = false;
 
 // UPDATED SCOPES - includes analytics scopes
 const LINKEDIN_SCOPES = 'openid profile email w_member_social r_organization_social r_organization_admin w_organization_social';
@@ -30,7 +31,27 @@ const LINKEDIN_PLATFORM = 'linkedin';
 
 const getSelectionStateKey = (selectionId) => `selection_${selectionId}`;
 
+async function ensureOauthStateStoreTable() {
+  if (oauthStateStoreEnsured) return;
+
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS oauth_state_store (
+        state TEXT PRIMARY KEY,
+        payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    oauthStateStoreEnsured = true;
+  } catch (error) {
+    console.warn('[OAuth Selection] Failed to ensure oauth_state_store table:', error?.message || error);
+  }
+}
+
 async function persistSelectionState(selectionId, payload, ttlMs = SELECTION_STATE_TTL_MS) {
+  await ensureOauthStateStoreTable();
   const key = getSelectionStateKey(selectionId);
   const expiresAt = payload?.expiresAt || (Date.now() + ttlMs);
   const record = {
@@ -57,6 +78,7 @@ async function persistSelectionState(selectionId, payload, ttlMs = SELECTION_STA
 }
 
 async function loadSelectionState(selectionId) {
+  await ensureOauthStateStoreTable();
   const key = getSelectionStateKey(selectionId);
   const inMemory = stateStore.get(key);
 
@@ -89,6 +111,7 @@ async function loadSelectionState(selectionId) {
 }
 
 async function clearSelectionState(selectionId) {
+  await ensureOauthStateStoreTable();
   const key = getSelectionStateKey(selectionId);
   stateStore.delete(key);
 
@@ -277,6 +300,22 @@ function getClientCallbackUrl({
   return `${clientUrl}/auth/callback?${params.toString()}`;
 }
 
+function getBestProfileImageFromMeResponse(profile = {}) {
+  try {
+    const displayImage = profile?.profilePicture?.['displayImage~'];
+    const elements = Array.isArray(displayImage?.elements) ? displayImage.elements : [];
+    for (const element of elements) {
+      const identifiers = Array.isArray(element?.identifiers) ? element.identifiers : [];
+      if (identifiers[0]?.identifier) {
+        return identifiers[0].identifier;
+      }
+    }
+  } catch {
+    // Ignore parsing failures.
+  }
+  return null;
+}
+
 function sendPopupResult(
   res,
   messageType,
@@ -358,10 +397,23 @@ export async function handleOAuthCallback(req, res) {
   // Check if this is a team connection (state starts with 'team_')
   const isTeamConnection = state && state.startsWith('team_');
   const stateData = state ? stateStore.get(state) : null;
-  const isPopupFlow = !isTeamConnection && !!stateData?.popup;
+  const isPersonalState = typeof state === 'string' && state.startsWith('personal_');
+  // Be resilient if in-memory state expires/restarts before callback lands.
+  // For personal OAuth we can still safely serve popup HTML; when there is no opener,
+  // fallback redirect continues the full-page flow.
+  const isPopupFlow = !isTeamConnection && (Boolean(stateData?.popup) || isPersonalState);
 
   if (!code) {
     if (!isTeamConnection) {
+      if (isPopupFlow) {
+        return sendPopupResult(
+          res,
+          'linkedin_auth_error',
+          { reason: 'missing_code' },
+          'LinkedIn connection was cancelled.',
+          getClientCallbackUrl({ status: 'error', reason: 'missing_code' })
+        );
+      }
       return res.redirect(getClientCallbackUrl({ status: 'error', reason: 'missing_code' }));
     }
     if (isTeamConnection && stateData?.returnUrl) {
@@ -441,6 +493,36 @@ export async function handleOAuthCallback(req, res) {
         email: userInfo.email,
         name: userInfo.name
       });
+
+      // Best-effort enrichment from /v2/me. Not all fields are guaranteed depending on app scopes.
+      try {
+        const meRes = await axios.get(
+          'https://api.linkedin.com/v2/me?projection=(id,localizedFirstName,localizedLastName,localizedHeadline,vanityName,profilePicture(displayImage~:playableStreams))',
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'X-Restli-Protocol-Version': '2.0.0',
+            },
+          }
+        );
+        const me = meRes.data || {};
+        userInfo = {
+          ...userInfo,
+          id: me.id || userInfo.id || null,
+          sub: me.id || userInfo.sub || null,
+          preferred_username: me.vanityName || userInfo.preferred_username || null,
+          given_name: me.localizedFirstName || userInfo.given_name || null,
+          family_name: me.localizedLastName || userInfo.family_name || null,
+          name:
+            userInfo.name ||
+            [me.localizedFirstName, me.localizedLastName].filter(Boolean).join(' ').trim() ||
+            null,
+          picture: getBestProfileImageFromMeResponse(me) || userInfo.picture || null,
+          headline: me.localizedHeadline || userInfo.headline || null,
+        };
+      } catch (meErr) {
+        console.warn('[OAuth] LinkedIn /v2/me enrichment unavailable:', meErr?.response?.status || meErr?.message || meErr);
+      }
     } catch (userInfoErr) {
       console.error('Failed to fetch LinkedIn profile/email:', userInfoErr?.response?.data || userInfoErr.message);
     }
@@ -705,6 +787,7 @@ export async function handleOAuthCallback(req, res) {
               account_type: 'personal',
               legacy_team_account_id: teamRows[0]?.id || null,
               linkedin_user_id: linkedinUserId || null,
+              profile_headline: headline || null,
             },
             connectedBy: userId,
           });
@@ -812,15 +895,15 @@ export async function handleOAuthCallback(req, res) {
         if (isInActiveTeam) {
           console.log('[OAuth] User is in a team, blocking personal LinkedIn connection', { userId });
           if (isPopupFlow) {
-            return res.redirect(getClientCallbackUrl({ status: 'error', reason: 'in_team' }));
+            return sendPopupResult(
+              res,
+              'linkedin_auth_error',
+              { reason: 'in_team' },
+              'Personal LinkedIn account not available for this workspace.',
+              getClientCallbackUrl({ status: 'error', reason: 'in_team' })
+            );
           }
-          return sendPopupResult(
-            res,
-            'linkedin_auth_error',
-            { reason: 'in_team' },
-            'Personal LinkedIn account not available for this workspace.',
-            getClientCallbackUrl({ status: 'error', reason: 'in_team' })
-          );
+          return res.redirect(getClientCallbackUrl({ status: 'error', reason: 'in_team' }));
         }
 
         if (organizations.length > 0) {
@@ -849,7 +932,17 @@ export async function handleOAuthCallback(req, res) {
           });
 
           if (isPopupFlow) {
-            return res.redirect(callbackUrl);
+            return sendPopupResult(
+              res,
+              'linkedin_auth_success',
+              {
+                selectAccount: true,
+                selectionId,
+                organizations,
+              },
+              'LinkedIn connected. Choose personal or organization account in the main window.',
+              selectionUrl || callbackUrl
+            );
           }
 
           return res.redirect(selectionUrl);
@@ -906,6 +999,7 @@ export async function handleOAuthCallback(req, res) {
             account_type: 'personal',
             legacy_personal_row_id: personalRows[0]?.id || null,
             linkedin_user_id: linkedinUserId || null,
+            profile_headline: headline || null,
           },
           connectedBy: userId,
         });
@@ -913,7 +1007,13 @@ export async function handleOAuthCallback(req, res) {
     }
 
     if (isPopupFlow) {
-      return res.redirect(getClientCallbackUrl({ status: 'success' }));
+      return sendPopupResult(
+        res,
+        'linkedin_auth_success',
+        { status: 'success' },
+        'LinkedIn account connected successfully.',
+        getClientCallbackUrl({ status: 'success' })
+      );
     }
 
     return res.redirect(getClientCallbackUrl({ status: 'success' }));
@@ -921,7 +1021,16 @@ export async function handleOAuthCallback(req, res) {
   } catch (error) {
     console.error('OAuth callback error:', error?.response?.data || error.message, error.stack);
     if (isPopupFlow) {
-      return res.redirect(getClientCallbackUrl({ status: 'error', reason: 'oauth_failed', message: error.message }));
+      return sendPopupResult(
+        res,
+        'linkedin_auth_error',
+        {
+          reason: 'oauth_failed',
+          message: error?.message || 'OAuth failed',
+        },
+        'LinkedIn authentication failed.',
+        getClientCallbackUrl({ status: 'error', reason: 'oauth_failed', message: error.message })
+      );
     }
     return res.redirect(getClientCallbackUrl({ status: 'error', reason: 'oauth_failed', message: error.message }));
   }
@@ -1004,18 +1113,25 @@ export async function selectAccountType(req, res) {
 
     if (selectionId) {
       const storedData = await loadSelectionState(selectionId);
-      const isStoredSelectionValid =
-        storedData &&
-        (!storedData.expiresAt || Date.now() <= Number(storedData.expiresAt)) &&
-        String(storedData.userId) === String(user.id);
-
-      if (storedData && storedData.expiresAt && Date.now() > Number(storedData.expiresAt)) {
-        await clearSelectionState(selectionId);
+      if (!storedData) {
+        return res.status(400).json({ error: 'Selection session expired. Please reconnect LinkedIn and try again.' });
       }
 
-      const organizations = isStoredSelectionValid && Array.isArray(storedData.organizations)
+      if (storedData.expiresAt && Date.now() > Number(storedData.expiresAt)) {
+        await clearSelectionState(selectionId);
+        return res.status(400).json({ error: 'Selection session expired. Please reconnect LinkedIn and try again.' });
+      }
+
+      if (String(storedData.userId) !== String(user.id)) {
+        return res.status(403).json({ error: 'Selection session does not belong to the current user.' });
+      }
+
+      const organizations = Array.isArray(storedData.organizations)
         ? storedData.organizations
         : [];
+      if (accountType === 'organization' && organizations.length === 0) {
+        return res.status(400).json({ error: 'No authorized organization pages found for this LinkedIn session.' });
+      }
       const selectedOrg = accountType === 'organization' && organizations.length > 0
         ? organizations.find((org) => String(org?.id) === String(organizationId))
         : null;
@@ -1046,8 +1162,7 @@ export async function selectAccountType(req, res) {
         ? null
         : (storedData?.headline || null);
 
-      if (isStoredSelectionValid) {
-        const { rows } = await pool.query(`
+      const { rows } = await pool.query(`
           INSERT INTO linkedin_auth (
             user_id, access_token, refresh_token, token_expires_at,
             linkedin_user_id, linkedin_username, linkedin_display_name,
@@ -1087,42 +1202,8 @@ export async function selectAccountType(req, res) {
           selectedOrganizationVanityName
         ]);
 
-        updatedAccount = rows[0] || null;
-        await clearSelectionState(selectionId);
-      } else {
-        const { rows: fallbackRows } = await pool.query(`
-          UPDATE linkedin_auth
-          SET account_type = $1,
-              organization_id = $2,
-              organization_name = $3,
-              organization_vanity_name = $4,
-              linkedin_username = $5,
-              linkedin_display_name = $6,
-              linkedin_profile_image_url = COALESCE($7, linkedin_profile_image_url),
-              headline = $8,
-              updated_at = NOW()
-          WHERE id = (
-            SELECT id
-            FROM linkedin_auth
-            WHERE user_id = $9
-            ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC
-            LIMIT 1
-          )
-          RETURNING *
-        `, [
-          accountType,
-          accountType === 'organization' ? String(organizationId) : null,
-          selectedOrganizationName,
-          selectedOrganizationVanityName,
-          selectedUsername,
-          selectedDisplayName,
-          selectedProfileImage,
-          selectedHeadline,
-          user.id
-        ]);
-
-        updatedAccount = fallbackRows[0] || null;
-      }
+      updatedAccount = rows[0] || null;
+      await clearSelectionState(selectionId);
     } else {
       const { rows: updatedRows } = await pool.query(`
         UPDATE linkedin_auth 
@@ -1194,6 +1275,7 @@ export async function selectAccountType(req, res) {
         organization_vanity_name: accountType === 'organization' ? organizationVanityName : null,
         legacy_personal_row_id: updatedAccount.id || null,
         linkedin_user_id: updatedAccount.linkedin_user_id || null,
+        profile_headline: updatedAccount.headline || null,
       },
       connectedBy: user.id,
     });
@@ -1344,6 +1426,7 @@ export async function completeTeamAccountSelection(req, res) {
         organization_name: accountType === 'organization' ? accountName : null,
         linkedin_user_id: linkedinUserId || null,
         legacy_team_account_id: teamInsertRows[0]?.id || null,
+        profile_headline: accountType === 'personal' ? (headline || null) : null,
       },
       connectedBy: userId,
     });

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Star,
   Search,
@@ -10,6 +10,7 @@ import {
   Square,
   CheckSquare,
   Send,
+  Loader2,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
@@ -62,7 +63,26 @@ const cleanPromptText = (value = '') =>
     .replace(/\s+/g, ' ')
     .trim();
 
-const PromptLibrary = ({ strategyId }) => {
+const buildMergedPromptText = (basePrompt = '', variables = {}) => {
+  const cleanedPrompt = cleanPromptText(basePrompt);
+  const instruction =
+    typeof variables.instruction === 'string' ? cleanPromptText(variables.instruction) : '';
+  const angle = typeof variables.angle === 'string' ? cleanPromptText(variables.angle) : '';
+  const cta = typeof variables.cta === 'string' ? cleanPromptText(variables.cta) : '';
+  const ideaTitle = typeof variables.idea_title === 'string' ? cleanPromptText(variables.idea_title) : '';
+
+  const sections = [cleanedPrompt];
+  if (ideaTitle) sections.push(`Idea focus: ${ideaTitle}`);
+  if (instruction && instruction.toLowerCase() !== cleanedPrompt.toLowerCase()) {
+    sections.push(`Instruction: ${instruction}`);
+  }
+  if (angle) sections.push(`Angle: ${angle}`);
+  if (cta) sections.push(`CTA: ${cta}`);
+
+  return sections.filter(Boolean).join('\n\n');
+};
+
+const PromptLibrary = ({ strategyId, strategyExtraContext = '', fromAnalysis = false, onPromptsLoaded }) => {
   const navigate = useNavigate();
   const [prompts, setPrompts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -71,10 +91,65 @@ const PromptLibrary = ({ strategyId }) => {
   const [copiedId, setCopiedId] = useState(null);
   const [selectedPromptIds, setSelectedPromptIds] = useState([]);
   const [generatedPromptIds, setGeneratedPromptIds] = useState([]);
+  const [isGenerating, setIsGenerating] = useState(fromAnalysis && prompts.length === 0);
+  const pollIntervalRef = useRef(null);
 
   useEffect(() => {
     loadPrompts();
   }, [strategyId]);
+
+  useEffect(() => {
+    if (fromAnalysis && prompts.length === 0) {
+      setIsGenerating(true);
+    }
+  }, [fromAnalysis, prompts.length]);
+
+  useEffect(() => {
+    if (!isGenerating || !strategyId) return;
+
+    pollIntervalRef.current = setInterval(async () => {
+      const response = await strategyApi.getPrompts(strategyId).catch(() => null);
+      const latestPrompts = Array.isArray(response?.data) ? response.data : [];
+      if (latestPrompts.length > 0) {
+        setPrompts(latestPrompts);
+      }
+    }, 3000);
+
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    };
+  }, [isGenerating, strategyId]);
+
+  useEffect(() => {
+    if (!isGenerating) return;
+    const timeout = setTimeout(() => {
+      setIsGenerating(false);
+      if (prompts.length === 0) {
+        toast.error('Prompt generation is taking longer than expected. Please refresh and retry.');
+      }
+      if (typeof onPromptsLoaded === 'function') {
+        onPromptsLoaded();
+      }
+    }, 60000);
+    return () => clearTimeout(timeout);
+  }, [isGenerating, prompts.length, onPromptsLoaded]);
+
+  useEffect(() => {
+    if (prompts.length === 0) return;
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    if (isGenerating) {
+      setIsGenerating(false);
+    }
+    if (typeof onPromptsLoaded === 'function') {
+      onPromptsLoaded();
+    }
+  }, [prompts, isGenerating, onPromptsLoaded]);
 
   useEffect(() => {
     if (!strategyId) return;
@@ -270,16 +345,12 @@ const PromptLibrary = ({ strategyId }) => {
       generatedAt: new Date().toISOString(),
       items: selectedPrompts.map((prompt) => {
         const variables = parseVariables(prompt.variables);
-        const instruction =
-          typeof variables.instruction === 'string' ? cleanPromptText(variables.instruction) : '';
         const cleanedPrompt = cleanPromptText(prompt.prompt_text);
         const recommendedFormat =
           typeof variables.recommended_format === 'string'
             ? variables.recommended_format.trim().toLowerCase()
             : 'single_post';
-        const mergedPrompt = instruction
-          ? `${cleanedPrompt}\n\nInstruction: ${instruction}`
-          : cleanedPrompt;
+        const mergedPrompt = buildMergedPromptText(cleanedPrompt, variables);
 
         return {
           id: prompt.id,
@@ -300,16 +371,12 @@ const PromptLibrary = ({ strategyId }) => {
 
   const handleGeneratePrompt = (prompt) => {
     const variables = parseVariables(prompt.variables);
-    const instruction =
-      typeof variables.instruction === 'string' ? cleanPromptText(variables.instruction) : '';
     const cleanedPrompt = cleanPromptText(prompt.prompt_text);
     const recommendedFormat =
       typeof variables.recommended_format === 'string'
         ? variables.recommended_format.trim().toLowerCase()
         : 'single_post';
-    const mergedPrompt = instruction
-      ? `${cleanedPrompt}\n\nInstruction: ${instruction}`
-      : cleanedPrompt;
+    const mergedPrompt = buildMergedPromptText(cleanedPrompt, variables);
 
     const payload = {
       id: prompt.id,
@@ -345,6 +412,19 @@ const PromptLibrary = ({ strategyId }) => {
   }
 
   if (prompts.length === 0) {
+    if (isGenerating) {
+      return (
+        <div className="text-center py-16">
+          <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-4">
+            <Loader2 className="w-10 h-10 text-blue-600 animate-spin" />
+          </div>
+          <h3 className="text-xl font-semibold text-gray-900 mb-2">Generating prompts...</h3>
+          <p className="text-gray-600 mb-2">Your analysis is complete. Prompt library is being prepared.</p>
+          <p className="text-xs text-gray-500">This can take up to a minute.</p>
+        </div>
+      );
+    }
+
     return (
       <div className="text-center py-16">
         <div className="w-20 h-20 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -481,6 +561,10 @@ const PromptLibrary = ({ strategyId }) => {
             instructionRaw && instructionRaw.toLowerCase() !== cleanedPrompt.toLowerCase()
               ? instructionRaw
               : '';
+          const ideaTitle =
+            typeof variables.idea_title === 'string' ? cleanPromptText(variables.idea_title) : '';
+          const angle = typeof variables.angle === 'string' ? cleanPromptText(variables.angle) : '';
+          const cta = typeof variables.cta === 'string' ? cleanPromptText(variables.cta) : '';
           const hasGenerated = generatedPromptIds.includes(prompt.id) || Number(prompt.usage_count) > 0;
           const isSelected = selectedPromptIds.includes(prompt.id);
 
@@ -528,10 +612,34 @@ const PromptLibrary = ({ strategyId }) => {
 
               <p className="text-gray-800 leading-relaxed mb-4 min-h-[96px] line-clamp-4">{cleanedPrompt}</p>
 
+              {ideaTitle && (
+                <div className="mb-3 rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2">
+                  <p className="text-xs font-semibold text-indigo-700 mb-1">Idea</p>
+                  <p className="text-xs text-indigo-900 line-clamp-2">{ideaTitle}</p>
+                </div>
+              )}
+
               {instruction && (
                 <div className="mb-4 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2">
                   <p className="text-xs font-semibold text-blue-700 mb-1">Instruction</p>
                   <p className="text-xs text-blue-900 line-clamp-3">{instruction}</p>
+                </div>
+              )}
+
+              {(angle || cta) && (
+                <div className="mb-4 grid grid-cols-1 gap-2">
+                  {angle && (
+                    <div className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2">
+                      <p className="text-xs font-semibold text-amber-700 mb-1">Angle</p>
+                      <p className="text-xs text-amber-900 line-clamp-2">{angle}</p>
+                    </div>
+                  )}
+                  {cta && (
+                    <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2">
+                      <p className="text-xs font-semibold text-emerald-700 mb-1">CTA</p>
+                      <p className="text-xs text-emerald-900 line-clamp-2">{cta}</p>
+                    </div>
+                  )}
                 </div>
               )}
 

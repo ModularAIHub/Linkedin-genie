@@ -1,6 +1,16 @@
 import { pool } from '../config/database.js';
 import aiService from './aiService.js';
 
+const PROMPT_TOPIC_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'as', 'at', 'by', 'for', 'from', 'in', 'is', 'it', 'of', 'on', 'or', 'to', 'the',
+  'our', 'we', 'you', 'your', 'i', 'me', 'my', 'us', 'be', 'been', 'being', 'was', 'were',
+  'this', 'that', 'these', 'those', 'with', 'without', 'into', 'over', 'under', 'between',
+  'post', 'posts', 'content', 'linkedin', 'strategy', 'team', 'feature', 'features', 'users', 'user',
+  'hashtag', 'hashtags', 'published', 'edited', 'repost', 'reposted',
+  'add', 'unlock', 'precise', 'analysis', 'analysi', 'configured', 'yet', 'out',
+]);
+const SHORT_TOPIC_ALLOWLIST = new Set(['ai', 'ux', 'ui', 'seo', 'api', 'b2b', 'b2c']);
+
 class StrategyService {
   constructor() {
     this.productScope = 'linkedin-genie';
@@ -461,148 +471,181 @@ class StrategyService {
       .map(({ _fingerprint, ...prompt }) => prompt);
   }
 
-  buildFallbackPromptTemplates(strategy, desiredCount = 30) {
-    const topics = this.normalizeAndDedupe(Array.isArray(strategy?.topics) ? strategy.topics : [], 10, 80);
-    const goals = this.normalizeAndDedupe(Array.isArray(strategy?.content_goals) ? strategy.content_goals : [], 10, 80);
-    const tone = strategy?.tone_style || 'clear and practical';
-    const audience = strategy?.target_audience || 'your target audience';
-    const niche = strategy?.niche || 'your niche';
-    const topicPool = topics.length > 0 ? topics : [niche];
-    const goalPool = goals.length > 0 ? goals : ['Build authority'];
+  buildFallbackPromptTemplates(strategy, desiredCount = 30, signalBundle = null) {
+    const signals = signalBundle || this.buildPromptSignalBundle(strategy);
+    const tone = String(strategy?.tone_style || 'clear and practical').trim();
     const categories = this.getPromptCategories();
+    const ideaSeeds = this.buildPromptIdeaSeeds(strategy, signals, Math.max(desiredCount, 24));
 
     const templateBank = {
       educational: [
-        {
-          prompt_text: 'Break down one overlooked lesson about {topic} that {audience} can apply in under 15 minutes.',
-          instruction: 'Start with a myth, then give a simple framework and one concrete action.',
+        (seed) => ({
+          prompt_text: `Create a myth-busting LinkedIn post for ${seed.audience} on "${seed.topicLabel}". Use this signal as proof: ${seed.insight}. Teach a 3-step framework that helps them ${seed.goalPhrase}.`,
+          instruction: `Hook with the wrong belief, teach the framework with one concrete example, then close with a measurable action for this week.`,
           recommended_format: 'single_post',
-        },
-        {
-          prompt_text: 'Explain {topic} with a simple real-world example that makes the concept click for beginners.',
-          instruction: 'Use plain language, one short example, and finish with a takeaway sentence.',
+        }),
+        (seed) => ({
+          prompt_text: `Write an educational teardown on "${seed.topicLabel}" for ${seed.audience}. Compare what most people do vs what actually works, using this context: ${seed.insight}.`,
+          instruction: `Use a before/after structure and include one benchmark readers can track in 7 days.`,
           recommended_format: 'single_post',
-        },
-        {
-          prompt_text: 'Teach a before vs after approach for {topic} so {audience} avoid common beginner mistakes.',
-          instruction: 'Contrast old method vs improved method with one measurable outcome.',
-          recommended_format: 'single_post',
-        },
+        }),
+        (seed) => ({
+          prompt_text: `Build a beginner-friendly explainer on "${seed.topicLabel}" focused on how to ${seed.goalPhrase}. Reference this trend/opportunity: ${seed.angleHint}.`,
+          instruction: `Use plain language, one real scenario, and a tight checklist readers can copy immediately.`,
+          recommended_format: 'carousel',
+        }),
       ],
       engagement: [
-        {
-          prompt_text: 'Ask {audience} what is the hardest part of improving {topic} right now.',
-          instruction: 'Use one focused question and 2 short reply options to increase comments.',
+        (seed) => ({
+          prompt_text: `Craft a comment-magnet post for ${seed.audience}: "What is your biggest blocker with ${seed.topicLabel.toLowerCase()} right now?" Anchor it to this observed signal: ${seed.insight}.`,
+          instruction: `Offer 2 concrete answer choices plus "other", then ask for specifics in the comments.`,
           recommended_format: 'question',
-        },
-        {
-          prompt_text: 'Run a quick this-or-that poll about {topic} to understand audience preferences.',
-          instruction: 'Keep options clear and close with why their answer matters.',
+        }),
+        (seed) => ({
+          prompt_text: `Create a poll about ${seed.topicLabel} for ${seed.audience} tied to how they can ${seed.goalPhrase}. Base the poll framing on: ${seed.angleHint}.`,
+          instruction: `Provide 4 realistic options and add one sentence explaining why the results matter.`,
           recommended_format: 'poll',
-        },
-        {
-          prompt_text: 'Invite {audience} to share one small win they got from improving {topic}.',
-          instruction: 'Lead with encouragement and include a friendly reply prompt.',
+        }),
+        (seed) => ({
+          prompt_text: `Write an engagement post inviting ${seed.audience} to share one recent win in ${seed.topicLabel.toLowerCase()}. Connect the prompt to: ${seed.insight}.`,
+          instruction: `Open with a short personal observation, then ask a single question that is easy to answer.`,
           recommended_format: 'question',
-        },
+        }),
       ],
       storytelling: [
-        {
-          prompt_text: 'Tell a short story where focusing on {topic} helped achieve {goal}.',
-          instruction: 'Use setup, conflict, resolution, then a one-line lesson.',
+        (seed) => ({
+          prompt_text: `Write a founder-style story about fixing ${seed.topicLabel.toLowerCase()} to ${seed.goalPhrase}. Use this turning-point signal: ${seed.insight}.`,
+          instruction: `Structure as "situation -> mistake -> change -> outcome", and include one numeric result if possible.`,
           recommended_format: 'single_post',
-        },
-        {
-          prompt_text: 'Share a behind-the-scenes moment where a mistake in {topic} turned into progress.',
-          instruction: 'Be specific about the mistake and what changed afterward.',
+        }),
+        (seed) => ({
+          prompt_text: `Create a mini case-study post around ${seed.topicLabel.toLowerCase()} for ${seed.audience}. Use ${seed.angleHint} as the strategic angle.`,
+          instruction: `Include baseline, action taken, and the outcome. Keep each section concise and specific.`,
           recommended_format: 'single_post',
-        },
-        {
-          prompt_text: 'Write a mini case study about a client or creator who improved results by changing {topic}.',
-          instruction: 'Include baseline, action taken, and concrete result.',
+        }),
+        (seed) => ({
+          prompt_text: `Tell a behind-the-scenes story showing how your workflow on ${seed.topicLabel.toLowerCase()} evolved after this insight: ${seed.insight}.`,
+          instruction: `Name one decision you changed and one practical lesson readers can apply today.`,
           recommended_format: 'single_post',
-        },
+        }),
       ],
       'tips & tricks': [
-        {
-          prompt_text: 'Create a 5-step checklist to improve {topic} this week without extra tools.',
-          instruction: 'Each step should start with an action verb and stay practical.',
+        (seed) => ({
+          prompt_text: `Create a practical checklist post on ${seed.topicLabel.toLowerCase()} for ${seed.audience}, designed to help them ${seed.goalPhrase}.`,
+          instruction: `List 5 steps in execution order. Each step must be specific and testable.`,
           recommended_format: 'single_post',
-        },
-        {
-          prompt_text: 'Share 3 quick wins for {audience} to make immediate progress in {topic}.',
-          instruction: 'Use concise bullet format and include one realistic expected outcome.',
+        }),
+        (seed) => ({
+          prompt_text: `Write a "Do this / Avoid this" playbook for ${seed.topicLabel.toLowerCase()} using this observed pattern: ${seed.insight}.`,
+          instruction: `Provide 3 do/avoid pairs with a one-line rationale under each pair.`,
+          recommended_format: 'carousel',
+        }),
+        (seed) => ({
+          prompt_text: `Build a tactical post with 3 fast wins for ${seed.audience} on ${seed.topicLabel.toLowerCase()}. Tie each win to how they can ${seed.goalPhrase}.`,
+          instruction: `Each win should include action + expected outcome + common mistake to avoid.`,
           recommended_format: 'single_post',
-        },
-        {
-          prompt_text: 'Build a do this / avoid this tip list for {topic} aimed at beginners.',
-          instruction: 'Pair each tip with one short reason so it is actionable.',
-          recommended_format: 'single_post',
-        },
+        }),
       ],
       promotional: [
-        {
-          prompt_text: 'Show how your offer helps {audience} solve {topic} faster, without hard selling.',
-          instruction: 'Lead with pain point and transformation, then use a soft CTA.',
+        (seed) => ({
+          prompt_text: `Write a value-first LinkedIn post showing how a repeatable ${seed.topicLabel.toLowerCase()} workflow helps ${seed.audience} ${seed.goalPhrase}.`,
+          instruction: `Deliver 80% actionable value before mentioning your product/service. Keep the CTA soft.`,
           recommended_format: 'single_post',
-        },
-        {
-          prompt_text: 'Position your product around {topic} with one concrete use case and one business outcome.',
-          instruction: 'Avoid hype words, stay specific, and end with one next step.',
+        }),
+        (seed) => ({
+          prompt_text: `Create a use-case post: how your approach solves ${seed.topicLabel.toLowerCase()} better. Support the angle with this signal: ${seed.insight}.`,
+          instruction: `Include one practical use case and one outcome. Mention your offer in one short paragraph.`,
           recommended_format: 'single_post',
-        },
-        {
-          prompt_text: 'Write a value-first post connecting {topic} to {goal}, then introduce your solution briefly.',
-          instruction: 'Give value first for at least 70% of the post before any CTA.',
+        }),
+        (seed) => ({
+          prompt_text: `Write a "problem -> method -> result" post around ${seed.topicLabel.toLowerCase()} aimed at ${seed.audience}.`,
+          instruction: `Keep the post educational, then end with a single CTA for a demo/template.`,
           recommended_format: 'single_post',
-        },
+        }),
       ],
       inspirational: [
-        {
-          prompt_text: 'Share a mindset shift that helps {audience} stay consistent with {topic} for 30 days.',
-          instruction: 'Use a bold opening line and finish with a practical challenge.',
+        (seed) => ({
+          prompt_text: `Write a belief-shift post for ${seed.audience}: why mastering ${seed.topicLabel.toLowerCase()} is less about talent and more about process.`,
+          instruction: `Use one relatable struggle, one reframe, and one action challenge readers can do today.`,
           recommended_format: 'single_post',
-        },
-        {
-          prompt_text: 'Write a motivational post about small daily progress in {topic} leading to bigger wins.',
-          instruction: 'Keep it grounded in realistic actions, not generic motivation.',
+        }),
+        (seed) => ({
+          prompt_text: `Create a motivation-meets-practicality post around ${seed.topicLabel.toLowerCase()} and how to ${seed.goalPhrase}. Use this lens: ${seed.angleHint}.`,
+          instruction: `Avoid generic hype. Include one concrete behavior change for the next 7 days.`,
           recommended_format: 'single_post',
-        },
-        {
-          prompt_text: 'Inspire {audience} by reframing setbacks in {topic} as data for improvement.',
-          instruction: 'Use one short example and end with a clear encouragement line.',
+        }),
+        (seed) => ({
+          prompt_text: `Write an encouragement post that reframes setbacks in ${seed.topicLabel.toLowerCase()} using this signal: ${seed.insight}.`,
+          instruction: `Close with a reflective CTA that invites readers to share what they will try next.`,
           recommended_format: 'single_post',
-        },
+        }),
       ],
     };
 
     const templates = [];
     for (let index = 0; index < desiredCount; index += 1) {
       const category = categories[index % categories.length];
-      const topic = topicPool[(index + Math.floor(index / categories.length)) % topicPool.length];
-      const goal = goalPool[(index * 2 + 1) % goalPool.length];
+      const seed = ideaSeeds[index % ideaSeeds.length];
       const variants = templateBank[category] || templateBank.educational;
-      const variant = variants[Math.floor(index / categories.length) % variants.length];
+      const buildVariant = variants[Math.floor(index / categories.length) % variants.length];
+      const built = buildVariant(seed);
+      const promptText = this.cleanPromptText(built?.prompt_text || '');
 
-      const replaceTokens = (text = '') =>
-        String(text)
-          .replace(/\{topic\}/g, topic)
-          .replace(/\{goal\}/g, goal.toLowerCase())
-          .replace(/\{audience\}/g, audience);
+      if (!promptText || this.isWeakPromptCandidate(promptText)) {
+        continue;
+      }
+
+      const instruction = this.sanitizeInsight(built?.instruction || '', 220);
+      const gapContext = seed.gapScore
+        ? `Observed gap score: ${seed.gapScore}%${seed.gapReason ? ` - ${seed.gapReason}` : ''}`
+        : seed.gapReason;
 
       templates.push({
         category,
-        prompt_text: replaceTokens(variant.prompt_text),
+        prompt_text: promptText,
         variables: {
-          instruction: replaceTokens(variant.instruction),
-          recommended_format: variant.recommended_format || 'single_post',
-          goal,
+          instruction,
+          recommended_format: built?.recommended_format || 'single_post',
+          goal: seed.goal,
+          idea_title: seed.ideaTitle,
+          angle: seed.angleHint,
+          cta: seed.cta,
+          hashtags_hint: seed.hashtagsHint,
+          source_signal: seed.insight,
+          gap_context: gapContext || '',
           tone_hint: tone,
+          audience_hint: seed.audience,
+          topic: seed.topicLabel,
         },
       });
     }
 
-    return templates;
+    if (templates.length < desiredCount) {
+      const fillersNeeded = desiredCount - templates.length;
+      for (let index = 0; index < fillersNeeded; index += 1) {
+        const seed = ideaSeeds[(templates.length + index) % ideaSeeds.length];
+        const promptText = `Write a practical LinkedIn post for ${seed.audience} on ${seed.topicLabel.toLowerCase()} that helps them ${seed.goalPhrase}. Use this signal: ${seed.insight}.`;
+        templates.push({
+          category: categories[(templates.length + index) % categories.length],
+          prompt_text: promptText,
+          variables: {
+            instruction: 'Use hook -> insight -> action -> CTA structure and keep it specific.',
+            recommended_format: 'single_post',
+            goal: seed.goal,
+            idea_title: seed.ideaTitle,
+            angle: seed.angleHint,
+            cta: seed.cta,
+            hashtags_hint: seed.hashtagsHint,
+            source_signal: seed.insight,
+            tone_hint: tone,
+            audience_hint: seed.audience,
+            topic: seed.topicLabel,
+          },
+        });
+      }
+    }
+
+    return templates.slice(0, desiredCount);
   }
 
   summarizeStrategy(strategy) {
@@ -624,11 +667,322 @@ class StrategyService {
       return [];
     }
 
-    return text
-      .split(',')
+    const normalizedText = String(text || '')
+      .replace(/\r/g, '\n')
+      .replace(/[•·]/g, '\n')
+      .replace(/\t/g, ' ')
+      .replace(/\s*\n\s*/g, '\n')
+      .trim();
+
+    return normalizedText
+      .split(/[\n,;|]+/)
       .map((item) => item.trim())
-      .map((item) => item.replace(/^\d+\.\s*/, ''))
+      .map((item) => item.replace(/^\d+[\.\)]\s*/, ''))
+      .map((item) => item.replace(/^[-*]\s*/, ''))
       .filter(Boolean);
+  }
+
+  normalizeTopicCandidate(value = '') {
+    const normalized = String(value || '')
+      .toLowerCase()
+      .replace(/https?:\/\/\S+/gi, ' ')
+      .replace(/www\.\S+/gi, ' ')
+      .replace(/^#+/, '')
+      .replace(/[_-]+/g, ' ')
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!normalized) return '';
+
+    const words = normalized
+      .split(' ')
+      .map((word) => {
+        if (!word) return '';
+        if (word.endsWith('ies') && word.length > 5) return `${word.slice(0, -3)}y`;
+        if (word.endsWith('s') && !word.endsWith('ss') && word.length > 4) return word.slice(0, -1);
+        return word;
+      })
+      .filter((word) => {
+        if (!word) return false;
+        if (!SHORT_TOPIC_ALLOWLIST.has(word) && word.length < 3) return false;
+        if (/^\d+$/.test(word)) return false;
+        if (PROMPT_TOPIC_STOP_WORDS.has(word)) return false;
+        return true;
+      });
+
+    if (words.length === 0 || words.length > 4) return '';
+    const compact = words.join(' ').trim();
+    if (!compact || compact.length > 40) return '';
+    return compact;
+  }
+
+  normalizeTopicList(items = [], limit = 12) {
+    const pool = Array.isArray(items) ? items : [items];
+    const normalized = [];
+    const seen = new Set();
+
+    for (const item of pool) {
+      const candidate = this.normalizeTopicCandidate(item);
+      if (!candidate) continue;
+      const key = candidate.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      normalized.push(candidate);
+      if (normalized.length >= limit) break;
+    }
+
+    return normalized;
+  }
+
+  buildPromptSignalBundle(strategy = {}) {
+    const metadata =
+      strategy?.metadata && typeof strategy.metadata === 'object' && !Array.isArray(strategy.metadata)
+        ? strategy.metadata
+        : {};
+    const analysisCache =
+      metadata?.analysis_cache && typeof metadata.analysis_cache === 'object' && !Array.isArray(metadata.analysis_cache)
+        ? metadata.analysis_cache
+        : {};
+
+    const gapMap = Array.isArray(analysisCache.gap_map) ? analysisCache.gap_map : [];
+    const trending = Array.isArray(analysisCache.trending_topics) ? analysisCache.trending_topics : [];
+    const strengths = this.normalizeAndDedupe(
+      Array.isArray(analysisCache?.strengths) ? analysisCache.strengths : [],
+      8,
+      180
+    );
+    const gaps = this.normalizeAndDedupe(
+      Array.isArray(analysisCache?.gaps) ? analysisCache.gaps : [],
+      8,
+      180
+    );
+    const opportunities = this.normalizeAndDedupe(
+      Array.isArray(analysisCache?.opportunities) ? analysisCache.opportunities : [],
+      10,
+      180
+    );
+    const nextAngles = this.normalizeAndDedupe(
+      Array.isArray(analysisCache?.next_angles) ? analysisCache.next_angles : [],
+      10,
+      180
+    );
+
+    const gapTopics = this.normalizeTopicList(
+      gapMap.map((item) => (typeof item === 'string' ? item : item?.topic)),
+      8
+    );
+    const trendingTopics = this.normalizeTopicList(
+      trending.map((item) => (typeof item === 'string' ? item : item?.topic)),
+      8
+    );
+    const strategyTopics = this.normalizeTopicList(Array.isArray(strategy?.topics) ? strategy.topics : [], 12);
+
+    const priorityTopics = this.normalizeTopicList(
+      [...gapTopics, ...trendingTopics, ...strategyTopics, strategy?.niche || ''],
+      14
+    );
+
+    const angleHints = this.normalizeAndDedupe([...nextAngles, ...opportunities, ...gaps], 12, 180);
+
+    const audience = String(strategy?.target_audience || '').trim();
+    const niche = String(strategy?.niche || '').trim();
+    const goals = this.normalizeAndDedupe(Array.isArray(strategy?.content_goals) ? strategy.content_goals : [], 10, 120);
+
+    return {
+      confidence: String(analysisCache?.confidence || '').trim(),
+      confidenceReason: String(analysisCache?.confidence_reason || '').trim(),
+      tweetsAnalysed: Number(analysisCache?.tweets_analysed || 0),
+      audience,
+      niche,
+      goals,
+      gapTopics,
+      trendingTopics,
+      priorityTopics,
+      strengths,
+      gaps,
+      opportunities,
+      nextAngles,
+      angleHints,
+      gapMap: gapMap
+        .map((item) => ({
+          topic: this.normalizeTopicCandidate(item?.topic || ''),
+          score: Number(item?.score ?? item?.gap_score ?? item?.gapScore) || 0,
+          reason: String(item?.reason || '').trim().slice(0, 200),
+        }))
+        .filter((item) => item.topic),
+    };
+  }
+
+  toDisplayLabel(value = '') {
+    const raw = String(value || '').trim();
+    const normalized = this.normalizeTopicCandidate(raw) || raw.toLowerCase().replace(/[_-]+/g, ' ');
+    const words = normalized
+      .split(/\s+/)
+      .map((word) => word.trim())
+      .filter(Boolean)
+      .slice(0, 5);
+
+    if (words.length === 0) {
+      return '';
+    }
+
+    return words
+      .map((word) => {
+        if (/^\d+$/.test(word)) return word;
+        if (word.length <= 3) return word.toUpperCase();
+        return `${word.charAt(0).toUpperCase()}${word.slice(1)}`;
+      })
+      .join(' ');
+  }
+
+  toHashtag(value = '') {
+    const normalized = this.normalizeTopicCandidate(value);
+    if (!normalized) return '';
+    const compact = normalized.replace(/\s+/g, '').replace(/[^a-z0-9]/gi, '');
+    if (!compact) return '';
+    return `#${compact}`;
+  }
+
+  sanitizeInsight(value = '', maxLength = 180) {
+    const cleaned = this.cleanPromptText(String(value || '').replace(/\s+/g, ' ').trim());
+    if (!cleaned) return '';
+    if (cleaned.length <= maxLength) return cleaned;
+    const sliced = cleaned.slice(0, maxLength);
+    const lastSpace = sliced.lastIndexOf(' ');
+    return `${(lastSpace > 24 ? sliced.slice(0, lastSpace) : sliced).trim()}...`;
+  }
+
+  formatGoalPhrase(value = '') {
+    const goal = String(value || '').trim();
+    if (!goal) return 'improve results';
+    if (/^(build|grow|generate|increase|improve|drive|boost|convert|attract|book|get|create|scale|reduce)\b/i.test(goal)) {
+      return goal.toLowerCase();
+    }
+    return `improve ${goal.toLowerCase()}`;
+  }
+
+  buildPromptIdeaSeeds(strategy = {}, signals = {}, desiredCount = 36) {
+    const audience = String(strategy?.target_audience || signals?.audience || 'your target audience').trim();
+    const niche = String(strategy?.niche || signals?.niche || 'your niche').trim();
+    const goals = this.normalizeAndDedupe(
+      Array.isArray(strategy?.content_goals) ? strategy.content_goals : (signals?.goals || []),
+      12,
+      120
+    );
+    const topicPool = this.normalizeTopicList(
+      [
+        ...(Array.isArray(signals?.priorityTopics) ? signals.priorityTopics : []),
+        ...(Array.isArray(strategy?.topics) ? strategy.topics : []),
+        niche,
+      ],
+      16
+    );
+    const gapMap = Array.isArray(signals?.gapMap) ? signals.gapMap.filter((item) => item?.topic) : [];
+    const insightPool = this.normalizeAndDedupe(
+      [
+        ...(Array.isArray(signals?.opportunities) ? signals.opportunities : []),
+        ...(Array.isArray(signals?.nextAngles) ? signals.nextAngles : []),
+        ...(Array.isArray(signals?.gaps) ? signals.gaps : []),
+        ...(Array.isArray(signals?.strengths) ? signals.strengths : []),
+        ...gapMap.map((item) => item.reason),
+      ],
+      Math.max(18, desiredCount),
+      180
+    ).map((item) => this.sanitizeInsight(item, 170)).filter(Boolean);
+    const anglePool = this.normalizeAndDedupe(
+      [
+        ...(Array.isArray(signals?.angleHints) ? signals.angleHints : []),
+        ...(Array.isArray(signals?.opportunities) ? signals.opportunities : []),
+      ],
+      Math.max(12, desiredCount),
+      160
+    );
+    const fallbackGoal = goals[0] || 'build authority';
+    const fallbackTopic = topicPool[0] || this.normalizeTopicCandidate(niche) || 'content strategy';
+    const fallbackInsight =
+      insightPool[0] ||
+      `Position around ${fallbackTopic} with one clear, practical workflow your audience can apply this week.`;
+
+    const seeds = [];
+    const seedCount = Math.max(desiredCount, 18);
+
+    for (let index = 0; index < seedCount; index += 1) {
+      const topic = topicPool[index % Math.max(topicPool.length, 1)] || fallbackTopic;
+      const gapEntry = gapMap[index % Math.max(gapMap.length, 1)] || null;
+      const goal = goals[index % Math.max(goals.length, 1)] || fallbackGoal;
+      const goalPhrase = this.formatGoalPhrase(goal);
+      const insight = insightPool[index % Math.max(insightPool.length, 1)] || fallbackInsight;
+      const angleHint =
+        anglePool[index % Math.max(anglePool.length, 1)] ||
+        gapEntry?.reason ||
+        insight ||
+        `Turn ${topic} into a repeatable playbook.`;
+      const topicLabel = this.toDisplayLabel(topic) || topic;
+      const goalLabel = this.toDisplayLabel(goal) || goal;
+      const gapScore = gapEntry?.score && Number(gapEntry.score) > 0 ? Number(gapEntry.score) : null;
+      const gapReason = this.sanitizeInsight(gapEntry?.reason || '', 160);
+
+      const hashtagSet = new Set([
+        this.toHashtag(topic),
+        this.toHashtag(goal),
+        this.toHashtag(niche),
+      ]);
+      const hashtagsHint = Array.from(hashtagSet).filter(Boolean).slice(0, 3).join(' ');
+
+      seeds.push({
+        topic,
+        topicLabel,
+        audience,
+        goal,
+        goalPhrase,
+        goalLabel,
+        niche,
+        insight,
+        angleHint: this.sanitizeInsight(angleHint, 160),
+        gapScore,
+        gapReason,
+        ideaTitle:
+          gapScore && gapReason
+            ? `${topicLabel}: close a ${gapScore}% gap`
+            : `${topicLabel}: win ${goalLabel.toLowerCase()}`,
+        cta:
+          index % 3 === 0
+            ? 'Ask readers to comment "playbook" to get the template.'
+            : index % 3 === 1
+              ? 'Ask readers to reply with their biggest blocker so you can share a follow-up breakdown.'
+              : 'Invite readers to save this post and apply one step in the next 24 hours.',
+        hashtagsHint,
+      });
+    }
+
+    return seeds;
+  }
+
+  isWeakPromptCandidate(value = '') {
+    const cleaned = this.cleanPromptText(value).toLowerCase();
+    if (!cleaned) return true;
+    if (cleaned.length < 36) return true;
+
+    const genericPatterns = [
+      /^write (a|an)?\s*linkedin post/,
+      /^create (a|an)?\s*post/,
+      /^share (a|an)?\s*(linkedin )?post/,
+      /^write about\b/,
+      /^talk about\b/,
+      /^discuss\b/,
+      /^give tips\b/,
+      /\bshare tips on\b/,
+      /\bpost about\b/,
+    ];
+    if (genericPatterns.some((pattern) => pattern.test(cleaned))) {
+      return true;
+    }
+
+    const words = cleaned.split(/\s+/).filter(Boolean);
+    if (words.length < 9) return true;
+
+    return false;
   }
 
   normalizeAndDedupe(items = [], limit = 10, maxItemLength = Infinity) {
@@ -1383,6 +1737,11 @@ Format: Just list topics separated by commas, no formatting.`;
 
     try {
       const desiredCount = 36;
+      const signalBundle = this.buildPromptSignalBundle(strategy);
+      const compactGapMap = signalBundle.gapMap
+        .slice(0, 6)
+        .map((item) => `${item.topic} (${item.score}%)`)
+        .join(', ');
       const systemPrompt = [
         'Return ONLY valid JSON. No markdown and no extra text.',
         'Schema:',
@@ -1394,24 +1753,43 @@ Format: Just list topics separated by commas, no formatting.`;
         '      "instruction": "string",',
         '      "recommended_format": "single_post|carousel|question|poll",',
         '      "goal": "string",',
+        '      "idea_title": "string",',
+        '      "angle": "string",',
+        '      "cta": "string",',
         '      "hashtags_hint": "string"',
         '    }',
         '  ]',
         '}',
+        'Example object:',
+        '{"category":"educational","prompt_text":"Myth: posting more is enough. Write a post showing why audience-language fit matters for B2B founders, with a 3-step rewrite process.","instruction":"Use one real example, before/after copy, and end with one action for this week.","recommended_format":"single_post","goal":"Build authority","idea_title":"Audience-language fit playbook","angle":"Expose why generic hooks fail for this audience","cta":"Ask readers to comment \\"rewrite\\" for a template.","hashtags_hint":"#b2b #contentstrategy"}',
         `Generate exactly ${desiredCount} prompts with balanced category distribution.`,
         'Requirements:',
-        '- prompt_text should be specific and easy to execute.',
+        '- prompt_text should be specific, concrete, and easy to execute.',
+        '- prompt_text must begin with a concrete hook tied to one audience pain, gap, or missed opportunity.',
         '- instruction should be concise and practical for beginners.',
         '- avoid duplicates and generic wording.',
+        '- never output bland directives like "Write a post about..." or "Share tips on...".',
         '- keep prompt_text focused on one angle.',
         '- each category must contain multiple distinct frameworks, not the same sentence pattern.',
         '- avoid repeating the same first 5-6 words across prompts in the same category.',
+        '- bias ideas toward competitor/content gaps and trending opportunities when available.',
+        '- every prompt should be publish-ready for LinkedIn (clear hook, insight, action).',
+        '- each prompt must include one specific scenario, benchmark, or outcome claim in prompt_text or instruction.',
+        '- idea_title must be a concise angle + outcome title, not generic.',
         '- if placeholders are useful, use {placeholder_name} tokens.',
         `Niche: ${strategy.niche || ''}`,
         `Target Audience: ${strategy.target_audience || ''}`,
         `Goals: ${(strategy.content_goals || []).join(', ')}`,
         `Tone: ${strategy.tone_style || ''}`,
         `Topics: ${(strategy.topics || []).join(', ')}`,
+        `Priority topics from analysis: ${signalBundle.priorityTopics.join(', ') || 'none'}`,
+        `Gap map (topic, score): ${compactGapMap || 'none'}`,
+        `Trending topics from analysis: ${signalBundle.trendingTopics.join(', ') || 'none'}`,
+        `Strengths from analysis: ${signalBundle.strengths.join(' | ') || 'none'}`,
+        `Gaps from analysis: ${signalBundle.gaps.join(' | ') || 'none'}`,
+        `Opportunities from analysis: ${signalBundle.opportunities.join(' | ') || 'none'}`,
+        `Suggested angle hints: ${signalBundle.angleHints.join(' | ') || 'none'}`,
+        `Analysis confidence: ${signalBundle.confidence || 'unknown'} (${signalBundle.confidenceReason || 'no reason provided'})`,
       ].join('\n');
 
       let normalizedPrompts = [];
@@ -1453,23 +1831,25 @@ Format: Just list topics separated by commas, no formatting.`;
                     ? item.recommended_format.trim().toLowerCase()
                     : 'single_post',
                 goal: typeof item?.goal === 'string' ? item.goal.trim() : '',
+                idea_title: typeof item?.idea_title === 'string' ? item.idea_title.trim() : '',
+                angle: typeof item?.angle === 'string' ? item.angle.trim() : '',
+                cta: typeof item?.cta === 'string' ? item.cta.trim() : '',
                 hashtags_hint: typeof item?.hashtags_hint === 'string' ? item.hashtags_hint.trim() : '',
               },
             };
           })
-          .filter((prompt) => prompt.prompt_text.length >= 12);
+          .filter((prompt) => prompt.prompt_text.length >= 12)
+          .filter((prompt) => !this.isWeakPromptCandidate(prompt.prompt_text));
 
         if (normalizedPrompts.length === 0) {
           throw new Error('No prompt items could be parsed from provider response');
         }
       } catch (aiParseError) {
-        console.error('Prompt generation JSON parse failed, using fallback templates:', aiParseError?.message || aiParseError);
+        console.warn('Prompt generation parse fallback engaged:', aiParseError?.message || aiParseError);
       }
 
-      if (normalizedPrompts.length < 24) {
-        const fallbackPrompts = this.buildFallbackPromptTemplates(strategy, desiredCount);
-        normalizedPrompts = [...normalizedPrompts, ...fallbackPrompts];
-      }
+      const fallbackPrompts = this.buildFallbackPromptTemplates(strategy, desiredCount, signalBundle);
+      normalizedPrompts = [...normalizedPrompts, ...fallbackPrompts];
 
       const finalPrompts = this.selectDiverseBalancedPrompts(normalizedPrompts, desiredCount);
 

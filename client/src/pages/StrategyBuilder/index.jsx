@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   MessageSquare,
   Layout,
@@ -12,10 +13,17 @@ import {
   Wand2,
   Lock,
   X,
+  Sparkles,
+  CheckCircle2,
+  Circle,
+  Rocket,
+  PencilLine,
+  BookOpen,
 } from 'lucide-react';
 import ChatInterface from './ChatInterface';
 import StrategyOverview from './StrategyOverview';
 import PromptLibrary from './PromptLibrary';
+import AnalysisFlow from './AnalysisFlow';
 import { strategy as strategyApi } from '../../utils/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { hasProPlanAccess } from '../../utils/planAccess';
@@ -41,14 +49,55 @@ const STRATEGY_TEMPLATES = [
   },
 ];
 
+const VIEW_META = {
+  chat: {
+    title: 'Setup',
+    subtitle: 'Define niche, audience, goals, and context',
+    icon: MessageSquare,
+  },
+  overview: {
+    title: 'Review',
+    subtitle: 'Inspect strategy quality before generation',
+    icon: Layout,
+  },
+  prompts: {
+    title: 'Prompt Pack',
+    subtitle: 'Use production-ready ideas in compose/bulk',
+    icon: Library,
+  },
+};
+
+const STRATEGY_LABEL_MARKERS = ['what we do', 'key features', 'why suitegenie', 'perfect for'];
+
+const compactStrategyLabel = (value = '') => {
+  let text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return 'Untitled strategy';
+
+  const lower = text.toLowerCase();
+  for (const marker of STRATEGY_LABEL_MARKERS) {
+    const index = lower.indexOf(marker);
+    if (index > 0) {
+      text = text.slice(0, index).trim();
+      break;
+    }
+  }
+
+  text = text.replace(/\s*[|:-]\s*/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!text) return 'Untitled strategy';
+  if (text.length > 70) return `${text.slice(0, 67).trim()}...`;
+  return text;
+};
+
 const StrategyBuilder = () => {
   const { user } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
   const hasProAccess = hasProPlanAccess(user);
   const upgradeUrl = getSuiteGenieProUpgradeUrl();
   const [currentView, setCurrentView] = useState('chat');
   const [strategy, setStrategy] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [isGeneratingPrompts, setIsGeneratingPrompts] = useState(false);
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [formMode, setFormMode] = useState('create');
   const [teamName, setTeamName] = useState('');
@@ -61,6 +110,8 @@ const StrategyBuilder = () => {
   const [isDisconnected, setIsDisconnected] = useState(false);
   const [strategyOptions, setStrategyOptions] = useState([]);
   const [switchingStrategyId, setSwitchingStrategyId] = useState('');
+  const [showAnalysisFlow, setShowAnalysisFlow] = useState(false);
+  const [setupMode, setSetupMode] = useState('auto');
 
   const normalizeListItem = (value) => value.trim().replace(/\s+/g, ' ').slice(0, 80);
 
@@ -105,9 +156,10 @@ const StrategyBuilder = () => {
     setFormMode('create');
     setShowCreateForm(true);
     setCurrentView('chat');
+    setSetupMode('auto');
   };
 
-  const applyLoadedStrategy = (loadedStrategy) => {
+  const applyLoadedStrategy = (loadedStrategy, preferredView = null) => {
     setStrategy(loadedStrategy);
     setSwitchingStrategyId(loadedStrategy?.id || '');
 
@@ -128,7 +180,12 @@ const StrategyBuilder = () => {
     }
 
     setShowCreateForm(false);
-    setCurrentView(loadedStrategy.status === 'active' ? 'overview' : 'chat');
+    const defaultView = loadedStrategy.status === 'active' ? 'overview' : 'chat';
+    const nextView =
+      preferredView && ['chat', 'overview', 'prompts'].includes(preferredView)
+        ? preferredView
+        : defaultView;
+    setCurrentView(nextView);
   };
 
   const fetchStrategyList = async (preferredStrategyId = null) => {
@@ -207,10 +264,10 @@ const StrategyBuilder = () => {
     }
   };
 
-  const handleSaveStrategy = async () => {
+  const handleSaveStrategy = async ({ nextView = null } = {}) => {
     if (!teamName.trim()) {
       setError('Strategy name is required');
-      return;
+      return null;
     }
 
     try {
@@ -248,16 +305,23 @@ const StrategyBuilder = () => {
         savedStrategy = response.data;
       }
 
-      applyLoadedStrategy(savedStrategy);
+      applyLoadedStrategy(savedStrategy, nextView);
+      if (nextView) {
+        const nextParams = new URLSearchParams(searchParams);
+        nextParams.set('tab', nextView);
+        setSearchParams(nextParams, { replace: true });
+      }
       await fetchStrategyList(savedStrategy.id);
+      return savedStrategy;
     } catch (saveError) {
       if (isReconnectRequiredError(saveError)) {
         setIsDisconnected(true);
         setShowCreateForm(false);
         setError(null);
-        return;
+        return null;
       }
       setError(saveError.response?.data?.error || saveError.message || 'Failed to save strategy. Please try again.');
+      return null;
     } finally {
       setCreatingTeam(false);
     }
@@ -347,7 +411,55 @@ const StrategyBuilder = () => {
   };
 
   const handleGeneratePrompts = () => {
+    setIsGeneratingPrompts(true);
     setCurrentView('prompts');
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set('tab', 'prompts');
+    setSearchParams(nextParams, { replace: true });
+  };
+
+  const handleStartAnalysisFlow = async () => {
+    let activeStrategy = strategy;
+
+    if (!activeStrategy?.id || showCreateForm) {
+      const saved = await handleSaveStrategy({ nextView: 'chat' });
+      if (!saved?.id) return;
+      activeStrategy = saved;
+    }
+
+    setShowCreateForm(false);
+    setShowAnalysisFlow(true);
+    setCurrentView('chat');
+    setSetupMode('auto');
+  };
+
+  const handleAnalysisComplete = async (result = {}) => {
+    const requestedNext = String(result?.next || '').trim().toLowerCase();
+    const nextView = requestedNext === 'overview' ? 'overview' : 'prompts';
+
+    setShowAnalysisFlow(false);
+    setIsGeneratingPrompts(nextView === 'prompts');
+    setCurrentView(nextView);
+
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set('tab', nextView);
+    setSearchParams(nextParams, { replace: true });
+
+    if (strategy?.id) {
+      try {
+        const response = await strategyApi.getById(strategy.id);
+        const updatedStrategy = response?.data?.strategy;
+        if (updatedStrategy) {
+          setStrategy(updatedStrategy);
+          fetchStrategyList(updatedStrategy.id).catch(() => {});
+        }
+      } catch {}
+    }
+  };
+
+  const handleAnalysisCancel = () => {
+    setShowAnalysisFlow(false);
+    setCurrentView(strategy?.status === 'active' ? 'overview' : 'chat');
   };
 
   const handleSwitchStrategy = async (event) => {
@@ -397,21 +509,63 @@ const StrategyBuilder = () => {
       id: 'chat',
       label: 'Setup',
       icon: MessageSquare,
-      visible: strategy?.status !== 'active',
+      description: 'Capture strategy inputs',
+      visible: strategy !== null,
     },
     {
       id: 'overview',
-      label: 'Overview',
+      label: 'Review',
       icon: Layout,
+      description: 'Review strategy quality',
       visible: strategy !== null,
     },
     {
       id: 'prompts',
-      label: 'Prompts',
+      label: 'Prompt Pack',
       icon: Library,
+      description: 'Generate and use prompts',
       visible: strategy !== null,
     },
   ].filter((tab) => tab.visible);
+
+  const strategyIsActive = strategy?.status === 'active';
+  const strategyLabel = compactStrategyLabel(strategy?.niche || '');
+  const tabCompletion = {
+    chat: Boolean(hasCompletedBasicProfile),
+    overview: Boolean(strategyIsActive),
+    prompts: Boolean(strategy?.metadata?.prompts_last_generated_at),
+  };
+
+  useEffect(() => {
+    const requestedTab = (searchParams.get('tab') || '').trim().toLowerCase();
+    if (!requestedTab || !strategy) return;
+
+    const normalizedRequestedTab = requestedTab === 'automation' ? 'chat' : requestedTab;
+    if (requestedTab === 'automation') {
+      if (!showAnalysisFlow && strategy) {
+        setShowCreateForm(false);
+        setCurrentView('chat');
+        setShowAnalysisFlow(true);
+      }
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.set('tab', 'chat');
+      setSearchParams(nextParams, { replace: true });
+      return;
+    }
+
+    const available = new Set(tabs.map((tab) => tab.id));
+    if (!available.has(normalizedRequestedTab)) return;
+    if (normalizedRequestedTab === currentView) return;
+
+    setCurrentView(normalizedRequestedTab);
+  }, [searchParams, strategy, tabs, currentView, setSearchParams, showAnalysisFlow]);
+
+  const switchToTab = (tabId) => {
+    setCurrentView(tabId);
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set('tab', tabId);
+    setSearchParams(nextParams, { replace: true });
+  };
 
   if (!hasProAccess) {
     return (
@@ -498,10 +652,10 @@ const StrategyBuilder = () => {
           <div className="space-y-6">
             <div>
               <label className="block text-sm font-semibold text-gray-900 mb-3">
-                Team / Strategy Name <span className="text-red-500">*</span>
+                Strategy Name <span className="text-red-500">*</span>
               </label>
               <p className="text-sm text-gray-600 mb-3">
-                Enter your team or strategy name. This is required before setup questions.
+                Give this strategy a clear name so you can manage multiple playbooks without confusion.
               </p>
               <input
                 type="text"
@@ -662,25 +816,64 @@ const StrategyBuilder = () => {
             )}
 
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <p className="text-sm text-blue-900">
-                <strong>Next:</strong> You can answer 7 guided questions or use AI quick setup from chat to auto-complete faster.
-              </p>
+              <p className="text-sm font-semibold text-blue-900 mb-2">Choose your setup path</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                <div className="rounded-lg border border-blue-200 bg-white px-3 py-2 text-blue-800">
+                  <span className="font-semibold">Manual Setup</span>
+                  <p className="text-blue-700 mt-1">Answer guided questions and control each field.</p>
+                </div>
+                <div className="rounded-lg border border-indigo-200 bg-white px-3 py-2 text-indigo-800">
+                  <span className="font-semibold">Auto Analyze</span>
+                  <p className="text-indigo-700 mt-1">Fetch account signals and prefill strategy automatically.</p>
+                </div>
+              </div>
             </div>
 
-            <button
-              onClick={handleSaveStrategy}
-              disabled={!teamName.trim() || creatingTeam}
-              className="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-            >
-              {creatingTeam ? (
-                <>
-                  <Loader2 size={20} className="animate-spin" />
-                  {isAdvancedEditMode ? 'Updating...' : 'Creating...'}
-                </>
-              ) : (
-                <>{isAdvancedEditMode ? 'Update Strategy' : 'Continue to Setup Questions'}</>
-              )}
-            </button>
+            {isAdvancedEditMode ? (
+              <button
+                onClick={() => handleSaveStrategy({ nextView: 'overview' })}
+                disabled={!teamName.trim() || creatingTeam}
+                className="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                {creatingTeam ? (
+                  <>
+                    <Loader2 size={20} className="animate-spin" />
+                    Updating...
+                  </>
+                ) : (
+                  <>Update Strategy</>
+                )}
+              </button>
+            ) : (
+              <div className="flex flex-col sm:flex-row gap-3">
+                <button
+                  onClick={() => handleSaveStrategy({ nextView: 'chat' })}
+                  disabled={!teamName.trim() || creatingTeam}
+                  className="flex-1 bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                >
+                  {creatingTeam ? (
+                    <>
+                      <Loader2 size={20} className="animate-spin" />
+                      Creating...
+                    </>
+                  ) : (
+                    <>
+                      <PencilLine size={18} />
+                      Continue with Manual Setup
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStartAnalysisFlow}
+                  disabled={creatingTeam}
+                  className="flex-1 bg-gradient-to-r from-purple-600 to-blue-600 text-white py-3 rounded-lg font-semibold hover:from-purple-700 hover:to-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                >
+                  <Sparkles size={20} />
+                  Auto Analyze + Build
+                </button>
+              </div>
+            )}
 
             {strategy && hasCompletedBasicProfile && (
               <button
@@ -736,93 +929,129 @@ const StrategyBuilder = () => {
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="bg-white border-b border-gray-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 sm:py-4">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex items-center gap-3 sm:gap-4 w-full lg:w-auto">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 sm:py-5 space-y-4">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-start gap-3 sm:gap-4">
               <button
                 onClick={() => {
                   window.location.href = '/dashboard';
                 }}
-                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                className="mt-1 p-2 hover:bg-gray-100 rounded-lg transition-colors"
               >
                 <ArrowLeft className="w-5 h-5 text-gray-600" />
               </button>
               <div>
-                <h1 className="text-xl sm:text-2xl font-bold text-gray-900 leading-tight">Strategy Builder</h1>
+                <div className="flex items-center gap-2 mb-1">
+                  <h1 className="text-xl sm:text-2xl font-bold text-gray-900 leading-tight">Strategy Builder</h1>
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 text-xs font-semibold border border-blue-200">
+                    {VIEW_META[currentView]?.title || 'Setup'}
+                  </span>
+                </div>
                 <p className="text-sm text-gray-600">
-                  {strategy ? strategy.niche : 'Build your personalized LinkedIn content strategy'}
+                  {strategy ? strategyLabel : 'Build your personalized LinkedIn content strategy'}
+                </p>
+                <p className="text-xs text-gray-500 mt-1">
+                  Clear flow: Setup to Review to Prompt Pack
                 </p>
               </div>
             </div>
 
-            {strategy && (
-              <div className="flex flex-wrap items-center gap-2">
-                {strategyOptions.length > 1 && (
-                  <select
-                    value={switchingStrategyId || strategy.id}
-                    onChange={handleSwitchStrategy}
-                    className="max-w-[260px] w-full sm:w-auto px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    title="Switch strategy"
-                  >
-                    {strategyOptions.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {(item.niche || 'Untitled strategy')} ({item.status || 'draft'})
-                      </option>
-                    ))}
-                  </select>
-                )}
-                <button
-                  onClick={handleEditStrategy}
-                  title="Edit strategy"
-                  className="p-2 text-gray-600 hover:bg-blue-100 hover:text-blue-600 rounded-lg transition-colors"
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+              {strategyOptions.length > 1 && strategy && (
+                <select
+                  value={switchingStrategyId || strategy.id}
+                  onChange={handleSwitchStrategy}
+                  className="max-w-[280px] w-full sm:w-auto px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  title="Switch strategy"
                 >
-                  <Edit2 className="w-5 h-5" />
-                </button>
-                <button
-                  onClick={handleCreateNew}
-                  title="Create new strategy"
-                  className="p-2 text-gray-600 hover:bg-green-100 hover:text-green-600 rounded-lg transition-colors"
-                >
-                  <Plus className="w-5 h-5" />
-                </button>
-                <button
-                  onClick={handleDeleteStrategy}
-                  title="Delete strategy"
-                  className="p-2 text-gray-600 hover:bg-red-100 hover:text-red-600 rounded-lg transition-colors"
-                >
-                  <Trash2 className="w-5 h-5" />
-                </button>
-              </div>
-            )}
+                  {strategyOptions.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {compactStrategyLabel(item.niche || 'Untitled strategy')} ({item.status || 'draft'})
+                    </option>
+                  ))}
+                </select>
+              )}
 
-            <div className="hidden lg:flex items-center gap-2 px-4 py-2 bg-blue-50 rounded-lg lg:ml-4">
-              <span className="text-sm text-gray-600">Chat: 0.5 credits</span>
-              <span className="text-gray-400">|</span>
-              <span className="text-sm text-gray-600">Generate Prompts: 10 credits</span>
+              {strategy && (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleEditStrategy}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50"
+                  >
+                    <Edit2 className="w-4 h-4" />
+                    Edit
+                  </button>
+                  <button
+                    onClick={handleCreateNew}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50"
+                  >
+                    <Plus className="w-4 h-4" />
+                    New
+                  </button>
+                  <button
+                    onClick={handleDeleteStrategy}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    Delete
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
           {tabs.length > 1 && (
-            <div className="flex gap-1 mt-4 border-b border-gray-200 overflow-x-auto scrollbar-thin">
-              {tabs.map((tab) => {
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              {tabs.map((tab, index) => {
                 const Icon = tab.icon;
-                const isActive = currentView === tab.id;
+                const isActiveTab = currentView === tab.id;
+                const done = tabCompletion[tab.id];
                 return (
                   <button
                     key={tab.id}
-                    onClick={() => setCurrentView(tab.id)}
-                    className={`flex items-center gap-2 px-4 sm:px-6 py-3 font-medium transition-colors relative whitespace-nowrap ${
-                      isActive ? 'text-blue-600' : 'text-gray-600 hover:text-gray-900'
+                    onClick={() => switchToTab(tab.id)}
+                    className={`text-left rounded-xl border p-4 transition-all ${
+                      isActiveTab
+                        ? 'border-blue-300 bg-blue-50 shadow-sm'
+                        : 'border-gray-200 bg-white hover:border-blue-200 hover:bg-blue-50/40'
                     }`}
                   >
-                    <Icon className="w-5 h-5" />
-                    <span>{tab.label}</span>
-                    {isActive && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600" />}
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                          isActiveTab ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'
+                        }`}>
+                          <Icon className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <p className="text-xs text-gray-500">Step {index + 1}</p>
+                          <p className="text-sm font-semibold text-gray-900">{tab.label}</p>
+                        </div>
+                      </div>
+                      {done ? (
+                        <CheckCircle2 className="w-4 h-4 text-green-600 mt-1" />
+                      ) : (
+                        <Circle className="w-4 h-4 text-gray-400 mt-1" />
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-600 mt-2">{tab.description}</p>
                   </button>
                 );
               })}
             </div>
           )}
+
+          <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-blue-50 rounded-lg">
+            <span className="inline-flex items-center gap-1 text-xs text-blue-900 font-semibold">
+              <BookOpen className="w-3.5 h-3.5" />
+              Credits
+            </span>
+            <span className="text-xs text-blue-800">Chat: 0.5</span>
+            <span className="text-blue-400">|</span>
+            <span className="text-xs text-blue-800">Analyze: 5</span>
+            <span className="text-blue-400">|</span>
+            <span className="text-xs text-blue-800">Prompt Pack: 10</span>
+          </div>
         </div>
       </div>
 
@@ -836,13 +1065,85 @@ const StrategyBuilder = () => {
           </div>
         )}
 
-        {currentView === 'chat' && strategy && (
-          <div className="max-w-4xl mx-auto h-[calc(100dvh-170px)] min-h-[540px] sm:h-[calc(100vh-200px)]">
-            <ChatInterface strategyId={strategy.id} onComplete={handleChatComplete} />
+        {showAnalysisFlow && strategy && (
+          <AnalysisFlow
+            strategyId={strategy.id}
+            onComplete={handleAnalysisComplete}
+            onCancel={handleAnalysisCancel}
+          />
+        )}
+
+        {currentView === 'chat' && strategy && !showAnalysisFlow && (
+          <div className="max-w-4xl mx-auto space-y-4">
+            <div className="rounded-xl border border-gray-200 bg-white p-4">
+              <p className="text-sm font-semibold text-gray-900 mb-3">Setup mode</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setSetupMode('auto')}
+                  className={`rounded-lg border p-3 text-left transition-colors ${
+                    setupMode === 'auto'
+                      ? 'border-indigo-200 bg-gradient-to-r from-purple-600 to-blue-600 text-white'
+                      : 'border-gray-200 bg-white hover:border-indigo-200 hover:bg-indigo-50'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-2 text-sm font-semibold">
+                    <Rocket className="h-4 w-4" />
+                    Auto Analyze + Build
+                  </span>
+                  <p className={`text-xs mt-1 ${setupMode === 'auto' ? 'text-blue-100' : 'text-gray-600'}`}>
+                    Recommended. Fastest path to strategy + prompt pack.
+                  </p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSetupMode('manual')}
+                  className={`rounded-lg border p-3 text-left transition-colors ${
+                    setupMode === 'manual'
+                      ? 'border-blue-300 bg-blue-50 text-blue-900'
+                      : 'border-gray-200 bg-white hover:border-blue-200 hover:bg-blue-50'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-2 text-sm font-semibold">
+                    <PencilLine className="h-4 w-4" />
+                    Manual Setup
+                  </span>
+                  <p className={`text-xs mt-1 ${setupMode === 'manual' ? 'text-blue-700' : 'text-gray-600'}`}>
+                    Full control over each strategy input.
+                  </p>
+                </button>
+              </div>
+            </div>
+
+            {setupMode === 'auto' ? (
+              <div className="rounded-2xl border border-indigo-200 bg-gradient-to-br from-indigo-50 via-blue-50 to-white p-6">
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">Auto Analyze path</h3>
+                <p className="text-sm text-gray-700 mb-4">
+                  We fetch account signals, ask you to confirm key assumptions, then build your prompt pack.
+                </p>
+                <ul className="text-sm text-gray-700 space-y-1 mb-5">
+                  <li>1. Pull recent posting patterns</li>
+                  <li>2. Review niche, audience, goals, and topics</li>
+                  <li>3. Generate prompt pack ready for Compose/Bulk</li>
+                </ul>
+                <button
+                  type="button"
+                  onClick={handleStartAnalysisFlow}
+                  className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700"
+                >
+                  <Rocket className="h-4 w-4" />
+                  Start auto analyze
+                </button>
+              </div>
+            ) : (
+              <div className="h-[calc(100dvh-220px)] min-h-[540px] sm:h-[calc(100vh-250px)]">
+                <ChatInterface strategyId={strategy.id} onComplete={handleChatComplete} />
+              </div>
+            )}
           </div>
         )}
 
-        {currentView === 'overview' && strategy && (
+        {currentView === 'overview' && strategy && !showAnalysisFlow && (
           <StrategyOverview
             strategy={strategy}
             onGeneratePrompts={handleGeneratePrompts}
@@ -850,7 +1151,26 @@ const StrategyBuilder = () => {
           />
         )}
 
-        {currentView === 'prompts' && strategy && <PromptLibrary strategyId={strategy.id} />}
+        {currentView === 'prompts' && strategy && !showAnalysisFlow && (
+          <PromptLibrary
+            strategyId={strategy.id}
+            strategyExtraContext={strategy?.metadata?.extra_context || ''}
+            fromAnalysis={isGeneratingPrompts}
+            onPromptsLoaded={async () => {
+              setIsGeneratingPrompts(false);
+              try {
+                const response = await strategyApi.getById(strategy.id);
+                const updatedStrategy = response?.data?.strategy;
+                if (updatedStrategy) {
+                  setStrategy(updatedStrategy);
+                  fetchStrategyList(updatedStrategy.id).catch(() => {});
+                }
+              } catch {
+                // keep UI usable even if refresh fails
+              }
+            }}
+          />
+        )}
       </div>
     </div>
   );

@@ -18,6 +18,7 @@ import debugRoutes from './debug.js';
 import oauthRoutes from './oauth.js';
 import teamRoutes from './team.js';
 import strategyBuilderRoutes from './strategyBuilder.js';
+import automationLinkedinRoutes from './automationLinkedin.js';
 
 const router = express.Router();
 // CSRF protection middleware (cookie-based)
@@ -44,6 +45,7 @@ router.use('/credits', creditsRoutes);
 router.use('/oauth', oauthRoutes);
 router.use('/team', teamRoutes);
 router.use('/strategy', strategyBuilderRoutes);
+router.use('/automation/linkedin', automationLinkedinRoutes);
 
 // Debug routes (only in development)
 if (process.env.NODE_ENV === 'development') {

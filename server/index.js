@@ -36,6 +36,7 @@ app.use(Honeybadger.requestHandler);
 const PORT = process.env.PORT || 3004;
 const READINESS_CHECK_INTERVAL_MS = Number.parseInt(process.env.READINESS_CHECK_INTERVAL_MS || '30000', 10);
 const runSchedulerInApi = process.env.LINKEDIN_RUN_SCHEDULER_IN_API !== 'false';
+const logAllowedCorsOrigins = process.env.CORS_LOG_ALLOWED_ORIGINS === 'true';
 const linkedinRuntimeState = {
   database: {
     ok: false,
@@ -184,7 +185,9 @@ app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
     if (isAllowedCorsOrigin(origin)) {
-      logger.debug('[CORS] Allowed origin', { origin });
+      if (logAllowedCorsOrigins) {
+        logger.debug('[CORS] Allowed origin', { origin });
+      }
       return callback(null, true);
     } else {
       logger.warn('[CORS] Blocked origin', { origin });
@@ -192,7 +195,7 @@ app.use(cors({
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: [
     'Content-Type',
     'Authorization',
