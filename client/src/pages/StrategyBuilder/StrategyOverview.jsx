@@ -174,6 +174,7 @@ const StrategyOverview = ({ strategy, onGeneratePrompts, onStrategyUpdated }) =>
   const [manualTopicsInput, setManualTopicsInput] = useState('');
   const [aiPromptInput, setAiPromptInput] = useState('');
   const [isApplyingAddOn, setIsApplyingAddOn] = useState(false);
+  const [showAdvancedControls, setShowAdvancedControls] = useState(false);
 
   useEffect(() => {
     loadPromptCount();
@@ -293,6 +294,23 @@ const StrategyOverview = ({ strategy, onGeneratePrompts, onStrategyUpdated }) =>
   };
 
   const promptsStale = Boolean(strategy?.metadata?.prompts_stale);
+  const promptRefreshRecommendation = String(
+    strategy?.metadata?.prompts_refresh_recommendation || ''
+  ).trim().toLowerCase();
+  const hasPromptUsageRecommendation =
+    promptRefreshRecommendation === 'partial' || promptRefreshRecommendation === 'full';
+  const promptUsageSnapshot =
+    strategy?.metadata?.prompts_usage_snapshot &&
+    typeof strategy.metadata.prompts_usage_snapshot === 'object'
+      ? strategy.metadata.prompts_usage_snapshot
+      : {};
+  const usedPromptCount = Number(promptUsageSnapshot.used_prompts || 0);
+  const promptStatusTone =
+    promptRefreshRecommendation === 'full'
+      ? 'rose'
+      : (promptsStale || promptRefreshRecommendation === 'partial')
+        ? 'amber'
+        : 'blue';
   const nicheDisplay = useMemo(() => normalizeHeadline(strategy?.niche || ''), [strategy?.niche]);
   const audienceDisplay = useMemo(() => truncateText(strategy?.target_audience || '', 88), [strategy?.target_audience]);
   const postingFrequencyDisplay = useMemo(
@@ -338,17 +356,35 @@ const StrategyOverview = ({ strategy, onGeneratePrompts, onStrategyUpdated }) =>
 
   return (
     <div className="space-y-6">
-      {promptsStale && (
-        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-          <p className="text-sm text-amber-900">
-            {promptCount > 0
-              ? 'Prompt library is out of date after strategy updates. Regenerate prompts to match your latest goals/topics.'
-              : 'Strategy updated. Generate prompts to match your latest goals/topics.'}
+      {(hasPromptUsageRecommendation || promptsStale) && (
+        <div
+          className={`border rounded-xl p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3 ${
+            promptRefreshRecommendation === 'full'
+              ? 'bg-rose-50 border-rose-200'
+              : 'bg-amber-50 border-amber-200'
+          }`}
+        >
+          <p
+            className={`text-sm ${
+              promptRefreshRecommendation === 'full' ? 'text-rose-900' : 'text-amber-900'
+            }`}
+          >
+            {promptRefreshRecommendation === 'full'
+              ? 'Most prompts are already used and this pack is now stale. Regenerate a fresh set before your next sprint.'
+              : hasPromptUsageRecommendation
+                ? 'Several prompts are already used. Top up the prompt pack to keep quality high.'
+                : (promptCount > 0
+                    ? 'Prompt library is out of date after strategy updates. Regenerate prompts to match your latest goals/topics.'
+                    : 'Strategy updated. Generate prompts to match your latest goals/topics.')}
           </p>
           <button
             onClick={handleGeneratePrompts}
             disabled={isGenerating}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
+            className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-white disabled:opacity-50 ${
+              promptRefreshRecommendation === 'full'
+                ? 'bg-rose-600 hover:bg-rose-700'
+                : 'bg-amber-600 hover:bg-amber-700'
+            }`}
           >
             <RefreshCw className="w-4 h-4" />
             {isGenerating ? 'Generating...' : promptCount > 0 ? 'Regenerate Prompts' : 'Generate Prompts'}
@@ -372,9 +408,37 @@ const StrategyOverview = ({ strategy, onGeneratePrompts, onStrategyUpdated }) =>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-center min-w-[120px]">
-              <div className="text-2xl font-bold text-blue-700">{promptCount}</div>
-              <div className="text-xs text-blue-700">{promptsStale ? 'Prompts stale' : 'Prompts ready'}</div>
+            <div
+              className={`rounded-lg px-4 py-2 text-center min-w-[140px] ${
+                promptStatusTone === 'rose'
+                  ? 'border border-rose-200 bg-rose-50'
+                  : promptStatusTone === 'amber'
+                    ? 'border border-amber-200 bg-amber-50'
+                    : 'border border-blue-200 bg-blue-50'
+              }`}
+            >
+              <div
+                className={`text-2xl font-bold ${
+                  promptStatusTone === 'rose'
+                    ? 'text-rose-700'
+                    : promptStatusTone === 'amber'
+                      ? 'text-amber-700'
+                      : 'text-blue-700'
+                }`}
+              >
+                {promptCount}
+              </div>
+              <div
+                className={`text-xs ${
+                  promptStatusTone === 'rose'
+                    ? 'text-rose-700'
+                    : promptStatusTone === 'amber'
+                      ? 'text-amber-700'
+                      : 'text-blue-700'
+                }`}
+              >
+                {usedPromptCount > 0 ? `${usedPromptCount} used` : (promptsStale ? 'Needs refresh' : 'Ready')}
+              </div>
             </div>
             <button
               onClick={handleGeneratePrompts}
@@ -483,6 +547,23 @@ const StrategyOverview = ({ strategy, onGeneratePrompts, onStrategyUpdated }) =>
         )}
       </div>
 
+      <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-sm font-semibold text-gray-900">Advanced controls</p>
+          <p className="text-xs text-gray-600">
+            Use this only when you want to manually add goals/topics or ask AI to expand your strategy.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowAdvancedControls((prev) => !prev)}
+          className="inline-flex items-center justify-center rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100"
+        >
+          {showAdvancedControls ? 'Hide advanced' : 'Show advanced'}
+        </button>
+      </div>
+
+      {showAdvancedControls && (
       <div className="bg-white rounded-xl p-6 border border-gray-200">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <h3 className="text-lg font-semibold text-gray-900">Add to Strategy</h3>
@@ -568,6 +649,7 @@ const StrategyOverview = ({ strategy, onGeneratePrompts, onStrategyUpdated }) =>
           </div>
         )}
       </div>
+      )}
 
       {promptCount > 0 && (
         <div className="bg-white rounded-xl p-6 border border-green-200">

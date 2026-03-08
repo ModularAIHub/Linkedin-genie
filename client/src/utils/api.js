@@ -172,6 +172,11 @@ export const ai = {
 export const strategy = {
   getCurrent: () => api.get('/api/strategy/current'),
   getById: (id) => api.get(`/api/strategy/${id}`),
+  getContextVault: (id, params = {}) => api.get(`/api/strategy/${id}/context-vault`, { params }),
+  refreshContextVault: (id, payload = {}) => api.post(`/api/strategy/${id}/context-vault/refresh`, payload),
+  applyContextVault: (id, payload = {}) => api.post(`/api/strategy/${id}/context-vault/apply`, payload),
+  getContentPlan: (id) => api.get(`/api/strategy/${id}/content-plan`),
+  generateContentPlan: (id) => api.post(`/api/strategy/${id}/content-plan/generate`),
   list: () => api.get('/api/strategy/list'),
   create: (data) => api.post('/api/strategy', data),
   chat: (message, strategyId, currentStep) =>
@@ -180,6 +185,8 @@ export const strategy = {
   generatePrompts: (strategyId) => api.post(`/api/strategy/${strategyId}/generate-prompts`),
   getPrompts: (strategyId, params) => api.get(`/api/strategy/${strategyId}/prompts`, { params }),
   toggleFavorite: (promptId) => api.post(`/api/strategy/prompts/${promptId}/favorite`),
+  markPromptUsed: (promptId, strategyId) =>
+    api.post(`/api/strategy/prompts/${promptId}/mark-used`, { strategyId }),
   update: (strategyId, data) => api.patch(`/api/strategy/${strategyId}`, data),
   delete: (strategyId) => api.delete(`/api/strategy/${strategyId}`),
 };
@@ -188,6 +195,12 @@ export const strategy = {
 export const profileAnalysis = {
   analyse: (strategyId, options = {}) =>
     api.post('/api/strategy/init-analysis', { strategyId, ...options }, { timeout: 120000 }),
+  uploadLinkedinProfilePdf: (strategyId, payload) =>
+    api.post(
+      '/api/strategy/upload-linkedin-profile-pdf',
+      { strategyId, ...payload },
+      { timeout: 120000 }
+    ),
   getStatus: (analysisId) => api.get(`/api/strategy/analysis-status/${analysisId}`),
   getLatest: (strategyId) => api.get('/api/strategy/latest-analysis', { params: { strategyId } }),
   confirmStep: (analysisId, step, value) => api.post('/api/strategy/apply-analysis', { analysisId, step, value }),

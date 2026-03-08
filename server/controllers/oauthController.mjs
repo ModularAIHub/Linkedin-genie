@@ -26,8 +26,47 @@ const SELECTION_STATE_TTL_MS = 10 * 60 * 1000;
 let oauthStateStoreEnsured = false;
 
 // UPDATED SCOPES - includes analytics scopes
-const LINKEDIN_SCOPES = 'openid profile email w_member_social r_organization_social r_organization_admin w_organization_social';
+const LINKEDIN_SCOPES = 'openid profile email w_member_social r_member_social r_organization_social r_organization_admin w_organization_social';
 const LINKEDIN_PLATFORM = 'linkedin';
+
+async function fetchAndStoreLinkedInPosts(userId, linkedinUserId, accessToken) {
+  try {
+    const authorUrn = encodeURIComponent(`urn:li:person:${linkedinUserId}`);
+    const postsRes = await axios.get(
+      `https://api.linkedin.com/v2/ugcPosts?q=authors&authors=List(${authorUrn})&count=20&sortBy=LAST_MODIFIED`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'X-Restli-Protocol-Version': '2.0.0',
+          'LinkedIn-Version': '202405',
+        },
+      }
+    );
+
+    const elements = postsRes.data?.elements || [];
+    if (!elements.length) return;
+
+    for (const post of elements) {
+      const content =
+        post?.specificContent?.['com.linkedin.ugc.ShareContent']?.shareCommentary?.text || '';
+      if (!content) continue;
+
+      const createdAt = post.created?.time ? new Date(post.created.time) : new Date();
+
+      await pool.query(
+        `INSERT INTO linkedin_posts (
+          user_id, linkedin_user_id, post_content, status, created_at, updated_at
+        ) VALUES ($1, $2, $3, 'posted', $4, NOW())
+        ON CONFLICT DO NOTHING`,
+        [userId, linkedinUserId, content, createdAt]
+      ).catch(() => {}); // silent - table schema may vary
+    }
+
+    console.log(`[OAuth] Stored ${elements.length} LinkedIn posts for user ${userId}`);
+  } catch (err) {
+    console.warn('[OAuth] Could not fetch LinkedIn posts during OAuth:', err?.response?.status, err?.message);
+  }
+}
 
 const getSelectionStateKey = (selectionId) => `selection_${selectionId}`;
 
@@ -1003,6 +1042,9 @@ export async function handleOAuthCallback(req, res) {
           },
           connectedBy: userId,
         });
+
+        // Fetch recent posts in background - do not block OAuth completion.
+        fetchAndStoreLinkedInPosts(userId, linkedinUserId, accessToken).catch(() => {});
       }
     }
 

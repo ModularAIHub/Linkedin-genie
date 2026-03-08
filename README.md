@@ -1,36 +1,63 @@
 # LinkedIn Genie
 
-This is a placeholder README for the LinkedIn Genie module. The codebase will mirror Tweet Genie, adapted for LinkedIn's API and features.
+LinkedIn Genie is the LinkedIn-focused product in SuiteGenie. It includes post creation, scheduling, analytics, and Strategy Builder with profile/context enrichment.
 
-## Structure
-- `server/` — Node.js backend for LinkedIn Genie (OAuth, scheduling, posting, analytics)
-- `client/` — React frontend for composing, scheduling, and viewing LinkedIn posts
+## Project Structure
+- `server/`: Node.js backend (auth, posting, scheduling, analytics, strategy APIs)
+- `client/`: React frontend (composer, analytics UI, strategy workflow)
 
-## Setup
-- Copy structure and logic from Tweet Genie
-- Replace Twitter-specific logic with LinkedIn API integration
-- Enforce platform login for access
+## Current Strategy Builder Flow
+Strategy analysis combines:
+- Recent LinkedIn post history
+- Connected account snapshot (name, followers, headline, etc.)
+- Optional portfolio URL metadata
+- Optional user-entered context
+- Optional uploaded LinkedIn profile PDF
+- Context Vault (strategy-scoped persisted signal snapshot)
 
-## Environment Variables
+Recent reliability improvements:
+- Strategy AI now requests strict JSON schema from Gemini to reduce malformed/truncated responses.
+- Niche derivation filters junk phrase artifacts (for example pronoun/focus fragments) before saving.
+- LinkedIn strategy snapshot calls now retry with rolling `LinkedIn-Version` headers by default.
+- Prompt Pack is quality-first for LinkedIn (`~12` prompts, bounded `11-14`) with usage-aware regenerate hints.
+- Context Vault auto-refreshes after analysis/prompt/content-plan/PDF flows and stores compact performance + usage state.
 
-See `server/env.example` for all required LinkedIn API and database environment variables. Update your `.env` file accordingly.
+## LinkedIn Profile PDF Extraction
+When a user uploads a profile PDF in Strategy Builder:
+- Backend first sends PDF plus known context plus recent posts to Gemini for structured extraction.
+- Expected fields: `about`, `skills`, `experience`, `confidence`, `notes`.
+- If Gemini fails, backend can fall back to local extraction heuristics.
+- Response includes `discoveries.extractionSource` (`gemini` or `local_fallback`) and warnings when extraction quality is low.
 
-## Database Migration
+## Known LinkedIn API Limitation
+Some tokens/apps cannot read full personal profile fields from LinkedIn API and return:
+- `403 ACCESS_DENIED`
+- `me.GET.NO_VERSION`
 
-Run the migration in `server/migrations/20250919_create_linkedin_posts_table.sql` to create the `linkedin_posts` table with all LinkedIn-specific fields.
+Because of this, PDF upload exists as fallback for personal `about/skills/experience` enrichment.
 
-## Analytics
+## Local Setup
+1. Install dependencies:
+```sh
+npm install
+```
+2. Configure environment variables:
+- Root and server vars in `.env`
+- See `server/env.example`
+3. Run required migrations (at minimum):
+- `server/migrations/20250919_create_linkedin_posts_table.sql`
+4. Start apps:
+```sh
+# backend
+npm --prefix server run dev
 
-Analytics dashboard and backend logic are adapted for LinkedIn metrics (views, shares, likes, comments, etc.).
+# frontend
+npm --prefix client run dev
+```
 
-## Testing
-
-- Test all frontend and backend endpoints for LinkedIn post creation, scheduling, analytics, and error handling.
-- Validate LinkedIn OAuth 2.0 integration and company page posting.
-- Ensure all environment variables are set and database is migrated.
-
----
-
-For more details, see the Tweet Genie documentation and adapt for LinkedIn as needed.
-
-## Work in progress.
+## Docs and Support
+- Backend details: `server/README.md`
+- Frontend details: `client/README.md`
+- Strategy Builder technical file map: `docs/STRATEGY_BUILDER_REFERENCE.md`
+- CORS and cookie setup: `server/CORS_COOKIE_GUIDE.md`
+- User/support playbook: `SUPPORT.md`

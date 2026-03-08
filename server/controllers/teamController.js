@@ -25,6 +25,50 @@ const normalizeString = (value, maxLen = null) => {
   return stringValue;
 };
 
+async function getUserSelectedAccountPreference(userId) {
+  const normalizedUserId = normalizeString(userId, 255);
+  if (!normalizedUserId) return null;
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT selected_account_id, selected_account_key
+       FROM linkedin_user_preferences
+       WHERE user_id = $1
+       LIMIT 1`,
+      [normalizedUserId]
+    );
+    return rows[0] || null;
+  } catch (error) {
+    // Migration might not be applied yet on all environments.
+    console.warn('[teamController] Failed to read linkedin_user_preferences:', error?.message || error);
+    return null;
+  }
+}
+
+function resolvePreferredAccount(accounts = [], preference = null) {
+  if (!Array.isArray(accounts) || accounts.length === 0 || !preference) return null;
+
+  const preferredId = normalizeString(preference.selected_account_id, 255);
+  const preferredKey = normalizeString(preference.selected_account_key, 255);
+
+  return (
+    accounts.find((account) => preferredId && String(account?.id || '') === preferredId) ||
+    accounts.find((account) => preferredKey && String(account?.account_id || '') === preferredKey) ||
+    null
+  );
+}
+
+async function buildAccountsResponsePayload(userId, accounts = []) {
+  const preference = await getUserSelectedAccountPreference(userId);
+  const selectedAccount = resolvePreferredAccount(accounts, preference);
+
+  return {
+    accounts,
+    selectedAccountId: selectedAccount?.id || null,
+    selectedAccountKey: selectedAccount?.account_id || null,
+  };
+}
+
 const resolveTeamLinkedInSocialAccountId = (row = {}) => {
   const accountType = normalizeString(row.account_type, 50);
   const organizationId = normalizeString(row.organization_id, 255);
@@ -250,7 +294,8 @@ export async function getAccounts(req, res) {
           };
         }));
 
-        return res.json({ accounts: teamAccounts });
+        const payload = await buildAccountsResponsePayload(userId, teamAccounts);
+        return res.json(payload);
       }
 
       // Fallback: legacy linkedin_team_accounts (for users not yet migrated to social_connected_accounts)
@@ -323,7 +368,8 @@ export async function getAccounts(req, res) {
         };
       }));
 
-      return res.json({ accounts: legacyAccounts });
+      const payload = await buildAccountsResponsePayload(userId, legacyAccounts);
+      return res.json(payload);
     }
 
     // User is NOT in a team - return personal account only
@@ -377,7 +423,8 @@ export async function getAccounts(req, res) {
       };
     });
 
-    res.json({ accounts });
+    const payload = await buildAccountsResponsePayload(userId, accounts);
+    res.json(payload);
   } catch (error) {
     console.error('[getAccounts] ❌ Error fetching LinkedIn accounts:', error);
     console.error('[getAccounts] Stack:', error.stack);
@@ -562,15 +609,61 @@ export async function disconnectTeamAccount(req, res) {
 // Set the active/selected LinkedIn account for the user's session
 export async function selectAccount(req, res) {
   try {
-    const { accountId, teamId } = req.body;
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
 
-    // Store in session (if using sessions) or just return success
-    // The frontend will store this in context and send in headers
-    res.json({ 
-      success: true, 
-      message: 'Account selected',
+    const {
       accountId,
-      teamId
+      accountKey = null,
+      accountType = null,
+      teamId = null,
+      isTeamAccount = false,
+    } = req.body || {};
+
+    const normalizedAccountId = normalizeString(accountId, 255);
+    const normalizedAccountKey = normalizeString(accountKey, 255);
+
+    if (!normalizedAccountId && !normalizedAccountKey) {
+      return res.status(400).json({ error: 'accountId or accountKey is required' });
+    }
+
+    await pool.query(
+      `INSERT INTO linkedin_user_preferences (
+         user_id,
+         selected_account_id,
+         selected_account_key,
+         selected_account_type,
+         selected_team_id,
+         is_team_account,
+         updated_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, NOW()
+       )
+       ON CONFLICT (user_id) DO UPDATE
+       SET selected_account_id = EXCLUDED.selected_account_id,
+           selected_account_key = EXCLUDED.selected_account_key,
+           selected_account_type = EXCLUDED.selected_account_type,
+           selected_team_id = EXCLUDED.selected_team_id,
+           is_team_account = EXCLUDED.is_team_account,
+           updated_at = NOW()`,
+      [
+        normalizeString(userId, 255),
+        normalizedAccountId,
+        normalizedAccountKey,
+        normalizeString(accountType, 50),
+        normalizeString(teamId, 255),
+        Boolean(isTeamAccount),
+      ]
+    );
+
+    res.json({
+      success: true,
+      message: 'Account selected',
+      accountId: normalizedAccountId,
+      accountKey: normalizedAccountKey,
+      teamId: normalizeString(teamId, 255),
     });
   } catch (error) {
     console.error('Error selecting account:', error);

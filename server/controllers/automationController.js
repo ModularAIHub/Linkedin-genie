@@ -1,5 +1,8 @@
 import linkedinAutomationService, { AutomationError } from '../services/linkedinAutomationService.js';
 import { syncAnalytics } from './analyticsController.js';
+import { pool } from '../config/database.js';
+import contextVaultService from '../services/contextVaultService.js';
+import strategyService from '../services/strategyService.js';
 
 const getUserTokenFromRequest = (req) => {
   const authHeader = req.headers.authorization || req.headers.Authorization;
@@ -32,6 +35,61 @@ const handleControllerError = (res, error, fallbackMessage) => {
     error: fallbackMessage,
     details: error?.message || String(error),
   });
+};
+
+const parseJsonObject = (value, fallback = {}) => {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
+};
+
+const refreshContextVaultFromQueueAction = async ({ userId, queueItem, reason = 'queue_review' } = {}) => {
+  try {
+    const runId = String(queueItem?.run_id || '').trim();
+    if (!runId) return null;
+
+    const { rows } = await pool.query(
+      `SELECT metadata
+       FROM linkedin_automation_runs
+       WHERE id = $1 AND user_id = $2
+       LIMIT 1`,
+      [runId, userId]
+    );
+
+    const runMetadata = parseJsonObject(rows?.[0]?.metadata, {});
+    const strategyId = String(runMetadata.strategy_id || '').trim();
+    if (!strategyId) return null;
+
+    const strategy = await strategyService.getStrategy(strategyId);
+    if (!strategy || String(strategy.user_id) !== String(userId)) return null;
+
+    const vault = await contextVaultService.refresh({
+      userId,
+      strategy,
+      reason,
+    });
+
+    return {
+      strategyId,
+      vaultId: vault?.id || null,
+      refreshedAt: vault?.lastRefreshedAt || null,
+    };
+  } catch (error) {
+    console.warn('[Automation] Context vault refresh after queue action failed:', {
+      userId,
+      queueId: queueItem?.id || null,
+      reason,
+      error: error?.message || String(error),
+    });
+    return null;
+  }
 };
 
 export async function getProfileContext(req, res) {
@@ -145,12 +203,22 @@ export async function patchQueueItem(req, res) {
     const normalizedAction = action.trim().toLowerCase();
     if (normalizedAction === 'approve') {
       const queueItem = await linkedinAutomationService.approveQueueItem(userId, queueId);
-      return res.json({ success: true, queueItem });
+      const contextVaultRefresh = await refreshContextVaultFromQueueAction({
+        userId,
+        queueItem,
+        reason: 'queue_approve',
+      });
+      return res.json({ success: true, queueItem, contextVaultRefresh });
     }
 
     if (normalizedAction === 'reject') {
       const queueItem = await linkedinAutomationService.rejectQueueItem(userId, queueId, reason || '');
-      return res.json({ success: true, queueItem });
+      const contextVaultRefresh = await refreshContextVaultFromQueueAction({
+        userId,
+        queueItem,
+        reason: 'queue_reject',
+      });
+      return res.json({ success: true, queueItem, contextVaultRefresh });
     }
 
     if (normalizedAction === 'schedule') {
@@ -158,10 +226,16 @@ export async function patchQueueItem(req, res) {
         scheduled_time,
         timezone,
       });
+      const contextVaultRefresh = await refreshContextVaultFromQueueAction({
+        userId,
+        queueItem: result?.queueItem,
+        reason: 'queue_schedule',
+      });
       return res.json({
         success: true,
         queueItem: result.queueItem,
         scheduledPost: result.scheduledPost,
+        contextVaultRefresh,
       });
     }
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   MessageSquare,
@@ -10,83 +10,30 @@ import {
   Trash2,
   Plus,
   AlertCircle,
-  Wand2,
   Lock,
-  X,
   Sparkles,
-  CheckCircle2,
-  Circle,
   Rocket,
   PencilLine,
   BookOpen,
+  Database,
+  ArrowRight,
 } from 'lucide-react';
 import ChatInterface from './ChatInterface';
 import StrategyOverview from './StrategyOverview';
 import PromptLibrary from './PromptLibrary';
 import AnalysisFlow from './AnalysisFlow';
+import AutomationFlow from './AutomationFlow';
+import ContextVault from './ContextVault';
+import StrategySetupForm from './StrategySetupForm';
+import {
+  VIEW_META,
+  compactStrategyLabel,
+  isReconnectRequiredError,
+} from './strategyBuilderConfig';
 import { strategy as strategyApi } from '../../utils/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { hasProPlanAccess } from '../../utils/planAccess';
 import { getSuiteGenieProUpgradeUrl } from '../../utils/upgradeUrl';
-
-const isReconnectRequiredError = (error) =>
-  error?.response?.data?.code === 'LINKEDIN_RECONNECT_REQUIRED' ||
-  error?.response?.data?.code === 'TWITTER_RECONNECT_REQUIRED' ||
-  error?.response?.data?.reconnect === true;
-
-const STRATEGY_TEMPLATES = [
-  {
-    name: 'Founder Build in Public',
-    description: 'Share product progress, lessons, and customer wins every week.',
-  },
-  {
-    name: 'Niche Expert Growth',
-    description: 'Teach one topic deeply and build authority with practical LinkedIn posts.',
-  },
-  {
-    name: 'Creator Audience Engine',
-    description: 'Use storytelling plus educational hooks to grow followers.',
-  },
-];
-
-const VIEW_META = {
-  chat: {
-    title: 'Setup',
-    subtitle: 'Define niche, audience, goals, and context',
-    icon: MessageSquare,
-  },
-  overview: {
-    title: 'Review',
-    subtitle: 'Inspect strategy quality before generation',
-    icon: Layout,
-  },
-  prompts: {
-    title: 'Prompt Pack',
-    subtitle: 'Use production-ready ideas in compose/bulk',
-    icon: Library,
-  },
-};
-
-const STRATEGY_LABEL_MARKERS = ['what we do', 'key features', 'why suitegenie', 'perfect for'];
-
-const compactStrategyLabel = (value = '') => {
-  let text = String(value || '').replace(/\s+/g, ' ').trim();
-  if (!text) return 'Untitled strategy';
-
-  const lower = text.toLowerCase();
-  for (const marker of STRATEGY_LABEL_MARKERS) {
-    const index = lower.indexOf(marker);
-    if (index > 0) {
-      text = text.slice(0, index).trim();
-      break;
-    }
-  }
-
-  text = text.replace(/\s*[|:-]\s*/g, ' ').replace(/\s+/g, ' ').trim();
-  if (!text) return 'Untitled strategy';
-  if (text.length > 70) return `${text.slice(0, 67).trim()}...`;
-  return text;
-};
 
 const StrategyBuilder = () => {
   const { user } = useAuth();
@@ -112,39 +59,6 @@ const StrategyBuilder = () => {
   const [switchingStrategyId, setSwitchingStrategyId] = useState('');
   const [showAnalysisFlow, setShowAnalysisFlow] = useState(false);
   const [setupMode, setSetupMode] = useState('auto');
-
-  const normalizeListItem = (value) => value.trim().replace(/\s+/g, ' ').slice(0, 80);
-
-  const addListItem = (inputValue, currentItems, setItems, setInput) => {
-    const candidates = String(inputValue || '')
-      .split(',')
-      .map((value) => normalizeListItem(value))
-      .filter(Boolean);
-
-    if (candidates.length === 0) {
-      setInput('');
-      return;
-    }
-
-    const nextItems = [...currentItems];
-    const seen = new Set(nextItems.map((item) => item.toLowerCase()));
-
-    for (const candidate of candidates) {
-      if (seen.has(candidate.toLowerCase()) || nextItems.length >= 20) {
-        continue;
-      }
-
-      nextItems.push(candidate);
-      seen.add(candidate.toLowerCase());
-    }
-
-    setItems(nextItems);
-    setInput('');
-  };
-
-  const removeListItem = (index, currentItems, setItems) => {
-    setItems(currentItems.filter((_, idx) => idx !== index));
-  };
 
   const openCreateStrategyForm = () => {
     setTeamName('');
@@ -182,7 +96,7 @@ const StrategyBuilder = () => {
     setShowCreateForm(false);
     const defaultView = loadedStrategy.status === 'active' ? 'overview' : 'chat';
     const nextView =
-      preferredView && ['chat', 'overview', 'prompts'].includes(preferredView)
+      preferredView && ['chat', 'overview', 'prompts', 'content', 'vault'].includes(preferredView)
         ? preferredView
         : defaultView;
     setCurrentView(nextView);
@@ -526,15 +440,82 @@ const StrategyBuilder = () => {
       description: 'Generate and use prompts',
       visible: strategy !== null,
     },
+    {
+      id: 'content',
+      label: 'Content Plan',
+      icon: Sparkles,
+      description: 'Publish-ready posts and approvals',
+      visible: strategy !== null,
+    },
+    {
+      id: 'vault',
+      label: 'Context Vault',
+      icon: Database,
+      description: 'Persistent memory and signal health',
+      visible: strategy !== null,
+    },
   ].filter((tab) => tab.visible);
 
   const strategyIsActive = strategy?.status === 'active';
   const strategyLabel = compactStrategyLabel(strategy?.niche || '');
+  const contentPlanStatus = String(strategy?.metadata?.content_plan_status || '').trim().toLowerCase();
+  const contentPlanQueueCount = Number(strategy?.metadata?.content_plan_queue_count || 0);
+  const hasReadyContentPlan = contentPlanStatus === 'ready' && contentPlanQueueCount > 0;
   const tabCompletion = {
     chat: Boolean(hasCompletedBasicProfile),
     overview: Boolean(strategyIsActive),
     prompts: Boolean(strategy?.metadata?.prompts_last_generated_at),
+    content: Boolean(hasReadyContentPlan),
+    vault: Boolean(strategy?.metadata?.context_vault?.last_refreshed_at),
   };
+
+  const primaryAction = useMemo(() => {
+    if (!strategy) {
+      return {
+        type: 'chat',
+        label: 'Start setup',
+        description: 'Begin by setting your niche and audience.',
+      };
+    }
+
+    if (!tabCompletion.chat) {
+      return {
+        type: 'chat',
+        label: 'Complete setup',
+        description: 'Set your basic profile details to unlock strategy analysis.',
+      };
+    }
+
+    if (!tabCompletion.overview) {
+      return {
+        type: 'analysis',
+        label: 'Run auto analysis',
+        description: 'Analyze your current signals and confirm your strategy.',
+      };
+    }
+
+    if (!tabCompletion.prompts) {
+      return {
+        type: 'prompts',
+        label: 'Generate prompt pack',
+        description: 'Create your high-quality prompt library from the confirmed strategy.',
+      };
+    }
+
+    if (!tabCompletion.content) {
+      return {
+        type: 'content',
+        label: 'Generate content plan',
+        description: 'Create publish-ready posts you can approve and schedule.',
+      };
+    }
+
+    return {
+      type: 'content',
+      label: 'Review content plan',
+      description: 'Approve, schedule, or send posts to Compose.',
+    };
+  }, [strategy, tabCompletion]);
 
   useEffect(() => {
     const requestedTab = (searchParams.get('tab') || '').trim().toLowerCase();
@@ -565,6 +546,25 @@ const StrategyBuilder = () => {
     const nextParams = new URLSearchParams(searchParams);
     nextParams.set('tab', tabId);
     setSearchParams(nextParams, { replace: true });
+  };
+
+  const handlePrimaryAction = async () => {
+    switch (primaryAction.type) {
+      case 'analysis':
+        await handleStartAnalysisFlow();
+        return;
+      case 'prompts':
+        handleGeneratePrompts();
+        return;
+      case 'chat':
+      case 'overview':
+      case 'content':
+      case 'vault':
+        switchToTab(primaryAction.type);
+        return;
+      default:
+        switchToTab('chat');
+    }
   };
 
   if (!hasProAccess) {
@@ -632,264 +632,31 @@ const StrategyBuilder = () => {
 
   if (showCreateForm) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-100 via-blue-50 to-indigo-100 flex items-center justify-center p-4">
-        <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-5 sm:p-8">
-          <div className="text-center mb-8">
-            <h1 className="text-2xl sm:text-4xl font-bold text-gray-900 mb-2">
-              {isAdvancedEditMode ? 'Edit Strategy' : 'Create Your Strategy'}
-            </h1>
-            <p className="text-gray-600 text-sm sm:text-lg">
-              {isAdvancedEditMode ? 'Update your strategy details' : 'Set up your LinkedIn content strategy in under a minute'}
-            </p>
-          </div>
-
-          {error && (
-            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-6">
-              {error}
-            </div>
-          )}
-
-          <div className="space-y-6">
-            <div>
-              <label className="block text-sm font-semibold text-gray-900 mb-3">
-                Strategy Name <span className="text-red-500">*</span>
-              </label>
-              <p className="text-sm text-gray-600 mb-3">
-                Give this strategy a clear name so you can manage multiple playbooks without confusion.
-              </p>
-              <input
-                type="text"
-                placeholder="e.g., B2B SaaS Growth"
-                value={teamName}
-                onChange={(e) => setTeamName(e.target.value)}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg"
-                disabled={creatingTeam}
-              />
-            </div>
-
-            <div>
-              <p className="text-sm font-semibold text-gray-900 mb-3">Quick Start Templates (Optional)</p>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {STRATEGY_TEMPLATES.map((template) => (
-                  <button
-                    key={template.name}
-                    type="button"
-                    onClick={() => {
-                      setTeamName(template.name);
-                      setTeamDescription(template.description);
-                    }}
-                    className="text-left p-4 border border-gray-200 rounded-xl hover:border-blue-300 hover:bg-blue-50 transition-colors"
-                  >
-                    <div className="flex items-center gap-2 mb-1 text-gray-900 font-medium">
-                      <Wand2 className="w-4 h-4 text-blue-600" />
-                      <span>{template.name}</span>
-                    </div>
-                    <p className="text-xs text-gray-600">{template.description}</p>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-sm font-semibold text-gray-900 mb-3">
-                Description <span className="text-gray-400">(Optional)</span>
-              </label>
-              <p className="text-sm text-gray-600 mb-3">
-                Describe what this strategy is about.
-              </p>
-              <textarea
-                placeholder="e.g., Helping founders grow with clear marketing playbooks"
-                value={teamDescription}
-                onChange={(e) => setTeamDescription(e.target.value)}
-                rows={3}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                disabled={creatingTeam}
-              />
-            </div>
-
-            {isAdvancedEditMode && (
-              <>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-900 mb-3">
-                    Content Goals <span className="text-gray-400">(Optional)</span>
-                  </label>
-                  <p className="text-sm text-gray-600 mb-3">
-                    Add up to 20 goals. Press Enter or click Add.
-                  </p>
-                  {editGoals.length > 0 && (
-                    <div className="flex flex-wrap gap-2 mb-3">
-                      {editGoals.map((goal, index) => (
-                        <span
-                          key={`${goal}-${index}`}
-                          className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 border border-blue-200 text-sm"
-                        >
-                          {goal}
-                          <button
-                            type="button"
-                            onClick={() => removeListItem(index, editGoals, setEditGoals)}
-                            className="text-blue-500 hover:text-blue-700"
-                          >
-                            <X size={14} />
-                          </button>
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={goalInput}
-                      onChange={(e) => setGoalInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ',') {
-                          e.preventDefault();
-                          addListItem(goalInput, editGoals, setEditGoals, setGoalInput);
-                        }
-                      }}
-                      placeholder="e.g., Grow followers organically"
-                      className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      disabled={creatingTeam}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => addListItem(goalInput, editGoals, setEditGoals, setGoalInput)}
-                      className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50"
-                      disabled={creatingTeam}
-                    >
-                      Add
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-900 mb-3">
-                    Content Topics <span className="text-gray-400">(Optional)</span>
-                  </label>
-                  <p className="text-sm text-gray-600 mb-3">
-                    Add up to 20 topics. Press Enter or click Add.
-                  </p>
-                  {editTopics.length > 0 && (
-                    <div className="flex flex-wrap gap-2 mb-3">
-                      {editTopics.map((topic, index) => (
-                        <span
-                          key={`${topic}-${index}`}
-                          className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-200 text-sm"
-                        >
-                          {topic}
-                          <button
-                            type="button"
-                            onClick={() => removeListItem(index, editTopics, setEditTopics)}
-                            className="text-indigo-500 hover:text-indigo-700"
-                          >
-                            <X size={14} />
-                          </button>
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={topicInput}
-                      onChange={(e) => setTopicInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ',') {
-                          e.preventDefault();
-                          addListItem(topicInput, editTopics, setEditTopics, setTopicInput);
-                        }
-                      }}
-                      placeholder="e.g., Growth tactics"
-                      className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      disabled={creatingTeam}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => addListItem(topicInput, editTopics, setEditTopics, setTopicInput)}
-                      className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50"
-                      disabled={creatingTeam}
-                    >
-                      Add
-                    </button>
-                  </div>
-                </div>
-              </>
-            )}
-
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <p className="text-sm font-semibold text-blue-900 mb-2">Choose your setup path</p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-                <div className="rounded-lg border border-blue-200 bg-white px-3 py-2 text-blue-800">
-                  <span className="font-semibold">Manual Setup</span>
-                  <p className="text-blue-700 mt-1">Answer guided questions and control each field.</p>
-                </div>
-                <div className="rounded-lg border border-indigo-200 bg-white px-3 py-2 text-indigo-800">
-                  <span className="font-semibold">Auto Analyze</span>
-                  <p className="text-indigo-700 mt-1">Fetch account signals and prefill strategy automatically.</p>
-                </div>
-              </div>
-            </div>
-
-            {isAdvancedEditMode ? (
-              <button
-                onClick={() => handleSaveStrategy({ nextView: 'overview' })}
-                disabled={!teamName.trim() || creatingTeam}
-                className="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-              >
-                {creatingTeam ? (
-                  <>
-                    <Loader2 size={20} className="animate-spin" />
-                    Updating...
-                  </>
-                ) : (
-                  <>Update Strategy</>
-                )}
-              </button>
-            ) : (
-              <div className="flex flex-col sm:flex-row gap-3">
-                <button
-                  onClick={() => handleSaveStrategy({ nextView: 'chat' })}
-                  disabled={!teamName.trim() || creatingTeam}
-                  className="flex-1 bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                >
-                  {creatingTeam ? (
-                    <>
-                      <Loader2 size={20} className="animate-spin" />
-                      Creating...
-                    </>
-                  ) : (
-                    <>
-                      <PencilLine size={18} />
-                      Continue with Manual Setup
-                    </>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleStartAnalysisFlow}
-                  disabled={creatingTeam}
-                  className="flex-1 bg-gradient-to-r from-purple-600 to-blue-600 text-white py-3 rounded-lg font-semibold hover:from-purple-700 hover:to-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                >
-                  <Sparkles size={20} />
-                  Auto Analyze + Build
-                </button>
-              </div>
-            )}
-
-            {strategy && hasCompletedBasicProfile && (
-              <button
-                type="button"
-                onClick={() => {
-                  setShowCreateForm(false);
-                  setCurrentView(strategy.status === 'active' ? 'overview' : 'chat');
-                }}
-                className="w-full py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
-              >
-                Cancel
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
+      <StrategySetupForm
+        error={error}
+        strategy={strategy}
+        hasCompletedBasicProfile={hasCompletedBasicProfile}
+        isAdvancedEditMode={isAdvancedEditMode}
+        creatingTeam={creatingTeam}
+        teamName={teamName}
+        setTeamName={setTeamName}
+        teamDescription={teamDescription}
+        setTeamDescription={setTeamDescription}
+        editGoals={editGoals}
+        setEditGoals={setEditGoals}
+        editTopics={editTopics}
+        setEditTopics={setEditTopics}
+        goalInput={goalInput}
+        setGoalInput={setGoalInput}
+        topicInput={topicInput}
+        setTopicInput={setTopicInput}
+        onSaveStrategy={handleSaveStrategy}
+        onStartAnalysisFlow={handleStartAnalysisFlow}
+        onCancel={() => {
+          setShowCreateForm(false);
+          setCurrentView(strategy?.status === 'active' ? 'overview' : 'chat');
+        }}
+      />
     );
   }
 
@@ -951,7 +718,7 @@ const StrategyBuilder = () => {
                   {strategy ? strategyLabel : 'Build your personalized LinkedIn content strategy'}
                 </p>
                 <p className="text-xs text-gray-500 mt-1">
-                  Clear flow: Setup to Review to Prompt Pack
+                  Clear flow: Setup to Review to Prompt Pack to Content Plan to Context Vault
                 </p>
               </div>
             </div>
@@ -1001,45 +768,51 @@ const StrategyBuilder = () => {
           </div>
 
           {tabs.length > 1 && (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              {tabs.map((tab, index) => {
-                const Icon = tab.icon;
-                const isActiveTab = currentView === tab.id;
-                const done = tabCompletion[tab.id];
-                return (
-                  <button
-                    key={tab.id}
-                    onClick={() => switchToTab(tab.id)}
-                    className={`text-left rounded-xl border p-4 transition-all ${
-                      isActiveTab
-                        ? 'border-blue-300 bg-blue-50 shadow-sm'
-                        : 'border-gray-200 bg-white hover:border-blue-200 hover:bg-blue-50/40'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-                          isActiveTab ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'
-                        }`}>
-                          <Icon className="w-4 h-4" />
-                        </div>
-                        <div>
-                          <p className="text-xs text-gray-500">Step {index + 1}</p>
-                          <p className="text-sm font-semibold text-gray-900">{tab.label}</p>
-                        </div>
-                      </div>
-                      {done ? (
-                        <CheckCircle2 className="w-4 h-4 text-green-600 mt-1" />
-                      ) : (
-                        <Circle className="w-4 h-4 text-gray-400 mt-1" />
+            <div className="rounded-xl border border-gray-200 bg-white p-3">
+              <div className="flex flex-wrap gap-2">
+                {tabs.map((tab, index) => {
+                  const Icon = tab.icon;
+                  const isActiveTab = currentView === tab.id;
+                  const done = tabCompletion[tab.id];
+                  return (
+                    <button
+                      key={tab.id}
+                      onClick={() => switchToTab(tab.id)}
+                      className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
+                        isActiveTab
+                          ? 'border-blue-300 bg-blue-50 text-blue-800'
+                          : 'border-gray-200 bg-white text-gray-700 hover:border-blue-200 hover:bg-blue-50'
+                      }`}
+                    >
+                      <Icon className="h-4 w-4" />
+                      <span className="font-medium">{`Step ${index + 1}: ${tab.label}`}</span>
+                      {done && (
+                        <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500" />
                       )}
-                    </div>
-                    <p className="text-xs text-gray-600 mt-2">{tab.description}</p>
-                  </button>
-                );
-              })}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-2 text-xs text-gray-500">
+                Follow this order for the fastest result: Setup, Review, Prompt Pack, Content Plan, then Context Vault.
+              </p>
             </div>
           )}
+
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-emerald-900">Next best step: {primaryAction.label}</p>
+              <p className="text-xs text-emerald-800">{primaryAction.description}</p>
+            </div>
+            <button
+              type="button"
+              onClick={handlePrimaryAction}
+              className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+            >
+              {primaryAction.label}
+              <ArrowRight className="h-4 w-4" />
+            </button>
+          </div>
 
           <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-blue-50 rounded-lg">
             <span className="inline-flex items-center gap-1 text-xs text-blue-900 font-semibold">
@@ -1050,7 +823,7 @@ const StrategyBuilder = () => {
             <span className="text-blue-400">|</span>
             <span className="text-xs text-blue-800">Analyze: 5</span>
             <span className="text-blue-400">|</span>
-            <span className="text-xs text-blue-800">Prompt Pack: 10</span>
+            <span className="text-xs text-blue-800">Prompt Pack + Content Plan: 10</span>
           </div>
         </div>
       </div>
@@ -1155,7 +928,24 @@ const StrategyBuilder = () => {
           <PromptLibrary
             strategyId={strategy.id}
             strategyExtraContext={strategy?.metadata?.extra_context || ''}
+            contentPlanPromptIds={
+              Array.isArray(strategy?.metadata?.content_plan_prompt_ids)
+                ? strategy.metadata.content_plan_prompt_ids
+                : []
+            }
             fromAnalysis={isGeneratingPrompts}
+            onPromptUsageUpdated={async () => {
+              try {
+                const response = await strategyApi.getById(strategy.id);
+                const updatedStrategy = response?.data?.strategy;
+                if (updatedStrategy) {
+                  setStrategy(updatedStrategy);
+                  fetchStrategyList(updatedStrategy.id).catch(() => {});
+                }
+              } catch {
+                // keep prompt library usable even if strategy refresh fails
+              }
+            }}
             onPromptsLoaded={async () => {
               setIsGeneratingPrompts(false);
               try {
@@ -1170,6 +960,30 @@ const StrategyBuilder = () => {
               }
             }}
           />
+        )}
+
+        {currentView === 'content' && strategy && !showAnalysisFlow && (
+          <AutomationFlow
+            strategy={strategy}
+            onOpenPrompts={() => switchToTab('prompts')}
+            onOpenVault={() => switchToTab('vault')}
+            onContentPlanGenerated={async () => {
+              try {
+                const response = await strategyApi.getById(strategy.id);
+                const updatedStrategy = response?.data?.strategy;
+                if (updatedStrategy) {
+                  setStrategy(updatedStrategy);
+                  fetchStrategyList(updatedStrategy.id).catch(() => {});
+                }
+              } catch {
+                // keep content tab usable even if strategy refresh fails
+              }
+            }}
+          />
+        )}
+
+        {currentView === 'vault' && strategy && !showAnalysisFlow && (
+          <ContextVault strategy={strategy} onStrategyUpdated={handleStrategyUpdated} />
         )}
       </div>
     </div>

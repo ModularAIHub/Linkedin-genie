@@ -1,13 +1,17 @@
 import express from 'express';
+import axios from 'axios';
+import zlib from 'zlib';
 import { strategyService } from '../services/strategyService.js';
 import creditService from '../services/creditService.js';
 import aiService from '../services/aiService.js';
 import { pool } from '../config/database.js';
 import linkedinAutomationService from '../services/linkedinAutomationService.js';
+import contextVaultService from '../services/contextVaultService.js';
 import { requireProPlan } from '../middleware/planAccess.js';
 
 const router = express.Router();
 router.use(requireProPlan('Strategy Builder'));
+const CONTENT_PLAN_QUEUE_TARGET = 2;
 
 const stripMarkdownCodeFences = (value = '') =>
   String(value)
@@ -57,11 +61,346 @@ const parseJsonObject = (value, fallback = {}) => {
   return fallback;
 };
 
+const decodeHtmlEntities = (value = '') =>
+  String(value || '')
+    .replace(/&#(\d+);/g, (_match, dec) => {
+      const code = Number(dec);
+      if (!Number.isFinite(code)) return ' ';
+      try {
+        return String.fromCodePoint(code);
+      } catch {
+        return ' ';
+      }
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_match, hex) => {
+      const code = Number.parseInt(hex, 16);
+      if (!Number.isFinite(code)) return ' ';
+      try {
+        return String.fromCodePoint(code);
+      } catch {
+        return ' ';
+      }
+    })
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
+
+const stripHtmlTags = (value = '') =>
+  decodeHtmlEntities(String(value || '').replace(/<[^>]*>/g, ' '));
+
+const stripUnsafeJsonControlChars = (value = '') =>
+  String(value || '')
+    .replace(/\u0000/g, ' ')
+    .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
+    .replace(/[\uFFFE\uFFFF]/g, ' ');
+
+const sanitizeJsonSafeValue = (value) => {
+  if (typeof value === 'string') {
+    return stripUnsafeJsonControlChars(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeJsonSafeValue(item));
+  }
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      out[key] = sanitizeJsonSafeValue(item);
+    }
+    return out;
+  }
+  return value;
+};
+
+const normalizeWhitespace = (value = '') =>
+  stripUnsafeJsonControlChars(value)
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const toShortText = (value = '', max = 800) => {
+  const normalized = normalizeWhitespace(String(value || ''));
+  if (!normalized) return '';
+  const safeMax = Number.isFinite(max) && max > 0 ? Math.floor(max) : 800;
+  return normalized.slice(0, safeMax);
+};
+
+const normalizePortfolioUrl = (value = '') => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const repairedRaw = raw
+    .replace(/^https?:\/\/htts\/\//i, 'https://')
+    .replace(/^https?:\/\/https\/\//i, 'https://')
+    .replace(/^https?:\/\/http\/\//i, 'http://')
+    .replace(/^https?:\/\/https?:\/\//i, 'https://');
+  const candidate = /^https?:\/\//i.test(repairedRaw) ? repairedRaw : `https://${repairedRaw}`;
+  try {
+    const parsed = new URL(candidate);
+    if (!/^https?:$/i.test(parsed.protocol)) return '';
+    if (parsed.hostname.toLowerCase() === 'htts' || parsed.hostname.toLowerCase() === 'https') return '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+};
+
+const extractFirstRegexGroup = (input = '', patterns = []) => {
+  for (const pattern of patterns) {
+    const match = String(input || '').match(pattern);
+    if (match?.[1]) {
+      return normalizeWhitespace(stripHtmlTags(match[1]));
+    }
+  }
+  return '';
+};
+
+const htmlToPortableText = (html = '') => {
+  const source = String(html || '');
+  const withoutNonText = source
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ');
+
+  const withHeadings = withoutNonText
+    .replace(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi, (_m, inner) => `\n## ${normalizeWhitespace(stripHtmlTags(inner))}\n`)
+    .replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, (_m, inner) => `\n- ${normalizeWhitespace(stripHtmlTags(inner))}\n`)
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|section|article|tr|td|ul|ol)>/gi, '\n');
+
+  return stripUnsafeJsonControlChars(decodeHtmlEntities(withHeadings.replace(/<[^>]*>/g, ' ')))
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('\n');
+};
+
+const extractSectionByHeading = (portableText = '', headingPattern = '') => {
+  if (!portableText || !headingPattern) return '';
+  const regex = new RegExp(`(?:^|\\n)##\\s*(?:${headingPattern})\\s*\\n([\\s\\S]{1,1800}?)(?=\\n##\\s|$)`, 'i');
+  const match = portableText.match(regex);
+  if (!match?.[1]) return '';
+  const section = match[1]
+    .split('\n')
+    .map((line) => normalizeWhitespace(line.replace(/^-+\s*/, '')))
+    .filter(Boolean)
+    .join(' ');
+  return section.slice(0, 700);
+};
+
+const extractSkillsFromText = (skillsSection = '', fullText = '') => {
+  const seeds = [];
+  if (skillsSection) {
+    seeds.push(...skillsSection.split(/[\n,|/]+/));
+  } else {
+    const inlineMatch = String(fullText || '').match(/skills?\s*[:\-]\s*([^\n]{1,500})/i);
+    if (inlineMatch?.[1]) {
+      seeds.push(...inlineMatch[1].split(/[;,|/]+/));
+    }
+  }
+
+  const normalizedSkills = dedupeStrings(
+    seeds
+      .map((value) => normalizeWhitespace(value.replace(/^[-•*]\s*/, '')))
+      .filter((value) => value.length >= 2 && value.length <= 35)
+      .filter((value) => !/\b(about|experience|education|contact|project|portfolio)\b/i.test(value))
+      .slice(0, 40),
+    20
+  );
+
+  if (normalizedSkills.length > 0) return normalizedSkills;
+
+  // Heuristic fallback when portfolio has no explicit "Skills" section.
+  const lowerText = String(fullText || '').toLowerCase();
+  const techSignals = [
+    ['react', 'React'],
+    ['nextjs', 'Next.js'],
+    ['next js', 'Next.js'],
+    ['nodejs', 'Node.js'],
+    ['node js', 'Node.js'],
+    ['node', 'Node.js'],
+    ['aws', 'AWS'],
+    ['docker', 'Docker'],
+    ['jenkins', 'Jenkins'],
+    ['devops', 'DevOps'],
+    ['seo', 'SEO'],
+    ['security', 'Security'],
+    ['typescript', 'TypeScript'],
+    ['javascript', 'JavaScript'],
+    ['postgres', 'PostgreSQL'],
+    ['postgresql', 'PostgreSQL'],
+    ['mongodb', 'MongoDB'],
+    ['redis', 'Redis'],
+    ['kubernetes', 'Kubernetes'],
+    ['ci/cd', 'CI/CD'],
+    ['cicd', 'CI/CD'],
+  ];
+
+  const inferred = dedupeStrings(
+    techSignals
+      .filter(([needle]) => lowerText.includes(needle))
+      .map(([, label]) => label),
+    20
+  );
+
+  if (inferred.length > 0) return inferred;
+  return normalizedSkills;
+};
+
+const extractExperienceFromText = (experienceSection = '', fullText = '') => {
+  const section = normalizeWhitespace(experienceSection);
+  if (section) return section.slice(0, 700);
+
+  const candidateLines = String(fullText || '')
+    .split('\n')
+    .map((line) => normalizeWhitespace(line))
+    .filter(Boolean)
+    .filter((line) => /(?:experience|worked|work(ed)? at|founder|engineer|manager|intern|consultant|freelance|built|shipped|launched|20\d{2})/i.test(line))
+    .slice(0, 5);
+
+  if (!candidateLines.length) return '';
+  return normalizeWhitespace(candidateLines.join(' ')).slice(0, 700);
+};
+
+const buildCombinedContext = ({ userContext = '', about = '', skills = [], experience = '' }) => {
+  const parts = [];
+  if (String(userContext || '').trim()) {
+    parts.push(`User context: ${String(userContext).trim()}`);
+  }
+  if (String(about || '').trim()) {
+    parts.push(`Portfolio about: ${String(about).trim()}`);
+  }
+  if (Array.isArray(skills) && skills.length > 0) {
+    parts.push(`Portfolio skills: ${skills.join(', ')}`);
+  }
+  if (String(experience || '').trim()) {
+    parts.push(`Portfolio experience: ${String(experience).trim()}`);
+  }
+  return parts.join('\n\n').trim();
+};
+
+const fetchPortfolioMetadata = async (portfolioUrl = '') => {
+  const normalizedUrl = normalizePortfolioUrl(portfolioUrl);
+  if (!normalizedUrl) {
+    return {
+      url: '',
+      fetched: false,
+      error: 'invalid_url',
+      status: null,
+      title: '',
+      description: '',
+      about: '',
+      skills: [],
+      experience: '',
+      contentPreview: '',
+    };
+  }
+
+  try {
+    const response = await axios.get(normalizedUrl, {
+      timeout: 12000,
+      maxContentLength: 1_000_000,
+      maxBodyLength: 1_000_000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; SuiteGenieBot/1.0; +https://suitegenie.in)',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      validateStatus: () => true,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      return {
+        url: normalizedUrl,
+        fetched: false,
+        error: `http_${response.status}`,
+        status: response.status,
+        title: '',
+        description: '',
+        about: '',
+        skills: [],
+        experience: '',
+        contentPreview: '',
+      };
+    }
+
+    const html = typeof response.data === 'string'
+      ? response.data
+      : JSON.stringify(response.data || {});
+    const portableText = htmlToPortableText(html);
+
+    const title = extractFirstRegexGroup(html, [
+      /<title[^>]*>([\s\S]*?)<\/title>/i,
+      /<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']*)["'][^>]*>/i,
+      /<meta[^>]*content=["']([^"']*)["'][^>]*property=["']og:title["'][^>]*>/i,
+    ]).slice(0, 180);
+
+    const description = extractFirstRegexGroup(html, [
+      /<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["'][^>]*>/i,
+      /<meta[^>]*content=["']([^"']*)["'][^>]*name=["']description["'][^>]*>/i,
+      /<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']*)["'][^>]*>/i,
+      /<meta[^>]*content=["']([^"']*)["'][^>]*property=["']og:description["'][^>]*>/i,
+    ]).slice(0, 500);
+
+    const aboutSection =
+      extractSectionByHeading(portableText, 'about(?:\\s+me)?|bio|summary|profile|introduction') ||
+      description ||
+      normalizeWhitespace(
+        portableText
+          .split('\n')
+          .filter((line) => !line.startsWith('##') && !line.startsWith('-'))
+          .slice(0, 6)
+          .join(' ')
+      );
+    const about = aboutSection.slice(0, 700);
+
+    const skillsSection = extractSectionByHeading(
+      portableText,
+      'skills?|technical\\s+skills?|tech\\s+stack|tools?|expertise'
+    );
+    const skills = extractSkillsFromText(skillsSection, portableText);
+
+    const experienceSection = extractSectionByHeading(
+      portableText,
+      'experience|work\\s+experience|employment|career|professional\\s+experience'
+    );
+    const experience = extractExperienceFromText(experienceSection, portableText);
+
+    return {
+      url: normalizedUrl,
+      fetched: true,
+      error: null,
+      status: response.status,
+      title,
+      description,
+      about,
+      skills,
+      experience,
+      contentPreview: portableText.slice(0, 2500),
+    };
+  } catch (error) {
+    return {
+      url: normalizedUrl,
+      fetched: false,
+      error: error?.message || 'fetch_failed',
+      status: Number(error?.response?.status || 0) || null,
+      title: '',
+      description: '',
+      about: '',
+      skills: [],
+      experience: '',
+      contentPreview: '',
+    };
+  }
+};
+
 const dedupeStrings = (items = [], max = 20) => {
   const seen = new Set();
   const result = [];
   for (const item of items) {
-    const value = String(item || '').trim();
+    const value = normalizeWhitespace(item);
     if (!value) continue;
     const key = value.toLowerCase();
     if (seen.has(key)) continue;
@@ -70,6 +409,297 @@ const dedupeStrings = (items = [], max = 20) => {
     if (result.length >= max) break;
   }
   return result;
+};
+
+const decodePdfLiteralString = (rawValue = '') => {
+  if (!rawValue) return '';
+  let value = String(rawValue || '');
+  value = value
+    .replace(/\\\r?\n/g, '')
+    .replace(/\\([0-7]{1,3})/g, (_match, octal) => {
+      const code = Number.parseInt(octal, 8);
+      if (!Number.isFinite(code)) return ' ';
+      return String.fromCharCode(code);
+    })
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\b/g, '\b')
+    .replace(/\\f/g, '\f')
+    .replace(/\\\(/g, '(')
+    .replace(/\\\)/g, ')')
+    .replace(/\\\\/g, '\\');
+  return value;
+};
+
+const decodePdfHexString = (rawHex = '') => {
+  const cleaned = String(rawHex || '').replace(/[^0-9a-f]/gi, '');
+  if (!cleaned || cleaned.length < 4) return '';
+  const evenHex = cleaned.length % 2 === 0 ? cleaned : `${cleaned}0`;
+  try {
+    const bytes = Buffer.from(evenHex, 'hex');
+    if (bytes.length === 0) return '';
+
+    const decodeUtf16 = (isLittleEndian = false, start = 0) => {
+      let out = '';
+      for (let index = start; index + 1 < bytes.length; index += 2) {
+        const code = isLittleEndian
+          ? (bytes[index] | (bytes[index + 1] << 8))
+          : ((bytes[index] << 8) | bytes[index + 1]);
+        out += String.fromCharCode(code);
+      }
+      return out;
+    };
+
+    // UTF-16 with BOM
+    if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+      return decodeUtf16(false, 2);
+    }
+    if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+      return decodeUtf16(true, 2);
+    }
+
+    // Heuristic UTF-16 without BOM (common in PDF text runs)
+    if (bytes.length >= 4 && bytes.length % 2 === 0) {
+      let evenZeros = 0;
+      let oddZeros = 0;
+      for (let index = 0; index < bytes.length; index += 1) {
+        if (bytes[index] === 0) {
+          if (index % 2 === 0) evenZeros += 1;
+          else oddZeros += 1;
+        }
+      }
+      const half = bytes.length / 2;
+      if (evenZeros / half > 0.35) {
+        return decodeUtf16(false, 0);
+      }
+      if (oddZeros / half > 0.35) {
+        return decodeUtf16(true, 0);
+      }
+    }
+
+    return bytes.toString('latin1');
+  } catch {
+    return '';
+  }
+};
+
+const normalizePdfReadableText = (value = '') =>
+  normalizeWhitespace(
+    stripUnsafeJsonControlChars(String(value || ''))
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ' ')
+  );
+
+const isLikelyHumanReadableText = (value = '') => {
+  const normalized = normalizePdfReadableText(value);
+  if (!normalized || normalized.length < 3) return false;
+
+  const totalLength = normalized.length;
+  const symbolCount = (normalized.match(/[^A-Za-z0-9\s]/g) || []).length;
+  if (totalLength > 0 && symbolCount / totalLength > 0.18) return false;
+
+  const letters = (normalized.match(/[A-Za-z]/g) || []).length;
+  const digits = (normalized.match(/[0-9]/g) || []).length;
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  const alphaTokens = tokens.filter((token) => /[A-Za-z]/.test(token));
+  const singleLetterAlphaTokens = alphaTokens.filter((token) => /^[A-Za-z]$/.test(token)).length;
+  const shortUpperOrDigitTokens = tokens.filter((token) => /^[A-Z0-9]{1,2}$/.test(token)).length;
+  const vowels = (normalized.match(/[AEIOUaeiou]/g) || []).length;
+
+  if (tokens.length >= 6 && shortUpperOrDigitTokens / tokens.length > 0.3) return false;
+  if (letters < 2) return false;
+  if (alphaTokens.length >= 4 && singleLetterAlphaTokens / alphaTokens.length > 0.4) return false;
+  if (letters >= 20 && vowels / letters < 0.1) return false;
+  if (digits > letters * 1.5) return false;
+
+  return true;
+};
+
+const isUsefulPdfTextSnippet = (value = '') => {
+  const normalized = normalizePdfReadableText(value);
+  if (!normalized || normalized.length < 2) return false;
+  const alphaNumericCount = (normalized.match(/[a-zA-Z0-9]/g) || []).length;
+  if (alphaNumericCount < 2) return false;
+  if (!isLikelyHumanReadableText(normalized)) return false;
+  return true;
+};
+
+const extractPdfTextOperands = (input = '') => {
+  const values = [];
+  const source = String(input || '');
+
+  const pushValue = (rawValue = '', type = 'literal') => {
+    const decoded = type === 'hex'
+      ? decodePdfHexString(rawValue)
+      : decodePdfLiteralString(rawValue);
+    const normalized = normalizePdfReadableText(decoded);
+    if (!isUsefulPdfTextSnippet(normalized)) return;
+    values.push(normalized);
+  };
+
+  // Direct text-show operators: Tj, ', "
+  const directRegex = /(\((?:\\.|[^\\)]){1,2400}\)|<([0-9A-Fa-f\s]{2,5000})>)\s*(?:Tj|'|")/g;
+  let directMatch = directRegex.exec(source);
+  while (directMatch) {
+    const token = directMatch[1] || '';
+    if (token.startsWith('(')) {
+      pushValue(token.slice(1, -1), 'literal');
+    } else if (directMatch[2]) {
+      pushValue(directMatch[2], 'hex');
+    }
+    directMatch = directRegex.exec(source);
+  }
+
+  // Text arrays for TJ operator.
+  const arrayRegex = /\[([\s\S]{1,6000}?)\]\s*TJ/g;
+  let arrayMatch = arrayRegex.exec(source);
+  while (arrayMatch) {
+    const arrayBody = arrayMatch[1] || '';
+    const itemRegex = /(\((?:\\.|[^\\)]){1,2400}\)|<([0-9A-Fa-f\s]{2,5000})>)/g;
+    let itemMatch = itemRegex.exec(arrayBody);
+    while (itemMatch) {
+      const itemToken = itemMatch[1] || '';
+      if (itemToken.startsWith('(')) {
+        pushValue(itemToken.slice(1, -1), 'literal');
+      } else if (itemMatch[2]) {
+        pushValue(itemMatch[2], 'hex');
+      }
+      itemMatch = itemRegex.exec(arrayBody);
+    }
+    arrayMatch = arrayRegex.exec(source);
+  }
+
+  return values;
+};
+
+const tryInflatePdfStream = (buffer = Buffer.alloc(0)) => {
+  const source = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || '');
+  const attempts = [
+    () => zlib.inflateSync(source),
+    () => zlib.inflateRawSync(source),
+    () => zlib.unzipSync(source),
+  ];
+  for (const inflate of attempts) {
+    try {
+      return inflate();
+    } catch {
+      // try next decoder
+    }
+  }
+  return null;
+};
+
+const extractPdfPortableText = (pdfBuffer = Buffer.alloc(0)) => {
+  if (!Buffer.isBuffer(pdfBuffer) || pdfBuffer.length === 0) return '';
+  const binaryText = pdfBuffer.toString('latin1');
+  const snippets = [];
+
+  const pushSnippet = (value = '') => {
+    const normalized = normalizePdfReadableText(value);
+    if (!isUsefulPdfTextSnippet(normalized)) return;
+    snippets.push(normalized.slice(0, 1200));
+  };
+
+  const metadataPatterns = [
+    /\/Title\s*\(([\s\S]{1,800}?)\)/gi,
+    /\/Subject\s*\(([\s\S]{1,1200}?)\)/gi,
+    /\/Keywords\s*\(([\s\S]{1,1200}?)\)/gi,
+    /\/Author\s*\(([\s\S]{1,400}?)\)/gi,
+  ];
+  for (const pattern of metadataPatterns) {
+    let match = pattern.exec(binaryText);
+    while (match) {
+      pushSnippet(decodePdfLiteralString(match[1] || ''));
+      match = pattern.exec(binaryText);
+    }
+  }
+
+  const streamRegex = /stream\r?\n/g;
+  let streamMatch = streamRegex.exec(binaryText);
+  while (streamMatch) {
+    const streamStart = streamMatch.index + streamMatch[0].length;
+    const streamEnd = binaryText.indexOf('endstream', streamStart);
+    if (streamEnd < 0) break;
+
+    let rawStream = pdfBuffer.subarray(streamStart, streamEnd);
+    while (rawStream.length > 0 && (rawStream[0] === 0x0d || rawStream[0] === 0x0a)) {
+      rawStream = rawStream.subarray(1);
+    }
+    while (
+      rawStream.length > 0 &&
+      (rawStream[rawStream.length - 1] === 0x0d || rawStream[rawStream.length - 1] === 0x0a)
+    ) {
+      rawStream = rawStream.subarray(0, rawStream.length - 1);
+    }
+
+    const candidates = [rawStream];
+    const inflated = tryInflatePdfStream(rawStream);
+    if (inflated) candidates.push(inflated);
+
+    for (const candidate of candidates) {
+      const candidateText = candidate.toString('latin1');
+      if (!/(?:Tj|TJ|'|")/.test(candidateText)) {
+        continue;
+      }
+      for (const textOperand of extractPdfTextOperands(candidateText)) {
+        pushSnippet(textOperand);
+      }
+    }
+
+    const nextIndex = streamEnd + 'endstream'.length;
+    streamRegex.lastIndex = nextIndex;
+    streamMatch = streamRegex.exec(binaryText);
+  }
+
+  const deduped = dedupeStrings(snippets, 300);
+  return deduped.join('\n').slice(0, 20000);
+};
+
+const extractLinkedInProfilePdfDiscoveries = (pdfBuffer = Buffer.alloc(0)) => {
+  const portableText = extractPdfPortableText(pdfBuffer);
+  const aboutSectionCandidate =
+    extractSectionByHeading(portableText, 'about(?:\\s+me)?|summary|bio|profile') ||
+    normalizeWhitespace(
+      portableText
+        .split('\n')
+        .filter((line) => !line.startsWith('##') && !line.startsWith('-'))
+        .slice(0, 6)
+        .join(' ')
+    );
+  const skillsSection = extractSectionByHeading(
+    portableText,
+    'skills?|technical\\s+skills?|tech\\s+stack|tools?|expertise|core\\s+skills'
+  );
+  const experienceSection = extractSectionByHeading(
+    portableText,
+    'experience|work\\s+experience|employment|career|professional\\s+experience'
+  );
+
+  const aboutSection = isLikelyHumanReadableText(aboutSectionCandidate) ? aboutSectionCandidate : '';
+  const about = toShortText(aboutSection, 700);
+  const skills = extractSkillsFromText(skillsSection, portableText);
+  const experienceCandidate = extractExperienceFromText(experienceSection, portableText);
+  const experience = isLikelyHumanReadableText(experienceCandidate)
+    ? toShortText(experienceCandidate, 700)
+    : '';
+
+  return {
+    about,
+    skills,
+    experience,
+    contentPreview: portableText.slice(0, 2500),
+    textLength: portableText.length,
+  };
+};
+
+const pickReadableProfileText = (values = [], max = 700) => {
+  for (const value of Array.isArray(values) ? values : []) {
+    const normalized = toShortText(value || '', max);
+    if (!normalized) continue;
+    if (!isLikelyHumanReadableText(normalized)) continue;
+    return normalized;
+  }
+  return '';
 };
 
 const LOW_SIGNAL_TOPIC_WORDS = new Set([
@@ -90,6 +720,8 @@ const LOW_SIGNAL_TOPIC_WORDS = new Set([
   'build', 'built', 'client', 'platform', 'workflow', 'analytic', 'tool', 'tools',
   'service', 'solution', 'product', 'creator', 'update',
   'add', 'unlock', 'precise', 'analysi', 'analysis', 'analyses', 'analyzing',
+  'didn', 'don', 'isn', 'aren', 'wasn', 'weren', 'hasn', 'haven', 'hadn',
+  'won', 'wouldn', 'couldn', 'shouldn', 'mustn', 'needn', 'shan',
 ]);
 
 const SHORT_TOPIC_ALLOWLIST = new Set(['ai', 'ux', 'ui', 'seo', 'b2b', 'b2c', 'api']);
@@ -115,6 +747,12 @@ const normalizeCompoundTokens = (value = '') =>
   String(value || '')
     .replace(/\bcontentcreation\b/gi, 'content creation')
     .replace(/\bsocialmediamanagement\b/gi, 'social media management')
+    .replace(/\bsocialmedia\b/gi, 'social media')
+    .replace(/\bsoftwareengineering\b/gi, 'software engineering')
+    .replace(/\bmachinelearning\b/gi, 'machine learning')
+    .replace(/\bwebdevelopment\b/gi, 'web development')
+    .replace(/\bmobiledevelopment\b/gi, 'mobile development')
+    .replace(/\bdatascience\b/gi, 'data science')
     .replace(/\bmarketingtool\b/gi, 'marketing tool')
     .replace(/\bproductupdate\b/gi, 'product update')
     .replace(/\bagencylife\b/gi, 'agency life')
@@ -143,7 +781,17 @@ const normalizeTopicCandidate = (rawValue = '') => {
       if (!word) return '';
       if (word.endsWith("'s")) return word.slice(0, -2);
       if (word.endsWith('ies') && word.length > 5) return `${word.slice(0, -3)}y`;
-      if (word.endsWith('s') && !word.endsWith('ss') && !word.endsWith('is') && word.length > 4) return word.slice(0, -1);
+      if (
+        word.endsWith('s') &&
+        !word.endsWith('ss') &&
+        !word.endsWith('is') &&
+        !word.endsWith('us') &&
+        !word.endsWith('ops') &&
+        !word.endsWith('ics') &&
+        word.length > 4
+      ) {
+        return word.slice(0, -1);
+      }
       return word;
     })
     .filter((word) => {
@@ -233,6 +881,7 @@ const sanitizeAnalysisData = (value = {}) => {
     ),
     top_topics: normalizeTopicList(raw?.top_topics || [], 12).filter((topic) => {
       if (isWeakTopicCandidate(topic)) return false;
+      if (isOverlyGenericNicheValue(topic)) return false;
       const tokenCount = String(topic || '').split(' ').filter(Boolean).length;
       return tokenCount <= 2;
     }),
@@ -480,6 +1129,17 @@ const WEAK_NICHE_TOKENS = new Set([
   'brand', 'company', 'business', 'team', 'hashtag',
   'build', 'built', 'agency', 'client', 'platform', 'workflow', 'analytic',
 ]);
+const GENERIC_NICHE_PATTERNS = [
+  /^personal\s+growth$/i,
+  /^self\s+improvement$/i,
+  /^personal\s+development$/i,
+  /^motivational?$/i,
+  /^lifestyle$/i,
+  /^content\s+creator$/i,
+  /^portfolio$/i,
+  /^resume$/i,
+  /^cv$/i,
+];
 
 const isWeakNicheValue = (value = '') => {
   const normalized = normalizeTopicCandidate(value);
@@ -492,6 +1152,41 @@ const isWeakNicheValue = (value = '') => {
   if (tokens.length === 3) {
     return tokens.filter((token) => WEAK_NICHE_TOKENS.has(token)).length >= 2;
   }
+  return false;
+};
+
+const isOverlyGenericNicheValue = (value = '') => {
+  const normalized = normalizeTopicCandidate(value);
+  if (!normalized) return true;
+  if (GENERIC_NICHE_PATTERNS.some((pattern) => pattern.test(normalized))) return true;
+  return false;
+};
+
+const isJunkNicheCandidate = (value = '', profileDisplayName = '') => {
+  const normalized = normalizeTopicCandidate(value);
+  if (!normalized) return true;
+
+  const compact = normalized.replace(/\s+/g, ' ').trim();
+  if (/^(his|her|their|my|our|your)\b/i.test(compact)) {
+    return true;
+  }
+  if (/\b(primary|main)\s+focu(s)?\b/i.test(compact)) {
+    return true;
+  }
+  if (/\bfocus\b/i.test(compact) && compact.split(' ').length <= 4) {
+    return true;
+  }
+  if (/\bfocu\b/i.test(compact)) {
+    return true;
+  }
+  if (/\b(portfolio|resume|cv)\b/i.test(compact) && compact.split(' ').length <= 4) {
+    return true;
+  }
+
+  const personName = normalizeTopicCandidate(profileDisplayName);
+  if (personName && compact === personName) return true;
+  if (personName && compact === `${personName} portfolio`) return true;
+
   return false;
 };
 
@@ -546,32 +1241,62 @@ const extractCompactNicheFromText = (value = '') => {
 
 const deriveNicheValue = ({ profileContext, strategy, accountSnapshot, topTopics }) => {
   const metadata = parseJsonObject(profileContext?.metadata, {});
-  const directCandidates = [
-    accountSnapshot?.headline,
-    accountSnapshot?.about,
-    metadata?.profile_headline,
-    metadata?.profile_about,
-    metadata?.organization_name,
+  const profileDisplayName = String(metadata?.profile_display_name || accountSnapshot?.display_name || '').trim();
+  const topicBased = normalizeTopicList(topTopics || [], 8);
+  const strongTopicBased = topicBased.filter(
+    (topic) => !isWeakNicheValue(topic) && !isWeakTopicCandidate(topic)
+  );
+
+  const accountAndPortfolioCandidates = [
+    { value: accountSnapshot?.headline, source: 'account_headline' },
+    { value: accountSnapshot?.about, source: 'account_about' },
+    { value: accountSnapshot?.experience, source: 'account_experience' },
+    { value: metadata?.profile_headline, source: 'metadata_profile_headline' },
+    { value: metadata?.profile_about, source: 'metadata_profile_about' },
+    { value: metadata?.linkedin_about, source: 'metadata_linkedin_about' },
+    { value: metadata?.linkedin_experience, source: 'metadata_linkedin_experience' },
+    { value: metadata?.organization_name, source: 'metadata_organization_name' },
+    { value: metadata?.portfolio_title, source: 'portfolio_title' },
+    { value: metadata?.portfolio_description, source: 'portfolio_description' },
+    { value: metadata?.portfolio_about, source: 'portfolio_about' },
+    { value: metadata?.portfolio_experience, source: 'portfolio_experience' },
+    ...(Array.isArray(metadata?.linkedin_skills) ? metadata.linkedin_skills.map((value) => ({ value, source: 'linkedin_skill' })) : []),
+    ...(Array.isArray(metadata?.portfolio_skills) ? metadata.portfolio_skills.map((value) => ({ value, source: 'portfolio_skill' })) : []),
+  ].map((entry) => ({
+    value: String(entry?.value || '').trim(),
+    source: String(entry?.source || '').trim(),
+  })).filter((entry) => Boolean(entry.value));
+
+  for (const { value: candidate, source } of accountAndPortfolioCandidates) {
+    if (source === 'portfolio_title' && isJunkNicheCandidate(candidate, profileDisplayName)) {
+      continue;
+    }
+    const compact = extractCompactNicheFromText(candidate);
+    if (!compact) continue;
+    if (isJunkNicheCandidate(compact, profileDisplayName)) continue;
+    if (isOverlyGenericNicheValue(compact) && strongTopicBased.length > 0) continue;
+    return compact;
+  }
+
+  if (strongTopicBased.length >= 2) {
+    return titleCaseWords(`${strongTopicBased[0]} and ${strongTopicBased[1]}`);
+  }
+  if (strongTopicBased.length === 1) {
+    return titleCaseWords(strongTopicBased[0]);
+  }
+
+  const seededCandidates = [
     profileContext?.role_niche,
     strategy?.niche,
   ]
     .map((value) => String(value || '').trim())
     .filter(Boolean);
 
-  for (const candidate of directCandidates) {
+  for (const candidate of seededCandidates) {
     const compact = extractCompactNicheFromText(candidate);
-    if (compact) return compact;
-  }
-
-  const topicBased = normalizeTopicList(topTopics || [], 6);
-  const strongTopicBased = topicBased.filter(
-    (topic) => !isWeakNicheValue(topic) && !isWeakTopicCandidate(topic)
-  );
-  if (strongTopicBased.length >= 2) {
-    return titleCaseWords(`${strongTopicBased[0]} ${strongTopicBased[1]}`);
-  }
-  if (strongTopicBased.length === 1) {
-    return titleCaseWords(strongTopicBased[0]);
+    if (!compact) continue;
+    if (isOverlyGenericNicheValue(compact)) continue;
+    return compact;
   }
 
   const fallbackStrategyNiche = extractCompactNicheFromText(strategy?.niche || '');
@@ -605,6 +1330,20 @@ const buildAnalysisData = ({
   const fallbackGoals = Array.isArray(strategy?.content_goals) ? strategy.content_goals : [];
   const profileGoals = splitToList(profileContext?.outcomes_30_90 || '', 10);
   const goals = dedupeStrings([...profileGoals, ...fallbackGoals], 10);
+  const profileMetadata = parseJsonObject(profileContext?.metadata, {});
+  const portfolioSignalTopics = normalizeTopicList(
+    [
+      ...(Array.isArray(profileMetadata?.linkedin_skills) ? profileMetadata.linkedin_skills : []),
+      ...(Array.isArray(profileMetadata?.portfolio_skills) ? profileMetadata.portfolio_skills : []),
+      profileMetadata?.linkedin_about,
+      profileMetadata?.linkedin_experience,
+      profileMetadata?.portfolio_title,
+      profileMetadata?.portfolio_description,
+      profileMetadata?.portfolio_about,
+      profileMetadata?.portfolio_experience,
+    ],
+    12
+  );
 
   const queueTopics = hashtagsFromQueue(queue).map(([tag]) => tag.replace(/[-_]/g, ' '));
   const strategyTopics = Array.isArray(strategy?.topics) ? strategy.topics : [];
@@ -614,10 +1353,11 @@ const buildAnalysisData = ({
     ...extractTopicsFromInsights(runAnalysis?.gaps || [], 8),
   ];
   let topTopics = normalizeTopicList(
-    [...summaryThemes, ...analysisTopics, ...strategyTopics, ...queueTopics],
+    [...portfolioSignalTopics, ...summaryThemes, ...analysisTopics, ...strategyTopics, ...queueTopics],
     12
   ).filter((topic) => {
     if (isWeakTopicCandidate(topic)) return false;
+    if (isOverlyGenericNicheValue(topic)) return false;
     const tokenCount = String(topic || '').split(' ').filter(Boolean).length;
     return tokenCount <= 2;
   });
@@ -633,6 +1373,7 @@ const buildAnalysisData = ({
       10
     ).filter((topic) => {
       if (isWeakTopicCandidate(topic)) return false;
+      if (isOverlyGenericNicheValue(topic)) return false;
       const tokenCount = String(topic || '').split(' ').filter(Boolean).length;
       return tokenCount <= 2;
     });
@@ -688,6 +1429,310 @@ const updateRunMetadata = async (runId, metadata = {}) => {
      WHERE id = $2`,
     [JSON.stringify(metadata || {}), runId]
   );
+};
+
+const getLatestAnalysisRunForStrategy = async ({ userId, strategyId }) => {
+  const { rows } = await pool.query(
+    `SELECT *
+     FROM linkedin_automation_runs
+     WHERE user_id = $1
+       AND metadata->>'strategy_id' = $2
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [userId, strategyId]
+  );
+  return rows[0] || null;
+};
+
+const markContentPlanPromptsUsed = async ({
+  userId,
+  strategyId,
+  runId = null,
+  queueCount = CONTENT_PLAN_QUEUE_TARGET,
+} = {}) => {
+  const safeQueueCount = Math.max(1, Math.min(8, Number(queueCount || CONTENT_PLAN_QUEUE_TARGET)));
+  const prompts = await strategyService.getPrompts(strategyId, {
+    limit: Math.max(12, safeQueueCount * 3),
+  });
+  if (!Array.isArray(prompts) || prompts.length === 0) {
+    return [];
+  }
+
+  const ranked = [...prompts].sort((left, right) => {
+    const leftUsage = Number(left?.usage_count || 0);
+    const rightUsage = Number(right?.usage_count || 0);
+    if (leftUsage !== rightUsage) return leftUsage - rightUsage;
+    return new Date(right?.created_at || 0).getTime() - new Date(left?.created_at || 0).getTime();
+  });
+
+  const selected = ranked.slice(0, safeQueueCount).filter((item) => Boolean(item?.id));
+  const usedPromptIds = [];
+  for (const prompt of selected) {
+    try {
+      await strategyService.markPromptUsed(prompt.id, userId, { strategyId });
+      usedPromptIds.push(prompt.id);
+    } catch (error) {
+      console.warn('[Strategy] content-plan prompt usage mark failed:', {
+        userId,
+        strategyId,
+        runId,
+        promptId: prompt?.id || null,
+        error: error?.message || error,
+      });
+    }
+  }
+
+  return dedupeStrings(usedPromptIds, safeQueueCount);
+};
+
+const syncProfileContextWithConfirmedAnalysis = async ({
+  userId,
+  strategyId,
+  strategy = {},
+  analysisData = {},
+  analysisMetadata = {},
+} = {}) => {
+  const currentProfileContext = linkedinAutomationService.mapProfileContext(
+    await linkedinAutomationService.getProfileContextRow(userId)
+  );
+  const currentProfileMetadata = parseJsonObject(currentProfileContext.metadata, {});
+  const strategyMetadata = parseJsonObject(strategy.metadata, {});
+  const deeperContext =
+    analysisMetadata?.extra_context &&
+    typeof analysisMetadata.extra_context === 'object'
+      ? String(analysisMetadata.extra_context.deeper_context || '').trim()
+      : '';
+  const mergedExtraContext = toShortText(
+    deeperContext || strategyMetadata.extra_context || currentProfileMetadata.extra_context || '',
+    3000
+  );
+  const normalizedGoals = dedupeStrings(
+    Array.isArray(analysisData?.goals) ? analysisData.goals : splitToList(analysisData?.goals || '', 10),
+    10
+  );
+  const normalizedTopics = normalizeTopicList(analysisData?.top_topics || [], 12);
+  const nextRoleNiche = toShortText(
+    analysisData?.niche || strategy?.niche || currentProfileContext.role_niche || '',
+    180
+  );
+  const nextAudience = toShortText(
+    analysisData?.audience || strategy?.target_audience || currentProfileContext.target_audience || '',
+    300
+  );
+  const nextOutcomes = toShortText(
+    normalizedGoals.join(', ') || currentProfileContext.outcomes_30_90 || '',
+    1200
+  );
+  const nextProofPoints = toShortText(
+    mergedExtraContext || currentProfileContext.proof_points || '',
+    1200
+  );
+
+  const mergedProfileMetadata = sanitizeJsonSafeValue({
+    ...currentProfileMetadata,
+    strategy_id: strategyId,
+    role_niche: nextRoleNiche || currentProfileMetadata.role_niche || '',
+    target_audience: nextAudience || currentProfileMetadata.target_audience || '',
+    outcomes_30_90: nextOutcomes || currentProfileMetadata.outcomes_30_90 || '',
+    analysis_goals: normalizedGoals,
+    analysis_topics: normalizedTopics,
+    extra_context: mergedExtraContext || currentProfileMetadata.extra_context || '',
+    sourced_from: 'strategy_generate_analysis_prompts',
+  });
+
+  await linkedinAutomationService.upsertProfileContext(userId, {
+    role_niche: nextRoleNiche,
+    target_audience: nextAudience,
+    outcomes_30_90: nextOutcomes,
+    proof_points: nextProofPoints || undefined,
+    tone_style: normalizeToneEnum(
+      analysisData?.tone || strategy?.tone_style || currentProfileContext.tone_style || 'professional'
+    ),
+    consent_use_posts: currentProfileContext.consent_use_posts,
+    consent_store_profile: currentProfileContext.consent_store_profile,
+    metadata: mergedProfileMetadata,
+  });
+
+  return {
+    goals: normalizedGoals,
+    topics: normalizedTopics,
+    extraContext: mergedExtraContext,
+  };
+};
+
+const refreshContextVaultSafe = async ({
+  userId,
+  strategy = null,
+  strategyId = null,
+  reason = 'manual_refresh',
+} = {}) => {
+  try {
+    const targetStrategy =
+      strategy && typeof strategy === 'object'
+        ? strategy
+        : (strategyId ? await strategyService.getStrategy(strategyId) : null);
+
+    if (!targetStrategy?.id) return null;
+    if (String(targetStrategy.user_id || '') !== String(userId || '')) return null;
+
+    return await contextVaultService.refresh({
+      userId,
+      strategy: targetStrategy,
+      reason,
+    });
+  } catch (error) {
+    console.warn('[Strategy] context vault refresh skipped:', {
+      userId,
+      strategyId: strategy?.id || strategyId || null,
+      reason,
+      error: error?.message || error,
+    });
+    return null;
+  }
+};
+
+const buildContentPlanContextPayload = ({ strategy = null, analysisRun = null } = {}) => {
+  const strategyMetadata = parseJsonObject(strategy?.metadata, {});
+  const analysisRunMetadata = parseJsonObject(analysisRun?.metadata, {});
+  const analysisData = sanitizeAnalysisData(
+    analysisRunMetadata?.analysis_data ||
+      strategyMetadata?.analysis_cache ||
+      {}
+  );
+  const snapshot = parseJsonObject(analysisRun?.analysis_snapshot, {});
+  const profileContext = parseJsonObject(snapshot.profileContext, {});
+  const profileMetadata = parseJsonObject(profileContext.metadata, {});
+  const postSummary = parseJsonObject(snapshot.postSummary, {});
+  const analysisCache = parseJsonObject(strategyMetadata.analysis_cache, {});
+
+  const linkedInSkills = dedupeStrings(
+    [
+      ...(Array.isArray(analysisRunMetadata.linkedin_skills) ? analysisRunMetadata.linkedin_skills : []),
+      ...(Array.isArray(profileMetadata.linkedin_skills) ? profileMetadata.linkedin_skills : []),
+    ],
+    20
+  );
+  const portfolioSkills = dedupeStrings(
+    [
+      ...(Array.isArray(analysisRunMetadata.portfolio_skills) ? analysisRunMetadata.portfolio_skills : []),
+      ...(Array.isArray(profileMetadata.portfolio_skills) ? profileMetadata.portfolio_skills : []),
+      ...(Array.isArray(strategyMetadata.portfolio_skills) ? strategyMetadata.portfolio_skills : []),
+    ],
+    20
+  );
+  const topSkills = dedupeStrings([...linkedInSkills, ...portfolioSkills], 12);
+
+  const aboutPreview = toShortText(
+    pickReadableProfileText(
+      [
+        analysisRunMetadata.linkedin_about,
+        profileMetadata.linkedin_about,
+        strategyMetadata.linkedin_about,
+        analysisRunMetadata.portfolio_about,
+        profileMetadata.portfolio_about,
+        strategyMetadata.portfolio_about,
+      ],
+      500
+    ),
+    320
+  );
+  const experiencePreview = toShortText(
+    pickReadableProfileText(
+      [
+        analysisRunMetadata.linkedin_experience,
+        profileMetadata.linkedin_experience,
+        strategyMetadata.linkedin_experience,
+        analysisRunMetadata.portfolio_experience,
+        profileMetadata.portfolio_experience,
+        strategyMetadata.portfolio_experience,
+      ],
+      700
+    ),
+    320
+  );
+
+  const postsCount = Number(
+    analysisRunMetadata.tweets_analysed ||
+      postSummary.postCount ||
+      analysisCache.tweets_analysed ||
+      0
+  );
+  const referenceCount = Array.isArray(analysisRunMetadata.reference_accounts)
+    ? analysisRunMetadata.reference_accounts.length
+    : 0;
+  const hasPortfolioSignal = Boolean(
+    analysisRunMetadata.portfolio_about ||
+      profileMetadata.portfolio_about ||
+      strategyMetadata.portfolio_about ||
+      analysisRunMetadata.portfolio_experience ||
+      profileMetadata.portfolio_experience ||
+      strategyMetadata.portfolio_experience ||
+      portfolioSkills.length > 0
+  );
+  const hasPdfSignal = Boolean(
+    profileMetadata.linkedin_profile_pdf_uploaded_at ||
+      strategyMetadata.linkedin_profile_pdf_uploaded_at ||
+      profileMetadata.linkedin_profile_pdf_extraction_source ||
+      strategyMetadata.linkedin_profile_pdf_extraction_source
+  );
+
+  return {
+    niche: analysisData.niche || extractCompactNicheFromText(strategy?.niche || '') || 'LinkedIn Growth Strategy',
+    audience: toShortText(
+      analysisData.audience ||
+        strategy?.target_audience ||
+        profileContext?.target_audience ||
+        '',
+      220
+    ),
+    tone: toShortText(
+      analysisData.tone ||
+        toneLabelFromEnum(strategy?.tone_style || profileContext?.tone_style || 'professional'),
+      120
+    ),
+    topTopics: normalizeTopicList(
+      [
+        ...(Array.isArray(analysisData.top_topics) ? analysisData.top_topics : []),
+        ...(Array.isArray(strategy?.topics) ? strategy.topics : []),
+        ...(Array.isArray(postSummary?.themes) ? postSummary.themes : []),
+      ],
+      10
+    ),
+    aboutPreview,
+    topSkills,
+    experiencePreview,
+    confidence: String(analysisRunMetadata.confidence || analysisCache.confidence || 'low'),
+    confidenceReason: toShortText(
+      analysisRunMetadata.confidence_reason || analysisCache.confidence_reason || '',
+      220
+    ),
+    sources: [
+      {
+        key: 'posts',
+        label: 'LinkedIn posts',
+        active: postsCount > 0,
+        count: postsCount,
+      },
+      {
+        key: 'portfolio',
+        label: 'Portfolio',
+        active: hasPortfolioSignal,
+        count: hasPortfolioSignal ? 1 : 0,
+      },
+      {
+        key: 'pdf',
+        label: 'LinkedIn profile PDF',
+        active: hasPdfSignal,
+        count: hasPdfSignal ? 1 : 0,
+      },
+      {
+        key: 'reference',
+        label: 'Reference accounts',
+        active: referenceCount > 0,
+        count: referenceCount,
+      },
+    ],
+  };
 };
 
 // Get or create current strategy
@@ -825,6 +1870,12 @@ router.post('/:id/generate-prompts', async (req, res) => {
 
     // Generate prompts
     const result = await strategyService.generatePrompts(id, userId);
+    const refreshedStrategy = await strategyService.getStrategy(id);
+    await refreshContextVaultSafe({
+      userId,
+      strategy: refreshedStrategy || strategy,
+      reason: 'prompt_pack_generated_manual',
+    });
 
     res.json(result);
   } catch (error) {
@@ -944,6 +1995,299 @@ router.post('/:id/add-on', async (req, res) => {
   }
 });
 
+// POST /api/strategy/upload-linkedin-profile-pdf - parse LinkedIn exported PDF and store discoveries
+router.post('/upload-linkedin-profile-pdf', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const {
+      strategyId,
+      base64 = '',
+      filename = 'linkedin-profile.pdf',
+      mimetype = 'application/pdf',
+    } = req.body || {};
+
+    if (!strategyId) {
+      return res.status(400).json({ error: 'strategyId is required' });
+    }
+    const strategy = await strategyService.getStrategy(strategyId);
+    if (!strategy || strategy.user_id !== userId) {
+      return res.status(404).json({ error: 'Strategy not found' });
+    }
+
+    const normalizedBase64 = String(base64 || '')
+      .replace(/^data:application\/pdf;base64,/i, '')
+      .replace(/\s+/g, '')
+      .trim();
+    if (!normalizedBase64) {
+      return res.status(400).json({ error: 'PDF base64 payload is required' });
+    }
+
+    const safeFilename = String(filename || 'linkedin-profile.pdf').slice(0, 180);
+    const safeMimetype = String(mimetype || '').toLowerCase().trim();
+    if (safeMimetype && !safeMimetype.includes('pdf') && !safeFilename.toLowerCase().endsWith('.pdf')) {
+      return res.status(400).json({ error: 'Only PDF uploads are supported' });
+    }
+
+    let pdfBuffer;
+    try {
+      pdfBuffer = Buffer.from(normalizedBase64, 'base64');
+    } catch {
+      return res.status(400).json({ error: 'Invalid base64 payload' });
+    }
+    if (!pdfBuffer || pdfBuffer.length < 100) {
+      return res.status(400).json({ error: 'Uploaded PDF is empty or invalid' });
+    }
+    if (pdfBuffer.length > 8 * 1024 * 1024) {
+      return res.status(413).json({ error: 'PDF too large. Maximum supported size is 8MB.' });
+    }
+    if (pdfBuffer.subarray(0, 4).toString('latin1') !== '%PDF') {
+      return res.status(400).json({ error: 'Uploaded file is not a valid PDF' });
+    }
+
+    const currentMetadata = parseJsonObject(strategy.metadata, {});
+    const currentProfileContext = linkedinAutomationService.mapProfileContext(
+      await linkedinAutomationService.getProfileContextRow(userId)
+    );
+    const profileMetadata = parseJsonObject(currentProfileContext.metadata, {});
+
+    // Fetch real post content for Gemini cross-reference
+    const recentPostsForPdf = await pool.query(
+      `SELECT post_content, likes, comments, shares
+       FROM linkedin_posts
+       WHERE user_id = $1 AND status = 'posted'
+       ORDER BY created_at DESC LIMIT 10`,
+      [userId]
+    ).then((result) => result.rows).catch(() => []);
+
+    const geminiContext = {
+      displayName: currentMetadata.profile_display_name || profileMetadata.profile_display_name || '',
+      headline: currentMetadata.profile_headline || profileMetadata.profile_headline || '',
+      existingAbout: currentMetadata.linkedin_about || profileMetadata.linkedin_about || '',
+      existingSkills: [
+        ...(Array.isArray(currentMetadata.linkedin_skills) ? currentMetadata.linkedin_skills : []),
+        ...(Array.isArray(profileMetadata.linkedin_skills) ? profileMetadata.linkedin_skills : []),
+      ],
+      existingExperience: currentMetadata.linkedin_experience || profileMetadata.linkedin_experience || '',
+      portfolioAbout: currentMetadata.portfolio_about || profileMetadata.portfolio_about || '',
+      portfolioSkills: [
+        ...(Array.isArray(currentMetadata.portfolio_skills) ? currentMetadata.portfolio_skills : []),
+        ...(Array.isArray(profileMetadata.portfolio_skills) ? profileMetadata.portfolio_skills : []),
+      ],
+      extraContext: currentMetadata.extra_context || profileMetadata.extra_context || '',
+      recentPostCount: recentPostsForPdf.length,
+      recentPosts: recentPostsForPdf.map((post) => ({
+        content: String(post.post_content || '').slice(0, 400),
+        engagement: Number(post.likes || 0) + Number(post.comments || 0) + Number(post.shares || 0),
+      })),
+    };
+
+    const authHeader = req.headers['authorization'];
+    const userToken = req.cookies?.accessToken || (authHeader && authHeader.split(' ')[1]) || null;
+    const refreshToken = req.cookies?.refreshToken;
+    const cookieParts = [];
+    if (userToken) cookieParts.push(`accessToken=${userToken}`);
+    if (refreshToken) cookieParts.push(`refreshToken=${refreshToken}`);
+    const cookieHeader = cookieParts.length > 0 ? cookieParts.join('; ') : null;
+
+    let geminiExtraction = null;
+    let geminiErrorMessage = null;
+    try {
+      geminiExtraction = await aiService.extractLinkedinProfileFromPdf(normalizedBase64, {
+        filename: safeFilename,
+        mimetype: safeMimetype || 'application/pdf',
+        userToken,
+        userId,
+        cookieHeader,
+        context: geminiContext,
+      });
+    } catch (error) {
+      geminiErrorMessage = String(error?.message || 'gemini_pdf_extraction_failed').slice(0, 300);
+      console.warn('[Strategy] Gemini PDF extraction failed, falling back to local parser', {
+        userId,
+        strategyId,
+        filename: safeFilename,
+        error: geminiErrorMessage,
+      });
+    }
+
+    const localDiscoveries = extractLinkedInProfilePdfDiscoveries(pdfBuffer);
+    const geminiParsed = geminiExtraction?.parsed || {};
+    const useLocalFallback = !geminiExtraction;
+    const discoveries = {
+      about: pickReadableProfileText(
+        useLocalFallback ? [geminiParsed.about, localDiscoveries.about] : [geminiParsed.about],
+        700
+      ),
+      skills: dedupeStrings(
+        [
+          ...(Array.isArray(geminiParsed.skills) ? geminiParsed.skills : []),
+          ...(useLocalFallback && Array.isArray(localDiscoveries.skills) ? localDiscoveries.skills : []),
+        ],
+        20
+      ),
+      experience: pickReadableProfileText(
+        useLocalFallback ? [geminiParsed.experience, localDiscoveries.experience] : [geminiParsed.experience],
+        700
+      ),
+      contentPreview: toShortText(
+        pickReadableProfileText([geminiParsed.about, geminiParsed.experience], 2200) ||
+          (useLocalFallback ? localDiscoveries.contentPreview : '') ||
+          '',
+        2500
+      ),
+      textLength: Number(localDiscoveries.textLength || 0),
+      extractionSource: geminiExtraction ? 'gemini' : 'local_fallback',
+      geminiProvider: geminiExtraction?.provider || null,
+      geminiNormalizationPassUsed: Boolean(geminiExtraction?.normalizationPassUsed),
+      geminiConfidence: String(geminiParsed.confidence || '').trim() || null,
+      geminiNotes: toShortText(geminiParsed.notes || '', 240) || null,
+      geminiError: geminiErrorMessage,
+    };
+    const rawDiscoverySignalCount =
+      (discoveries.about ? 1 : 0) +
+      ((Array.isArray(discoveries.skills) && discoveries.skills.length > 0) ? 1 : 0) +
+      (discoveries.experience ? 1 : 0);
+
+    const mergedLinkedinAbout = pickReadableProfileText(
+      [discoveries.about, currentMetadata.linkedin_about, profileMetadata.linkedin_about],
+      700
+    );
+    const mergedLinkedinSkills = dedupeStrings(
+      [
+        ...(Array.isArray(currentMetadata.linkedin_skills) ? currentMetadata.linkedin_skills : []),
+        ...(Array.isArray(profileMetadata.linkedin_skills) ? profileMetadata.linkedin_skills : []),
+        ...(Array.isArray(discoveries.skills) ? discoveries.skills : []),
+      ],
+      20
+    );
+    const mergedLinkedinExperience = pickReadableProfileText(
+      [discoveries.experience, currentMetadata.linkedin_experience, profileMetadata.linkedin_experience],
+      700
+    );
+
+    const mergedAbout = dedupeStrings(
+      [mergedLinkedinAbout, currentMetadata.portfolio_about, profileMetadata.portfolio_about],
+      3
+    ).join(' ');
+    const mergedSkills = dedupeStrings(
+      [
+        ...mergedLinkedinSkills,
+        ...(Array.isArray(currentMetadata.portfolio_skills) ? currentMetadata.portfolio_skills : []),
+        ...(Array.isArray(profileMetadata.portfolio_skills) ? profileMetadata.portfolio_skills : []),
+      ],
+      24
+    );
+    const mergedExperience = dedupeStrings(
+      [mergedLinkedinExperience, currentMetadata.portfolio_experience, profileMetadata.portfolio_experience],
+      3
+    ).join(' ');
+    const preservedUserContext = String(
+      currentMetadata.user_context || profileMetadata.user_context || ''
+    ).slice(0, 300);
+    const combinedContext = buildCombinedContext({
+      userContext: preservedUserContext,
+      about: mergedAbout,
+      skills: mergedSkills,
+      experience: mergedExperience,
+    });
+
+    const uploadedAt = new Date().toISOString();
+    const metadataPatch = {
+      linkedin_about: mergedLinkedinAbout || null,
+      linkedin_skills: mergedLinkedinSkills,
+      linkedin_experience: mergedLinkedinExperience || null,
+      linkedin_profile_pdf_filename: safeFilename || null,
+      linkedin_profile_pdf_uploaded_at: uploadedAt,
+      linkedin_profile_pdf_text_length: Number(discoveries.textLength || 0),
+      linkedin_profile_pdf_content_preview: toShortText(discoveries.contentPreview || '', 2500) || null,
+      linkedin_profile_pdf_source: 'user_upload',
+      linkedin_profile_pdf_extraction_source: discoveries.extractionSource,
+      linkedin_profile_pdf_ai_provider: discoveries.geminiProvider,
+      linkedin_profile_pdf_ai_normalized: discoveries.geminiNormalizationPassUsed,
+      linkedin_profile_pdf_ai_confidence: discoveries.geminiConfidence,
+      linkedin_profile_pdf_ai_notes: discoveries.geminiNotes,
+      linkedin_profile_pdf_ai_error: discoveries.geminiError,
+      extra_context: toShortText(combinedContext, 3000),
+      sourced_from: 'strategy_pdf_upload',
+    };
+    const safeMetadataPatch = sanitizeJsonSafeValue(metadataPatch);
+    const safeProfileMetadata = sanitizeJsonSafeValue({
+      ...profileMetadata,
+      ...safeMetadataPatch,
+    });
+
+    await pool.query(
+      `UPDATE user_strategies
+       SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [strategyId, JSON.stringify(safeMetadataPatch)]
+    );
+
+    await linkedinAutomationService.upsertProfileContext(userId, {
+      proof_points: toShortText(combinedContext, 1200) || undefined,
+      metadata: safeProfileMetadata,
+    });
+    const refreshedStrategy = await strategyService.getStrategy(strategyId);
+    await refreshContextVaultSafe({
+      userId,
+      strategy: refreshedStrategy || strategy,
+      reason: 'linkedin_pdf_uploaded',
+    });
+
+    console.log('[Strategy] linkedin profile pdf uploaded', {
+      userId,
+      strategyId,
+      filename: safeFilename,
+      sizeBytes: pdfBuffer.length,
+      textLength: Number(discoveries.textLength || 0),
+      extractionSource: discoveries.extractionSource,
+      aiProvider: discoveries.geminiProvider,
+      aiNormalizationPassUsed: discoveries.geminiNormalizationPassUsed,
+      aiConfidence: discoveries.geminiConfidence,
+      aiError: discoveries.geminiError,
+      hasAbout: Boolean(mergedLinkedinAbout),
+      skillsCount: mergedLinkedinSkills.length,
+      hasExperience: Boolean(mergedLinkedinExperience),
+      aboutPreview: mergedLinkedinAbout.slice(0, 180) || null,
+      skillsPreview: mergedLinkedinSkills.slice(0, 8),
+      experiencePreview: mergedLinkedinExperience.slice(0, 180) || null,
+    });
+
+    const warningMessages = [];
+    if (!geminiExtraction && geminiErrorMessage) {
+      warningMessages.push(
+        useLocalFallback
+          ? 'Gemini extraction failed; used local parser fallback.'
+          : 'Gemini extraction failed and local fallback was skipped to avoid noisy output. Try a clearer text-selectable PDF.'
+      );
+    }
+    if (rawDiscoverySignalCount === 0) {
+      warningMessages.push('Could not reliably parse readable profile text from this PDF. Please upload a text-selectable PDF export.');
+    }
+
+    return res.json({
+      success: true,
+      warning: warningMessages.length > 0 ? warningMessages.join(' ') : null,
+      discoveries: {
+        about: mergedLinkedinAbout || '',
+        skills: mergedLinkedinSkills,
+        experience: mergedLinkedinExperience || '',
+        confidence:
+          discoveries.geminiConfidence ||
+          (discoveries.extractionSource === 'local_fallback' ? 'low' : null),
+        notes: discoveries.geminiNotes || null,
+        filename: safeFilename,
+        textLength: Number(discoveries.textLength || 0),
+        extractionSource: discoveries.extractionSource,
+      },
+    });
+  } catch (error) {
+    console.error('[Strategy] upload-linkedin-profile-pdf error:', error);
+    return res.status(500).json({ error: error.message || 'Failed to process LinkedIn profile PDF.' });
+  }
+});
+
 // POST /api/strategy/init-analysis - Tweet Genie parity flow for LinkedIn
 router.post('/init-analysis', async (req, res) => {
   let analysisCreditsDeducted = false;
@@ -956,14 +2300,16 @@ router.post('/init-analysis', async (req, res) => {
       account_id: accountId = null,
       account_type: accountType = null,
     } = req.body || {};
+    const normalizedPortfolioUrl = normalizePortfolioUrl(portfolioUrl);
+    const normalizedUserContext = String(userContext || '').trim();
 
     console.log('[Strategy] init-analysis request', {
       userId,
       strategyId,
       accountId,
       accountType,
-      hasPortfolioUrl: Boolean(String(portfolioUrl || '').trim()),
-      hasUserContext: Boolean(String(userContext || '').trim()),
+      hasPortfolioUrl: Boolean(normalizedPortfolioUrl),
+      hasUserContext: Boolean(normalizedUserContext),
     });
 
     if (!strategyId) {
@@ -987,37 +2333,138 @@ router.post('/init-analysis', async (req, res) => {
 
     const currentMetadata = parseJsonObject(strategy.metadata, {});
     const derivedGoals = Array.isArray(strategy.content_goals) ? strategy.content_goals.join(', ') : '';
-    const accountSnapshot = await linkedinAutomationService.getLinkedinAccountSnapshot(userId, {
-      accountId,
-      accountType,
+    const [accountSnapshot, portfolioMetadata] = await Promise.all([
+      linkedinAutomationService.getLinkedinAccountSnapshot(userId, {
+        accountId,
+        accountType,
+      }),
+      normalizedPortfolioUrl ? fetchPortfolioMetadata(normalizedPortfolioUrl) : Promise.resolve(null),
+    ]);
+
+    if (normalizedPortfolioUrl) {
+      console.log('[Strategy] portfolio metadata fetch result', {
+        userId,
+        strategyId,
+        portfolioUrl: normalizedPortfolioUrl,
+        fetched: Boolean(portfolioMetadata?.fetched),
+        status: portfolioMetadata?.status || null,
+        error: portfolioMetadata?.error || null,
+        title: String(portfolioMetadata?.title || '').slice(0, 120) || null,
+        hasAbout: Boolean(String(portfolioMetadata?.about || '').trim()),
+        skillsCount: Array.isArray(portfolioMetadata?.skills) ? portfolioMetadata.skills.length : 0,
+        hasExperience: Boolean(String(portfolioMetadata?.experience || '').trim()),
+        contentPreview: String(portfolioMetadata?.contentPreview || '').slice(0, 500),
+      });
+    }
+
+    const portfolioAbout = String(
+      portfolioMetadata?.about || currentMetadata.portfolio_about || ''
+    ).trim();
+    const portfolioSkills = Array.isArray(portfolioMetadata?.skills) && portfolioMetadata.skills.length > 0
+      ? portfolioMetadata.skills
+      : (Array.isArray(currentMetadata.portfolio_skills) ? currentMetadata.portfolio_skills : []);
+    const portfolioExperience = String(
+      portfolioMetadata?.experience || currentMetadata.portfolio_experience || ''
+    ).trim();
+    const linkedinAbout = String(
+      accountSnapshot?.about || currentMetadata.linkedin_about || ''
+    ).trim();
+    const linkedinSkills = Array.isArray(accountSnapshot?.skills) && accountSnapshot.skills.length > 0
+      ? accountSnapshot.skills
+      : (Array.isArray(currentMetadata.linkedin_skills) ? currentMetadata.linkedin_skills : []);
+    const linkedinExperience = String(
+      accountSnapshot?.experience || currentMetadata.linkedin_experience || ''
+    ).trim();
+    console.log('[Strategy] linkedin profile discoveries', {
+      userId,
+      strategyId,
+      hasLinkedinAbout: Boolean(linkedinAbout),
+      linkedinSkillsCount: linkedinSkills.length,
+      hasLinkedinExperience: Boolean(linkedinExperience),
+      linkedinAboutPreview: linkedinAbout.slice(0, 180) || null,
+      linkedinSkillsPreview: linkedinSkills.slice(0, 8),
+      linkedinExperiencePreview: linkedinExperience.slice(0, 180) || null,
     });
+
+    const mergedAbout = dedupeStrings([linkedinAbout, portfolioAbout], 2).join(' ');
+    const mergedSkills = dedupeStrings([...(Array.isArray(linkedinSkills) ? linkedinSkills : []), ...(Array.isArray(portfolioSkills) ? portfolioSkills : [])], 20);
+    const mergedExperience = dedupeStrings([linkedinExperience, portfolioExperience], 2).join(' ');
+    const combinedContext = buildCombinedContext({
+      userContext: normalizedUserContext,
+      about: mergedAbout,
+      skills: mergedSkills,
+      experience: mergedExperience,
+    });
+    const combinedContextValue = String(combinedContext || '').trim();
+    const extraContext = combinedContextValue
+      ? combinedContextValue.slice(0, 3000)
+      : String(currentMetadata.extra_context || '').slice(0, 3000);
+    const proofPoints = combinedContextValue
+      ? combinedContextValue.slice(0, 1200)
+      : '';
+    const portfolioFetchStatus = normalizedPortfolioUrl
+      ? (portfolioMetadata?.fetched ? 'fetched' : 'failed')
+      : (currentMetadata.portfolio_fetch_status || 'not_provided');
+    const portfolioFetchError = normalizedPortfolioUrl
+      ? (portfolioMetadata?.error || null)
+      : (currentMetadata.portfolio_fetch_error || null);
+    const portfolioFetchedAt = normalizedPortfolioUrl && portfolioMetadata?.fetched
+      ? new Date().toISOString()
+      : (currentMetadata.portfolio_fetched_at || null);
+    const portfolioContentPreview = normalizedPortfolioUrl
+      ? String(portfolioMetadata?.contentPreview || '').slice(0, 2500)
+      : String(currentMetadata.portfolio_content_preview || '').slice(0, 2500);
+
     const profileHeadline = String(
       accountSnapshot?.headline || currentMetadata.profile_headline || ''
     ).trim();
+    const profileDisplayName = String(accountSnapshot?.display_name || currentMetadata.profile_display_name || '').trim();
     const strategyNiche = String(strategy.niche || '').trim();
     const metadataNiche = String(currentMetadata.role_niche || '').trim();
-    const seededRoleNiche = (
-      (!isWeakNicheValue(profileHeadline) && profileHeadline) ||
-      (!isWeakNicheValue(metadataNiche) && metadataNiche) ||
-      (!isWeakNicheValue(strategyNiche) && strategyNiche) ||
-      profileHeadline ||
-      metadataNiche ||
-      strategyNiche ||
-      ''
-    ).trim();
+    const seededNicheCandidates = [
+      profileHeadline,
+      linkedinAbout,
+      linkedinExperience,
+      linkedinSkills.join(' '),
+      portfolioAbout,
+      portfolioExperience,
+      portfolioSkills.join(' '),
+      metadataNiche,
+      strategyNiche,
+    ]
+      .map((value) => extractCompactNicheFromText(value))
+      .filter(Boolean)
+      .filter((value) => !isJunkNicheCandidate(value, profileDisplayName))
+      .filter((value) => !isOverlyGenericNicheValue(value));
+    const seededRoleNiche = String(seededNicheCandidates[0] || '').trim();
+    const roleNicheForUpsert = seededRoleNiche || '';
+    const proofPointsForUpsert = proofPoints || undefined;
 
     await linkedinAutomationService.upsertProfileContext(userId, {
-      role_niche: seededRoleNiche,
+      role_niche: roleNicheForUpsert,
       target_audience: strategy.target_audience || '',
       outcomes_30_90: derivedGoals || currentMetadata.outcomes_30_90 || '',
-      proof_points: String(userContext || currentMetadata.extra_context || '').slice(0, 1200),
+      proof_points: proofPointsForUpsert,
       tone_style: normalizeToneEnum(strategy.tone_style),
       consent_use_posts: true,
       consent_store_profile: true,
       metadata: {
         ...currentMetadata,
-        portfolio_url: String(portfolioUrl || '').trim(),
-        user_context: String(userContext || '').trim(),
+        portfolio_url: normalizedPortfolioUrl || currentMetadata.portfolio_url || '',
+        portfolio_fetch_status: portfolioFetchStatus,
+        portfolio_fetch_error: portfolioFetchError,
+        portfolio_fetched_at: portfolioFetchedAt,
+        portfolio_title: String(portfolioMetadata?.title || currentMetadata.portfolio_title || '').slice(0, 180),
+        portfolio_description: String(portfolioMetadata?.description || currentMetadata.portfolio_description || '').slice(0, 500),
+        portfolio_about: portfolioAbout ? portfolioAbout.slice(0, 700) : null,
+        portfolio_skills: portfolioSkills,
+        portfolio_experience: portfolioExperience ? portfolioExperience.slice(0, 700) : null,
+        linkedin_about: linkedinAbout ? linkedinAbout.slice(0, 700) : null,
+        linkedin_skills: linkedinSkills,
+        linkedin_experience: linkedinExperience ? linkedinExperience.slice(0, 700) : null,
+        portfolio_content_preview: portfolioContentPreview || null,
+        user_context: normalizedUserContext || currentMetadata.user_context || '',
+        extra_context: extraContext,
         profile_headline: profileHeadline || null,
         profile_display_name: accountSnapshot?.display_name || null,
         sourced_from: 'strategy_init_analysis',
@@ -1049,6 +2496,25 @@ router.post('/init-analysis', async (req, res) => {
       runAnalysis,
       postSummary,
     }));
+    console.log('[Strategy] niche derivation snapshot', {
+      userId,
+      strategyId,
+      selectedNiche: analysisData?.niche || null,
+      selectedAudience: analysisData?.audience || null,
+      topTopics: Array.isArray(analysisData?.top_topics) ? analysisData.top_topics.slice(0, 8) : [],
+      roleNicheInput: String(profileContext?.role_niche || '').slice(0, 120),
+      strategyNicheInput: String(strategy?.niche || '').slice(0, 120),
+      profileHeadlineInput: String(analysisAccountSnapshot?.headline || '').slice(0, 160),
+      linkedinAboutInput: String(profileContext?.metadata?.linkedin_about || '').slice(0, 200),
+      linkedinExperienceInput: String(profileContext?.metadata?.linkedin_experience || '').slice(0, 200),
+      linkedinSkillsCount: Array.isArray(profileContext?.metadata?.linkedin_skills)
+        ? profileContext.metadata.linkedin_skills.length
+        : 0,
+      portfolioTitleInput: String(profileContext?.metadata?.portfolio_title || '').slice(0, 160),
+      portfolioSkillsCount: Array.isArray(profileContext?.metadata?.portfolio_skills)
+        ? profileContext.metadata.portfolio_skills.length
+        : 0,
+    });
     const trendingTopics = sanitizeTrendingTopics(buildTrendingTopics(
       runResult.queue,
       [
@@ -1086,11 +2552,25 @@ router.post('/init-analysis', async (req, res) => {
       tweets_analysed: tweetsAnalysed,
       confidence,
       confidence_reason: confidenceReason,
-      portfolio_url: String(portfolioUrl || '').trim(),
-      user_context: String(userContext || '').trim(),
+      portfolio_url: normalizedPortfolioUrl || currentMetadata.portfolio_url || '',
+      portfolio_fetch_status: portfolioFetchStatus,
+      portfolio_fetch_error: portfolioFetchError,
+      portfolio_about: portfolioAbout ? portfolioAbout.slice(0, 700) : null,
+      portfolio_skills: portfolioSkills,
+      portfolio_experience: portfolioExperience ? portfolioExperience.slice(0, 700) : null,
+      linkedin_about: linkedinAbout ? linkedinAbout.slice(0, 700) : null,
+      linkedin_skills: linkedinSkills,
+      linkedin_experience: linkedinExperience ? linkedinExperience.slice(0, 700) : null,
+      user_context: normalizedUserContext || currentMetadata.user_context || '',
       queue_preview_count: Array.isArray(runResult.queue) ? runResult.queue.length : 0,
     };
     await updateRunMetadata(runResult.runId, nextMetadata);
+    const refreshedStrategy = await strategyService.getStrategy(strategyId);
+    await refreshContextVaultSafe({
+      userId,
+      strategy: refreshedStrategy || strategy,
+      reason: 'analysis_completed',
+    });
 
     console.log('[Strategy] init-analysis completed', {
       userId,
@@ -1104,6 +2584,13 @@ router.post('/init-analysis', async (req, res) => {
       gapMap,
       queueItems: Array.isArray(runResult.queue) ? runResult.queue.length : 0,
       sourceScope: postSummary?.sourceScope || 'unknown',
+      portfolioFetchStatus,
+      portfolioSkillsCount: portfolioSkills.length,
+      hasPortfolioAbout: Boolean(portfolioAbout),
+      hasPortfolioExperience: Boolean(portfolioExperience),
+      linkedinSkillsCount: linkedinSkills.length,
+      hasLinkedinAbout: Boolean(linkedinAbout),
+      hasLinkedinExperience: Boolean(linkedinExperience),
     });
 
     return res.json({
@@ -1207,6 +2694,11 @@ router.post('/apply-analysis', async (req, res) => {
       competitorConfig,
     }));
     await updateRunMetadata(analysisId, metadata);
+    await refreshContextVaultSafe({
+      userId,
+      strategyId,
+      reason: 'analysis_prompt_pack_generated',
+    });
 
     return res.json({
       success: true,
@@ -1356,11 +2848,106 @@ router.post('/generate-analysis-prompts', async (req, res) => {
     });
 
     const result = await strategyService.generatePrompts(strategyId, userId);
+    const promptGeneratedAt = new Date().toISOString();
+
+    let contentPlan = {
+      runId: null,
+      queueCount: 0,
+      status: 'failed',
+    };
+    let contentPlanWarning = null;
+    let contentPlanPromptIds = [];
+
+    try {
+      await syncProfileContextWithConfirmedAnalysis({
+        userId,
+        strategyId,
+        strategy,
+        analysisData,
+        analysisMetadata: metadata,
+      });
+
+      const runResult = await linkedinAutomationService.runPipeline({
+        userId,
+        queueTarget: CONTENT_PLAN_QUEUE_TARGET,
+        userToken: getUserTokenFromRequest(req),
+        cookieHeader: buildCookieHeader(req),
+      });
+
+      contentPlan = {
+        runId: runResult?.runId || null,
+        queueCount: Array.isArray(runResult?.queue) ? runResult.queue.length : 0,
+        status: 'ready',
+      };
+
+      contentPlanPromptIds = await markContentPlanPromptsUsed({
+        userId,
+        strategyId,
+        runId: contentPlan.runId,
+        queueCount: contentPlan.queueCount || CONTENT_PLAN_QUEUE_TARGET,
+      });
+    } catch (contentPlanError) {
+      contentPlanWarning = toShortText(
+        contentPlanError?.message || 'Content plan generation failed.',
+        260
+      );
+      console.warn('[Strategy] content plan generation warning', {
+        userId,
+        strategyId,
+        analysisId,
+        warning: contentPlanWarning,
+      });
+    }
+
+    const refreshedStrategy = await strategyService.getStrategy(strategyId);
+    const refreshedStrategyMetadata = parseJsonObject(refreshedStrategy?.metadata, {});
+    const nextStrategyMetadata = {
+      ...refreshedStrategyMetadata,
+      content_plan_run_id: contentPlan.runId || refreshedStrategyMetadata.content_plan_run_id || null,
+      content_plan_generated_at:
+        contentPlan.runId ? promptGeneratedAt : (refreshedStrategyMetadata.content_plan_generated_at || null),
+      content_plan_queue_count:
+        contentPlan.runId
+          ? Number(contentPlan.queueCount || 0)
+          : Number(refreshedStrategyMetadata.content_plan_queue_count || 0),
+      content_plan_status: contentPlan.runId ? 'ready' : 'failed',
+      content_plan_prompt_ids: contentPlan.runId
+        ? dedupeStrings(contentPlanPromptIds, 8)
+        : (Array.isArray(refreshedStrategyMetadata.content_plan_prompt_ids)
+            ? refreshedStrategyMetadata.content_plan_prompt_ids
+            : []),
+      content_plan_prompt_used_at: contentPlan.runId
+        ? promptGeneratedAt
+        : (refreshedStrategyMetadata.content_plan_prompt_used_at || null),
+    };
+    if (contentPlanWarning) {
+      nextStrategyMetadata.content_plan_warning = contentPlanWarning;
+    } else {
+      delete nextStrategyMetadata.content_plan_warning;
+    }
+
+    await strategyService.updateStrategy(strategyId, {
+      metadata: nextStrategyMetadata,
+    });
 
     metadata.prompt_generation = {
-      generated_at: new Date().toISOString(),
+      generated_at: promptGeneratedAt,
       count: result?.count || 0,
       success: true,
+    };
+    metadata.content_plan = {
+      run_id: contentPlan.runId,
+      generated_at: contentPlan.runId
+        ? promptGeneratedAt
+        : (nextStrategyMetadata.content_plan_generated_at || null),
+      queue_count: contentPlan.runId
+        ? Number(contentPlan.queueCount || 0)
+        : Number(nextStrategyMetadata.content_plan_queue_count || 0),
+      status: nextStrategyMetadata.content_plan_status || 'failed',
+      warning: contentPlanWarning || null,
+      prompt_ids: Array.isArray(nextStrategyMetadata.content_plan_prompt_ids)
+        ? nextStrategyMetadata.content_plan_prompt_ids
+        : [],
     };
     await updateRunMetadata(analysisId, metadata);
 
@@ -1368,6 +2955,17 @@ router.post('/generate-analysis-prompts', async (req, res) => {
       success: true,
       promptCount: result?.count || 0,
       prompts: result?.prompts || [],
+      contentPlan: {
+        runId: contentPlan.runId,
+        queueCount: contentPlan.runId
+          ? Number(contentPlan.queueCount || 0)
+          : Number(nextStrategyMetadata.content_plan_queue_count || 0),
+        status: nextStrategyMetadata.content_plan_status || 'failed',
+        warning: contentPlanWarning || undefined,
+        promptIds: Array.isArray(nextStrategyMetadata.content_plan_prompt_ids)
+          ? nextStrategyMetadata.content_plan_prompt_ids
+          : [],
+      },
     });
   } catch (error) {
     console.error('[Strategy] generate-analysis-prompts error:', error);
@@ -1458,6 +3056,378 @@ router.get('/latest-analysis', async (req, res) => {
   }
 });
 
+// POST /api/strategy/:id/content-plan/generate - generate strategy-scoped publish-ready queue
+router.post('/:id/content-plan/generate', async (req, res) => {
+  try {
+    const strategyId = req.params.id;
+    const userId = req.user.id;
+
+    const strategy = await strategyService.getStrategy(strategyId);
+    if (!strategy || strategy.user_id !== userId) {
+      return res.status(404).json({ error: 'Strategy not found' });
+    }
+
+    const strategyMetadata = parseJsonObject(strategy.metadata, {});
+    const analysisCache = parseJsonObject(strategyMetadata.analysis_cache, {});
+    const cachedAnalysisId = String(analysisCache.analysis_id || '').trim();
+
+    let analysisRun = null;
+    if (cachedAnalysisId) {
+      analysisRun = await getRunById(cachedAnalysisId, userId);
+    }
+    if (!analysisRun) {
+      analysisRun = await getLatestAnalysisRunForStrategy({ userId, strategyId });
+    }
+    if (!analysisRun) {
+      return res.status(400).json({
+        error: 'No analysis found for this strategy. Run analysis first, then generate content plan.',
+      });
+    }
+
+    const analysisMetadata = parseJsonObject(analysisRun.metadata, {});
+    const analysisData = sanitizeAnalysisData(
+      analysisMetadata.analysis_data || analysisCache || {}
+    );
+
+    await syncProfileContextWithConfirmedAnalysis({
+      userId,
+      strategyId,
+      strategy,
+      analysisData,
+      analysisMetadata,
+    });
+
+    const runResult = await linkedinAutomationService.runPipeline({
+      userId,
+      queueTarget: CONTENT_PLAN_QUEUE_TARGET,
+      userToken: getUserTokenFromRequest(req),
+      cookieHeader: buildCookieHeader(req),
+    });
+
+    const generatedAt = new Date().toISOString();
+    const queueCount = Array.isArray(runResult?.queue) ? runResult.queue.length : 0;
+    const contentPlanPromptIds = await markContentPlanPromptsUsed({
+      userId,
+      strategyId,
+      runId: runResult?.runId || null,
+      queueCount: queueCount || CONTENT_PLAN_QUEUE_TARGET,
+    });
+    const refreshedAfterPromptUsage = await strategyService.getStrategy(strategyId);
+    const refreshedMetadata = parseJsonObject(refreshedAfterPromptUsage?.metadata, {});
+    const nextStrategyMetadata = {
+      ...refreshedMetadata,
+      content_plan_run_id: runResult?.runId || null,
+      content_plan_generated_at: generatedAt,
+      content_plan_queue_count: Number(queueCount || 0),
+      content_plan_status: 'ready',
+      content_plan_prompt_ids: dedupeStrings(contentPlanPromptIds, 8),
+      content_plan_prompt_used_at: generatedAt,
+    };
+    delete nextStrategyMetadata.content_plan_warning;
+
+    await strategyService.updateStrategy(strategyId, {
+      metadata: nextStrategyMetadata,
+    });
+
+    await updateRunMetadata(analysisRun.id, {
+      ...analysisMetadata,
+      content_plan: {
+        run_id: runResult?.runId || null,
+        generated_at: generatedAt,
+        queue_count: Number(queueCount || 0),
+        status: 'ready',
+        warning: null,
+        prompt_ids: dedupeStrings(contentPlanPromptIds, 8),
+      },
+    });
+    const refreshedStrategy = await strategyService.getStrategy(strategyId);
+    await refreshContextVaultSafe({
+      userId,
+      strategy: refreshedStrategy || strategy,
+      reason: 'content_plan_generated',
+    });
+
+    return res.json({
+      success: true,
+      contentPlan: {
+        runId: runResult?.runId || null,
+        queueCount: Number(queueCount || 0),
+        status: 'ready',
+        promptIds: dedupeStrings(contentPlanPromptIds, 8),
+      },
+    });
+  } catch (error) {
+    console.error('[Strategy] content-plan generate error:', error);
+    return res.status(500).json({ error: error.message || 'Failed to generate content plan' });
+  }
+});
+
+// GET /api/strategy/:id/context-vault - fetch latest strategy context vault snapshot
+router.get('/:id/context-vault', async (req, res) => {
+  try {
+    const strategyId = req.params.id;
+    const userId = req.user.id;
+    const shouldRefresh = String(req.query.refresh || '').toLowerCase() === 'true';
+
+    const strategy = await strategyService.getStrategy(strategyId);
+    if (!strategy || strategy.user_id !== userId) {
+      return res.status(404).json({ error: 'Strategy not found' });
+    }
+
+    let vault = await contextVaultService.getByStrategy({ userId, strategyId });
+    if (!vault || shouldRefresh) {
+      vault = await refreshContextVaultSafe({
+        userId,
+        strategy,
+        reason: shouldRefresh ? 'context_vault_manual_refresh' : 'context_vault_bootstrap',
+      });
+    }
+
+    return res.json({
+      success: true,
+      vault: vault || null,
+    });
+  } catch (error) {
+    console.error('[Strategy] context-vault fetch error:', error);
+    return res.status(500).json({ error: error.message || 'Failed to load context vault' });
+  }
+});
+
+// POST /api/strategy/:id/context-vault/refresh - force refresh strategy context vault snapshot
+router.post('/:id/context-vault/refresh', async (req, res) => {
+  try {
+    const strategyId = req.params.id;
+    const userId = req.user.id;
+    const reasonInput = String(req.body?.reason || '').trim();
+
+    const strategy = await strategyService.getStrategy(strategyId);
+    if (!strategy || strategy.user_id !== userId) {
+      return res.status(404).json({ error: 'Strategy not found' });
+    }
+
+    const vault = await refreshContextVaultSafe({
+      userId,
+      strategy,
+      reason: reasonInput || 'context_vault_manual_refresh',
+    });
+
+    return res.json({
+      success: true,
+      vault: vault || null,
+    });
+  } catch (error) {
+    console.error('[Strategy] context-vault refresh error:', error);
+    return res.status(500).json({ error: error.message || 'Failed to refresh context vault' });
+  }
+});
+
+// POST /api/strategy/:id/context-vault/apply - apply vault insights to strategy fields
+router.post('/:id/context-vault/apply', async (req, res) => {
+  try {
+    const strategyId = req.params.id;
+    const userId = req.user.id;
+    const mode = String(req.body?.mode || 'merge').trim().toLowerCase();
+    const useWinningOnly = Boolean(req.body?.useWinningOnly ?? true);
+
+    const strategy = await strategyService.getStrategy(strategyId);
+    if (!strategy || strategy.user_id !== userId) {
+      return res.status(404).json({ error: 'Strategy not found' });
+    }
+
+    let vault = await contextVaultService.getByStrategy({ userId, strategyId });
+    if (!vault) {
+      vault = await refreshContextVaultSafe({
+        userId,
+        strategy,
+        reason: 'context_vault_apply_bootstrap',
+      });
+    }
+    if (!vault?.snapshot || typeof vault.snapshot !== 'object') {
+      return res.status(400).json({ error: 'Context vault snapshot not available' });
+    }
+
+    const snapshot = parseJsonObject(vault.snapshot, {});
+    const discoveries = parseJsonObject(snapshot.discoveries, {});
+    const context = parseJsonObject(snapshot.context, {});
+
+    const winningTopics = normalizeTopicList(
+      Array.isArray(discoveries.winningTopics) ? discoveries.winningTopics : [],
+      10
+    );
+    const underusedTopics = normalizeTopicList(
+      Array.isArray(discoveries.underusedTopics) ? discoveries.underusedTopics : [],
+      8
+    );
+    const vaultTopics = normalizeTopicList(
+      Array.isArray(context.topics) ? context.topics : [],
+      12
+    );
+
+    const pickedTopics = dedupeStrings(
+      [
+        ...winningTopics,
+        ...(useWinningOnly ? [] : underusedTopics.slice(0, 4)),
+        ...vaultTopics.slice(0, 4),
+      ],
+      12
+    );
+    if (pickedTopics.length === 0) {
+      return res.status(400).json({ error: 'No usable topics found in context vault' });
+    }
+
+    const existingTopics = normalizeTopicList(Array.isArray(strategy.topics) ? strategy.topics : [], 20);
+    const nextTopics =
+      mode === 'replace'
+        ? normalizeTopicList(pickedTopics, 20)
+        : normalizeTopicList([...existingTopics, ...pickedTopics], 20);
+
+    const strategyMetadata = parseJsonObject(strategy.metadata, {});
+    const nowIso = new Date().toISOString();
+    const nextMetadata = sanitizeJsonSafeValue({
+      ...strategyMetadata,
+      prompts_stale: true,
+      prompts_stale_at: nowIso,
+      prompts_refresh_recommendation: 'partial',
+      last_strategy_update_source: 'context_vault_apply',
+      context_vault: {
+        ...(parseJsonObject(strategyMetadata.context_vault, {})),
+        last_applied_at: nowIso,
+        last_applied_mode: mode === 'replace' ? 'replace' : 'merge',
+        last_applied_topics: pickedTopics.slice(0, 12),
+      },
+    });
+
+    const updatedStrategy = await strategyService.updateStrategy(strategyId, {
+      topics: nextTopics,
+      metadata: nextMetadata,
+    });
+    const refreshedVault = await refreshContextVaultSafe({
+      userId,
+      strategy: updatedStrategy || strategy,
+      reason: 'context_vault_apply',
+    });
+
+    return res.json({
+      success: true,
+      strategy: updatedStrategy,
+      vault: refreshedVault || null,
+      applied: {
+        mode: mode === 'replace' ? 'replace' : 'merge',
+        topicsAdded: pickedTopics,
+        nextTopicCount: nextTopics.length,
+      },
+    });
+  } catch (error) {
+    console.error('[Strategy] context-vault apply error:', error);
+    return res.status(500).json({ error: error.message || 'Failed to apply context vault insights' });
+  }
+});
+
+// GET /api/strategy/:id/content-plan - strategy-scoped publish-ready queue
+router.get('/:id/content-plan', async (req, res) => {
+  try {
+    const strategyId = req.params.id;
+    const userId = req.user.id;
+
+    const strategy = await strategyService.getStrategy(strategyId);
+    if (!strategy || strategy.user_id !== userId) {
+      return res.status(404).json({ error: 'Strategy not found' });
+    }
+
+    const strategyMetadata = parseJsonObject(strategy.metadata, {});
+    const runId = String(strategyMetadata.content_plan_run_id || '').trim();
+    const generatedAt = strategyMetadata.content_plan_generated_at || null;
+    const storedStatus = String(strategyMetadata.content_plan_status || '').trim().toLowerCase();
+    const warning = toShortText(strategyMetadata.content_plan_warning || '', 260) || null;
+    const contentPlanPromptIds = Array.isArray(strategyMetadata.content_plan_prompt_ids)
+      ? dedupeStrings(strategyMetadata.content_plan_prompt_ids, 8)
+      : [];
+    const analysisCache = parseJsonObject(strategyMetadata.analysis_cache, {});
+    const analysisRunId = String(analysisCache.analysis_id || '').trim();
+
+    let analysisRun = null;
+    if (analysisRunId) {
+      analysisRun = await getRunById(analysisRunId, userId);
+    }
+
+    if (!runId) {
+      return res.json({
+        success: true,
+        runId: null,
+        generatedAt,
+        status: storedStatus || 'not_generated',
+        warning,
+        queueCount: 0,
+        promptIds: contentPlanPromptIds,
+        context: buildContentPlanContextPayload({ strategy, analysisRun }),
+        queue: [],
+      });
+    }
+
+    const run = await getRunById(runId, userId);
+    if (!run) {
+      return res.json({
+        success: true,
+        runId,
+        generatedAt,
+        status: 'failed',
+        warning: warning || 'Saved content plan run could not be found.',
+        queueCount: 0,
+        promptIds: contentPlanPromptIds,
+        context: buildContentPlanContextPayload({ strategy, analysisRun }),
+        queue: [],
+      });
+    }
+
+    if (!analysisRun) {
+      analysisRun = run;
+    }
+
+    const { rows } = await pool.query(
+      `SELECT *
+       FROM linkedin_automation_queue
+       WHERE user_id = $1 AND run_id = $2
+       ORDER BY created_at ASC`,
+      [userId, runId]
+    );
+
+    const queue = rows.map((item) => {
+      const itemMetadata = parseJsonObject(item.metadata, {});
+      return {
+        id: item.id,
+        runId: item.run_id,
+        title: item.title || '',
+        content: item.content || '',
+        hashtags: Array.isArray(item.hashtags) ? item.hashtags : [],
+        status: item.status || 'draft',
+        rejectionReason: item.rejection_reason || '',
+        analysisSnapshot: parseJsonObject(item.analysis_snapshot, {}),
+        reason: toShortText(itemMetadata.reason || '', 300),
+        suggestedDayOffset: Number(itemMetadata.suggested_day_offset || 0),
+        suggestedLocalTime: toShortText(itemMetadata.suggested_local_time || '', 12),
+        metadata: itemMetadata,
+        createdAt: item.created_at,
+        updatedAt: item.updated_at,
+      };
+    });
+
+    return res.json({
+      success: true,
+      runId,
+      generatedAt: generatedAt || run.created_at || null,
+      status: storedStatus || (queue.length > 0 ? 'ready' : 'empty'),
+      warning,
+      queueCount: queue.length,
+      promptIds: contentPlanPromptIds,
+      context: buildContentPlanContextPayload({ strategy, analysisRun }),
+      queue,
+    });
+  } catch (error) {
+    console.error('[Strategy] content-plan error:', error);
+    return res.status(500).json({ error: error.message || 'Failed to load content plan' });
+  }
+});
+
 // Get all strategies for user
 router.get('/list', async (req, res) => {
   try {
@@ -1533,6 +3503,31 @@ router.post('/prompts/:promptId/favorite', async (req, res) => {
   } catch (error) {
     console.error('Error toggling favorite:', error);
     res.status(500).json({ error: 'Failed to toggle favorite' });
+  }
+});
+
+// Mark prompt as used (for usage-aware refresh recommendations)
+router.post('/prompts/:promptId/mark-used', async (req, res) => {
+  try {
+    const { promptId } = req.params;
+    const userId = req.user.id;
+    const rawStrategyId = typeof req.body?.strategyId === 'string' ? req.body.strategyId.trim() : '';
+    const strategyId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(rawStrategyId)
+      ? rawStrategyId
+      : null;
+
+    const result = await strategyService.markPromptUsed(promptId, userId, { strategyId });
+    res.json({
+      success: true,
+      prompt: result.prompt,
+      usage: result.usage,
+    });
+  } catch (error) {
+    if ((error?.message || '').toLowerCase().includes('not found')) {
+      return res.status(404).json({ error: 'Prompt not found' });
+    }
+    console.error('Error marking prompt as used:', error);
+    return res.status(500).json({ error: 'Failed to mark prompt as used' });
   }
 });
 

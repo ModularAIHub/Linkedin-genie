@@ -44,8 +44,8 @@ const LinkedInAIContentGenerator = ({
 
   // Handle generate button click
   const handleGenerate = () => {
-    setAiPrompt(localPrompt); // Ensure latest value is synced
-    onGenerate();
+    setAiPrompt(localPrompt); // keep parent prompt in sync for UI persistence
+    onGenerate(localPrompt);
   };
 
   if (!showAIPrompt) return null;

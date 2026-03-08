@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import api, { linkedin } from '../utils/api';
 import { sanitizeAIContent, sanitizeImagePrompt } from '../utils/sanitization';
 import { htmlToUnicode } from '../components/LinkedInPostComposer/LinkedInPostContentEditor';
+import { plainTextToEditorHtml } from '../utils/editorHtml';
 import toast from 'react-hot-toast';
 import { useAccountAwareAPI } from './useAccountAwareAPI';
 
@@ -249,15 +250,18 @@ const useLinkedInPostComposer = () => {
   };
 
   // AI Content Generation Handler
-  const handleAIGenerate = async () => {
-    if (!aiPrompt.trim()) {
+  const handleAIGenerate = async (promptOverride = null) => {
+    const promptToUse =
+      typeof promptOverride === 'string' ? promptOverride : aiPrompt;
+
+    if (!String(promptToUse || '').trim()) {
       toast.error('Please enter a prompt for AI generation');
       return;
     }
     setIsGenerating(true);
     try {
       const res = await api.post('/api/ai/generate', {
-        prompt: aiPrompt,
+        prompt: promptToUse,
         style: aiStyle
       });
       if (res.data && res.data.content) {
@@ -269,7 +273,9 @@ const useLinkedInPostComposer = () => {
           allowMarkdown: false,
           maxLength: 12000,
         });
-        setContent(clean);
+        // Editor stores HTML, so convert plain AI text safely to avoid
+        // accidental HTML parsing that can visually truncate content.
+        setContent(plainTextToEditorHtml(clean));
         setShowAIPrompt(false);
         if (clean.length > 3000) {
           toast('AI generated more than 3000 characters. Edit before posting to LinkedIn.', { icon: '⚠️' });

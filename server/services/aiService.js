@@ -71,6 +71,140 @@ async function getUserPreferenceAndKeys(userToken, maxRetries = 3, cookieHeader 
   }
 }
 
+const stripMarkdownCodeFences = (value = '') =>
+  String(value || '')
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```$/i, '')
+    .trim();
+
+const extractJsonObjectFromText = (value = '') => {
+  const text = stripMarkdownCodeFences(value);
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      return null;
+    }
+  }
+};
+
+const extractJsonObjectLoose = (value = '') => {
+  const text = stripMarkdownCodeFences(value);
+  const candidates = [];
+  if (text) candidates.push(text);
+  const bracketMatch = text.match(/\{[\s\S]*\}/);
+  if (bracketMatch?.[0]) candidates.push(bracketMatch[0]);
+
+  const normalizedCandidates = candidates
+    .map((candidate) => String(candidate || '').trim())
+    .filter(Boolean)
+    .flatMap((candidate) => {
+      const base = candidate
+        .replace(/[“”]/g, '"')
+        .replace(/[‘’]/g, "'");
+      const repairedSingleQuotes = base
+        .replace(/([{,]\s*)'([^']+?)'\s*:/g, '$1"$2":')
+        .replace(/:\s*'([^']*?)'/g, (_match, inner) => {
+          const escaped = String(inner || '')
+            .replace(/\\/g, '\\\\')
+            .replace(/"/g, '\\"');
+          return `: "${escaped}"`;
+        });
+      const repairedTrailingCommas = repairedSingleQuotes.replace(/,\s*([}\]])/g, '$1');
+      return [candidate, base, repairedSingleQuotes, repairedTrailingCommas];
+    });
+
+  for (const candidate of normalizedCandidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch {
+      // try next
+    }
+  }
+  return null;
+};
+
+const normalizeSimpleText = (value = '', max = 1200) =>
+  String(value || '')
+    .replace(/\u0000/g, ' ')
+    .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, Math.max(0, Number(max) || 1200));
+
+const normalizeStringArray = (values = [], maxItems = 20, maxText = 64) => {
+  const list = Array.isArray(values) ? values : [];
+  const seen = new Set();
+  const out = [];
+  for (const value of list) {
+    const normalized = normalizeSimpleText(value, maxText);
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+};
+
+const LINKEDIN_PDF_RESPONSE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    about: { type: 'STRING' },
+    skills: { type: 'ARRAY', items: { type: 'STRING' } },
+    experience: { type: 'STRING' },
+    confidence: { type: 'STRING', enum: ['high', 'medium', 'low'] },
+    notes: { type: 'STRING' },
+  },
+  required: ['about', 'skills', 'experience', 'confidence', 'notes'],
+};
+
+const STRATEGY_RESPONSE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    analysis: {
+      type: 'OBJECT',
+      properties: {
+        strengths: { type: 'ARRAY', items: { type: 'STRING' } },
+        gaps: { type: 'ARRAY', items: { type: 'STRING' } },
+        opportunities: { type: 'ARRAY', items: { type: 'STRING' } },
+        nextAngles: { type: 'ARRAY', items: { type: 'STRING' } },
+      },
+      required: ['strengths', 'gaps', 'opportunities', 'nextAngles'],
+    },
+    queue: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          title: { type: 'STRING' },
+          content: { type: 'STRING' },
+          hashtags: { type: 'ARRAY', items: { type: 'STRING' } },
+          reason: { type: 'STRING' },
+          suggested_day_offset: { type: 'NUMBER' },
+          suggested_local_time: { type: 'STRING' },
+        },
+        required: [
+          'title',
+          'content',
+          'hashtags',
+          'reason',
+          'suggested_day_offset',
+          'suggested_local_time',
+        ],
+      },
+    },
+  },
+  required: ['analysis', 'queue'],
+};
+
 class AIService {
   constructor() {
     if (process.env.OPENAI_API_KEY) {
@@ -83,15 +217,22 @@ class AIService {
   }
 
   // FIXED: Added input validation
-  validatePrompt(prompt) {
+  validatePrompt(prompt, options = {}) {
+    const maxLength = Number.isFinite(options?.maxLength)
+      ? Math.max(200, Math.floor(options.maxLength))
+      : 2000;
+    const minLength = Number.isFinite(options?.minLength)
+      ? Math.max(1, Math.floor(options.minLength))
+      : 5;
+
     if (!prompt || typeof prompt !== 'string') {
       throw new Error('Invalid prompt');
     }
     
     const trimmed = prompt.trim();
     
-    if (trimmed.length < 5) throw new Error('Prompt too short (min 5 characters)');
-    if (trimmed.length > 2000) throw new Error('Prompt too long (max 2000 characters)');
+    if (trimmed.length < minLength) throw new Error(`Prompt too short (min ${minLength} characters)`);
+    if (trimmed.length > maxLength) throw new Error(`Prompt too long (max ${maxLength} characters)`);
     
     // Block prompt injection
     const dangerousPatterns = [
@@ -283,7 +424,7 @@ Generate the post now:`;
             { role: 'system', content: systemPrompt },
             { role: 'user', content: prompt }
           ],
-          max_tokens: 800,
+          max_tokens: 2048,
           temperature: 0.7
         },
         {
@@ -385,7 +526,7 @@ Generate the post now:`;
             temperature: 0.7,
             topK: 1,
             topP: 1,
-            maxOutputTokens: 800,
+            maxOutputTokens: 2048,
           },
           safetySettings: [
             {
@@ -421,6 +562,305 @@ Generate the post now:`;
       }
       throw new Error(`Google Gemini API request failed: ${error.message}`);
     }
+  }
+
+  async resolveGoogleKeyForUser(userToken = null, cookieHeader = null) {
+    let preference = 'platform';
+    let userKeys = [];
+
+    if (userToken) {
+      try {
+        const prefResult = await getUserPreferenceAndKeys(userToken, 3, cookieHeader);
+        preference = prefResult.preference || 'platform';
+        userKeys = Array.isArray(prefResult.userKeys) ? prefResult.userKeys : [];
+      } catch (error) {
+        console.error('[AI Service] Failed to resolve BYOK preference for google key:', error.message);
+      }
+    }
+
+    const byokGoogleKey = userKeys.find((key) => key.provider === 'gemini')?.apiKey;
+    if (preference === 'byok' && byokGoogleKey) {
+      return { key: byokGoogleKey, keyType: 'BYOK', preference };
+    }
+    if (this.googleApiKey) {
+      return { key: this.googleApiKey, keyType: 'platform', preference };
+    }
+    if (byokGoogleKey) {
+      return { key: byokGoogleKey, keyType: 'BYOK', preference };
+    }
+    return { key: null, keyType: null, preference };
+  }
+
+  async normalizeLinkedinPdfExtractionToJson(rawText = '', googleKey = '') {
+    const keyToUse = String(googleKey || '').trim();
+    if (!keyToUse) {
+      throw new Error('Google key missing for JSON normalization');
+    }
+
+    const normalizedRaw = normalizeSimpleText(rawText, 7000);
+    if (!normalizedRaw) {
+      throw new Error('No text available for JSON normalization');
+    }
+
+    const normalizePrompt = [
+      'Convert the profile analysis text below into STRICT JSON.',
+      'Return ONLY JSON and match this exact schema:',
+      '{"about":"","skills":[],"experience":"","confidence":"high|medium|low","notes":""}',
+      'Rules:',
+      '- about: max 700 chars.',
+      '- experience: list all roles found (company + title + dates if present), max 1000 chars. Do NOT omit experience even if about is long.',
+      '- skills must be short skill names only, max 20.',
+      '- If missing, use empty string or empty array.',
+      '- Do not invent facts not present in the input.',
+      '',
+      'Input text:',
+      normalizedRaw,
+    ].join('\n');
+
+    const response = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${keyToUse}`,
+      {
+        contents: [{ parts: [{ text: normalizePrompt }] }],
+        generationConfig: {
+          temperature: 0,
+          topK: 1,
+          topP: 1,
+          maxOutputTokens: 1200,
+          responseMimeType: 'application/json',
+          responseSchema: LINKEDIN_PDF_RESPONSE_SCHEMA,
+        },
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 30000,
+      }
+    );
+
+    const parts = Array.isArray(response.data?.candidates?.[0]?.content?.parts)
+      ? response.data.candidates[0].content.parts
+      : [];
+    const normalizedText = parts
+      .map((part) => (typeof part?.text === 'string' ? part.text : ''))
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+
+    if (!normalizedText) {
+      throw new Error('Gemini JSON normalization returned empty output');
+    }
+
+    const parsed = extractJsonObjectFromText(normalizedText) || extractJsonObjectLoose(normalizedText);
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error(`Gemini JSON normalization failed: ${normalizeSimpleText(normalizedText, 220)}`);
+    }
+
+    return {
+      parsed,
+      raw: normalizedText,
+    };
+  }
+
+  async extractLinkedinProfileFromPdf(base64Pdf, options = {}) {
+    const {
+      filename = 'linkedin-profile.pdf',
+      mimetype = 'application/pdf',
+      userToken = null,
+      userId = null,
+      cookieHeader = null,
+      context = null,
+    } = options || {};
+
+    const normalizedBase64 = String(base64Pdf || '').replace(/\s+/g, '').trim();
+    if (!normalizedBase64) {
+      throw new Error('PDF payload is empty');
+    }
+
+    const keyResolution = await this.resolveGoogleKeyForUser(userToken, cookieHeader);
+    if (!keyResolution.key) {
+      throw new Error('Google Gemini key not available for PDF extraction');
+    }
+
+    const normalizedContext = context && typeof context === 'object' ? context : {};
+    const recentPosts = Array.isArray(normalizedContext.recentPosts)
+      ? normalizedContext.recentPosts.filter((post) => String(post?.content || '').trim().length > 10)
+      : [];
+    const recentPostCount = Number(normalizedContext.recentPostCount || recentPosts.length || 0);
+
+    const contextPayload = {
+      displayName: normalizeSimpleText(normalizedContext.displayName || '', 120),
+      headline: normalizeSimpleText(normalizedContext.headline || '', 180),
+      existingAbout: normalizeSimpleText(normalizedContext.existingAbout || '', 700),
+      existingSkills: normalizeStringArray(normalizedContext.existingSkills || [], 20, 48),
+      existingExperience: normalizeSimpleText(normalizedContext.existingExperience || '', 700),
+      portfolioAbout: normalizeSimpleText(normalizedContext.portfolioAbout || '', 500),
+      portfolioSkills: normalizeStringArray(normalizedContext.portfolioSkills || [], 16, 48),
+      extraContext: normalizeSimpleText(normalizedContext.extraContext || '', 600),
+    };
+    const hasContext = Object.values(contextPayload).some((value) => (
+      Array.isArray(value) ? value.length > 0 : Boolean(String(value || '').trim())
+    ));
+
+    const prompt = [
+      recentPostCount > 0
+        ? 'You are analyzing a LinkedIn profile PDF AND the person\'s recent LinkedIn posts together.'
+        : 'You are extracting structured profile data from a LinkedIn profile PDF.',
+      'Return ONLY strict JSON. No markdown, no prose.',
+      'Schema:',
+      '{"about":"","skills":[],"experience":"","confidence":"high|medium|low","notes":""}',
+      'Rules:',
+      '- about: max 300 chars. One concise sentence only. Do not expand.',
+      '- skills: extract from PDF first, then infer additional skills from post topics (max 20, no duplicates).',
+      '- experience: from PDF experience section; use post content to add context on current focus (max 700 chars).',
+      '- confidence: "high" if PDF has clear sections and posts align; "medium" if one source is weak; "low" if both are sparse.',
+      '- notes: flag any mismatch between PDF claims and actual post content.',
+      '- Do not hallucinate. If not in either source, omit it.',
+      '- Ignore binary/garbled text and OCR noise.',
+      recentPostCount > 0
+        ? `- ${recentPostCount} LinkedIn posts are provided. Use them to infer real expertise and current focus areas.`
+        : '',
+      `Filename: ${normalizeSimpleText(filename, 140) || 'linkedin-profile.pdf'}`,
+    ].filter(Boolean).join('\n');
+
+    const requestParts = [{ text: prompt }];
+    if (hasContext) {
+      requestParts.push({
+        text: `Known profile context (may be partial): ${JSON.stringify(contextPayload).slice(0, 2600)}`,
+      });
+    }
+    if (recentPosts.length > 0) {
+      const postsText = recentPosts
+        .map((post, index) => {
+          const engagement = Number(post.engagement || 0);
+          return `Post ${index + 1}${engagement > 0 ? ` [${engagement} engagements]` : ''}:\n${String(post.content || '').trim()}`;
+        })
+        .join('\n\n---\n\n');
+
+      requestParts.push({
+        text: `Recent LinkedIn posts (${recentPosts.length}, newest first):\n\n${postsText}`,
+      });
+    }
+    requestParts.push({
+      inlineData: {
+        mimeType: 'application/pdf',
+        data: normalizedBase64,
+      },
+    });
+
+    const response = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${keyResolution.key}`,
+      {
+        systemInstruction: {
+          parts: [
+            {
+              text: 'You are a structured extractor. Always return strict JSON only.',
+            },
+          ],
+        },
+        contents: [
+          {
+            parts: requestParts,
+          },
+        ],
+        generationConfig: {
+          temperature: 0.1,
+          topK: 1,
+          topP: 1,
+          maxOutputTokens: 4096,
+          responseMimeType: 'application/json',
+          responseSchema: LINKEDIN_PDF_RESPONSE_SCHEMA,
+        },
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        timeout: 60000,
+      }
+    );
+
+    const parts = Array.isArray(response.data?.candidates?.[0]?.content?.parts)
+      ? response.data.candidates[0].content.parts
+      : [];
+    const textParts = parts
+      .map((part) => (typeof part?.text === 'string' ? part.text.trim() : ''))
+      .filter(Boolean);
+
+    if (!textParts.length) {
+      throw new Error('Google Gemini returned empty PDF extraction response');
+    }
+
+    const rawText = textParts.join('\n').trim();
+
+    // Try each part individually first - Gemini 2.5 Flash sometimes adds
+    // commentary in a second part which breaks JSON.parse on the joined string.
+    let parsed = null;
+    for (const textPart of textParts) {
+      const cleaned = textPart.replace(/^\uFEFF/, '').trim();
+      parsed = extractJsonObjectFromText(cleaned) || extractJsonObjectLoose(cleaned);
+      if (parsed && typeof parsed === 'object') break;
+    }
+    if (!parsed) {
+      parsed = extractJsonObjectFromText(rawText) || extractJsonObjectLoose(rawText);
+    }
+
+    console.log(
+      '[AI Service] Gemini PDF raw parts count:',
+      textParts.length,
+      'rawText preview:',
+      rawText.slice(0, 300)
+    );
+    let normalizationPassUsed = false;
+    let normalizationPassError = null;
+    if (!parsed || typeof parsed !== 'object') {
+      try {
+        const normalized = await this.normalizeLinkedinPdfExtractionToJson(rawText, keyResolution.key);
+        parsed = normalized.parsed;
+        normalizationPassUsed = true;
+      } catch (normalizationError) {
+        normalizationPassError = String(normalizationError?.message || 'json_normalization_failed').slice(0, 260);
+      }
+    }
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error(
+        `Google Gemini PDF extraction failed to parse structured output: ${normalizeSimpleText(rawText, 220)}${normalizationPassError ? ` | normalization: ${normalizationPassError}` : ''}`
+      );
+    }
+
+    const about = normalizeSimpleText(parsed.about || parsed.summary || '', 700);
+    const experience = normalizeSimpleText(parsed.experience || parsed.work_experience || '', 700);
+    const skills = normalizeStringArray(parsed.skills || parsed.skill_set || [], 20, 48);
+    const confidenceRaw = normalizeSimpleText(parsed.confidence || '', 20).toLowerCase();
+    const confidence =
+      confidenceRaw === 'high' || confidenceRaw === 'medium' || confidenceRaw === 'low'
+        ? confidenceRaw
+        : null;
+    const notes = normalizeSimpleText(parsed.notes || parsed.reason || '', 240);
+
+    if (userId) {
+      console.log('[AI Service] Gemini PDF profile extraction completed', {
+        userId,
+        keyType: keyResolution.keyType,
+        hasAbout: Boolean(about),
+        skillsCount: skills.length,
+        hasExperience: Boolean(experience),
+        confidence,
+        normalizationPassUsed,
+      });
+    }
+
+    return {
+      provider: 'google',
+      keyType: keyResolution.keyType,
+      normalizationPassUsed,
+      parsed: {
+        about,
+        skills,
+        experience,
+        confidence,
+        notes,
+      },
+      raw: rawText.slice(0, 2400),
+    };
   }
 
   async generateWithOpenAI(prompt, style, apiKey = null) {
@@ -461,7 +901,7 @@ Generate the post now:`;
         { role: 'system', content: systemPrompt },
         { role: 'user', content: prompt }
       ],
-      max_tokens: 800,
+      max_tokens: 2048,
       temperature: 0.7,
       timeout: 30000 // FIXED: Added timeout
     });
@@ -475,7 +915,7 @@ Generate the post now:`;
   }
 
   async generateStrategyContent(prompt, style = 'professional', userToken = null, userId = null, cookieHeader = null) {
-    const validatedPrompt = this.validatePrompt(prompt);
+    const validatedPrompt = this.validatePrompt(prompt, { maxLength: 9000, minLength: 20 });
     const sanitizedPrompt = sanitizeInput(validatedPrompt);
 
     if (userId) {
@@ -642,18 +1082,37 @@ Generate the post now:`;
             temperature: 0.4,
             topK: 1,
             topP: 1,
-            maxOutputTokens: 1200,
+            maxOutputTokens: 4096,
+            responseMimeType: 'application/json',
+            responseSchema: STRATEGY_RESPONSE_SCHEMA,
           },
         },
         {
           headers: {
             'Content-Type': 'application/json',
           },
-          timeout: 30000,
+          timeout: 60000,
         }
       );
 
-      const content = response.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      const parts = Array.isArray(response.data?.candidates?.[0]?.content?.parts)
+        ? response.data.candidates[0].content.parts
+        : [];
+      const textParts = parts
+        .map((part) => (typeof part?.text === 'string' ? part.text.trim() : ''))
+        .filter(Boolean);
+      if (textParts.length === 0) {
+        throw new Error('No strategy content generated by Google Gemini');
+      }
+
+      let content = textParts.join('\n').trim();
+      for (const textPart of textParts) {
+        const parsedPart = extractJsonObjectFromText(textPart) || extractJsonObjectLoose(textPart);
+        if (parsedPart && typeof parsedPart === 'object') {
+          content = JSON.stringify(parsedPart);
+          break;
+        }
+      }
       if (!content) {
         throw new Error('No strategy content generated by Google Gemini');
       }

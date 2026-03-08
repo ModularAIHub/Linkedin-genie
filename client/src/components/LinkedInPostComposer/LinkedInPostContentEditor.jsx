@@ -1,6 +1,7 @@
 
 import React, { useRef, useEffect } from 'react';
 import { Sparkles, Wand2, Bold, Italic, Underline } from 'lucide-react';
+import { ensureEditorHtml } from '../../utils/editorHtml';
 
 // Move htmlToUnicode outside the component so it can be exported
 // Unicode mapping helpers
@@ -20,25 +21,45 @@ const toUnicode = (str, style) => {
   return str;
 };
 
-// Convert HTML to Unicode preview
+const extractUnicodeFromNode = (node) => {
+  if (!node) return '';
+  if (node.nodeType === Node.TEXT_NODE) {
+    return String(node.textContent || '');
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) {
+    return '';
+  }
+
+  const tag = String(node.tagName || '').toLowerCase();
+  if (tag === 'br') return '\n';
+
+  const childText = Array.from(node.childNodes || [])
+    .map((child) => extractUnicodeFromNode(child))
+    .join('');
+
+  if (tag === 'b' || tag === 'strong') return toUnicode(childText, 'bold');
+  if (tag === 'i' || tag === 'em') return toUnicode(childText, 'italic');
+  if (tag === 'u') return toUnicode(childText, 'underline');
+  if (tag === 'div' || tag === 'p' || tag === 'li') return `${childText}\n`;
+
+  return childText;
+};
+
+// Convert editor HTML to Unicode preview/post text without dropping content.
 const htmlToUnicode = (html) => {
-  let out = html
-    .replace(/<b>(.*?)<\/b>/gi, (_, t) => toUnicode(t, 'bold'))
-    .replace(/<strong>(.*?)<\/strong>/gi, (_, t) => toUnicode(t, 'bold'))
-    .replace(/<i>(.*?)<\/i>/gi, (_, t) => toUnicode(t, 'italic'))
-    .replace(/<em>(.*?)<\/em>/gi, (_, t) => toUnicode(t, 'italic'))
-    .replace(/<u>(.*?)<\/u>/gi, (_, t) => toUnicode(t, 'underline'));
-  // Remove all other tags except <br> and <div>
-  out = out.replace(/<(?!br\s*\/?>|div\s*\/?>)[^>]+>/gi, '');
-  // Convert <div> and <br> to newlines (handle all cases)
-  out = out
-    .replace(/<div><br\s*\/?>/gi, '\n') // empty divs
-    .replace(/<div>/gi, '\n')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/div>/gi, '');
-  // Remove leading newline if present
-  if (out.startsWith('\n')) out = out.slice(1);
-  return out;
+  const normalizedHtml = ensureEditorHtml(html || '');
+  if (!normalizedHtml) return '';
+
+  const root = document.createElement('div');
+  root.innerHTML = normalizedHtml;
+
+  return Array.from(root.childNodes || [])
+    .map((node) => extractUnicodeFromNode(node))
+    .join('')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\r/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 };
 
 const LinkedInPostContentEditor = ({
@@ -66,15 +87,17 @@ const LinkedInPostContentEditor = ({
 
   // Keep editor in sync with content prop (for AI insert, etc)
   useEffect(() => {
-    if (editorRef.current && editorRef.current.innerHTML !== content) {
-      editorRef.current.innerHTML = content || '';
+    if (!editorRef.current) return;
+    const nextHtml = ensureEditorHtml(content || '');
+    if (editorRef.current.innerHTML !== nextHtml) {
+      editorRef.current.innerHTML = nextHtml;
     }
   }, [content]);
 
 
 
   // Count characters (excluding tags)
-  const characterCount = (content.replace(/<[^>]+>/g, '') || '').length;
+  const characterCount = htmlToUnicode(content || '').length;
 
   return (
   <div className="space-y-4 bg-white rounded-xl shadow-lg border border-gray-100 p-4 md:p-6">

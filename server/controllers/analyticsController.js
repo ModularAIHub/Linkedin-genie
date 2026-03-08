@@ -2,6 +2,7 @@ import { default as axios } from 'axios';
 import { pool } from '../config/database.js';
 import { hasProPlanAccess, resolveRequestPlanType } from '../middleware/planAccess.js';
 import { resolveTeamAccountForUser } from '../utils/teamAccountScope.js';
+import contextVaultService from '../services/contextVaultService.js';
 
 const FREE_ANALYTICS_DAYS = 7;
 const FREE_TOP_POSTS_LIMIT = 5;
@@ -373,6 +374,26 @@ export async function syncAnalytics(req, res) {
 
     console.log(`[Analytics Sync] Completed. Updated ${updated}, deleted ${deleted}, out of ${posts.length} posts.`);
 
+    // Context Vault feedback loop: refresh strategy memory after analytics updates.
+    let contextVaultRefresh = null;
+    try {
+      contextVaultRefresh = await contextVaultService.refreshAllForUser({
+        userId,
+        reason: 'analytics_sync',
+      });
+      console.log('[Analytics Sync] Context Vault refresh summary', {
+        userId,
+        totalStrategies: contextVaultRefresh.totalStrategies,
+        refreshedStrategies: contextVaultRefresh.refreshedStrategies,
+        failedStrategies: contextVaultRefresh.failedStrategies,
+      });
+    } catch (vaultError) {
+      console.warn('[Analytics Sync] Context Vault refresh failed:', {
+        userId,
+        error: vaultError?.message || vaultError,
+      });
+    }
+
     res.json({
       success: true,
       updated,
@@ -380,6 +401,7 @@ export async function syncAnalytics(req, res) {
       total: posts.length,
       updatedPostIds,
       deletedPostIds,
+      contextVaultRefresh,
       message: deleted > 0
         ? `${updated} posts updated, ${deleted} posts removed (deleted from LinkedIn)`
         : `${updated} posts updated`

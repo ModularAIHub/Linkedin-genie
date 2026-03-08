@@ -63,7 +63,65 @@ const cleanPromptText = (value = '') =>
     .replace(/\s+/g, ' ')
     .trim();
 
-const buildMergedPromptText = (basePrompt = '', variables = {}) => {
+const normalizeFreeformContext = (value = '', max = 1200) =>
+  String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+
+const buildReferenceContext = (variables = {}, strategyExtraContext = '') => {
+  const sections = [];
+
+  const referenceAccounts = Array.isArray(variables.reference_accounts)
+    ? variables.reference_accounts
+    : (Array.isArray(variables.referenceAccounts) ? variables.referenceAccounts : []);
+  if (referenceAccounts.length > 0) {
+    const accountHandles = referenceAccounts
+      .map((entry) => {
+        const handle = typeof entry?.handle === 'string'
+          ? entry.handle
+          : (
+              typeof entry?.username === 'string'
+                ? entry.username
+                : (
+                    typeof entry?.account_handle === 'string'
+                      ? entry.account_handle
+                      : (typeof entry === 'string' ? entry : '')
+                  )
+            );
+        return handle ? `@${String(handle).replace(/^@+/, '').trim()}` : '';
+      })
+      .filter(Boolean)
+      .slice(0, 8);
+    if (accountHandles.length > 0) {
+      sections.push(`Reference accounts: ${accountHandles.join(', ')}`);
+    }
+  }
+
+  const rawNotes = typeof variables.reference_notes === 'string'
+    ? variables.reference_notes
+    : (typeof variables.referenceNotes === 'string' ? variables.referenceNotes : '');
+  const referenceNotes = normalizeFreeformContext(rawNotes, 320);
+  if (referenceNotes) {
+    sections.push(`Reference notes: ${referenceNotes}`);
+  }
+
+  const sourceScope = typeof variables.source_scope === 'string'
+    ? normalizeFreeformContext(variables.source_scope, 120)
+    : '';
+  if (sourceScope) {
+    sections.push(`Source scope: ${sourceScope}`);
+  }
+
+  const extraContext = normalizeFreeformContext(strategyExtraContext, 600);
+  if (extraContext) {
+    sections.push(`Strategy context: ${extraContext}`);
+  }
+
+  return sections.filter(Boolean).join('\n');
+};
+
+const buildMergedPromptText = (basePrompt = '', variables = {}, strategyExtraContext = '') => {
   const cleanedPrompt = cleanPromptText(basePrompt);
   const instruction =
     typeof variables.instruction === 'string' ? cleanPromptText(variables.instruction) : '';
@@ -78,11 +136,20 @@ const buildMergedPromptText = (basePrompt = '', variables = {}) => {
   }
   if (angle) sections.push(`Angle: ${angle}`);
   if (cta) sections.push(`CTA: ${cta}`);
+  const referenceContext = buildReferenceContext(variables, strategyExtraContext);
+  if (referenceContext) sections.push(referenceContext);
 
   return sections.filter(Boolean).join('\n\n');
 };
 
-const PromptLibrary = ({ strategyId, strategyExtraContext = '', fromAnalysis = false, onPromptsLoaded }) => {
+const PromptLibrary = ({
+  strategyId,
+  strategyExtraContext = '',
+  contentPlanPromptIds = [],
+  fromAnalysis = false,
+  onPromptsLoaded,
+  onPromptUsageUpdated,
+}) => {
   const navigate = useNavigate();
   const [prompts, setPrompts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -224,13 +291,22 @@ const PromptLibrary = ({ strategyId, strategyExtraContext = '', fromAnalysis = f
     const usedCount = prompts.filter((prompt) => Number(prompt.usage_count) > 0).length;
     const favoriteCount = prompts.filter((prompt) => Boolean(prompt.is_favorite)).length;
     const generatedCount = prompts.filter((prompt) => generatedPromptIds.includes(prompt.id)).length;
+    const contentPlanUsedCount = prompts.filter((prompt) =>
+      Array.isArray(contentPlanPromptIds) && contentPlanPromptIds.includes(prompt.id)
+    ).length;
     return {
       total: prompts.length,
       used: usedCount,
       favorites: favoriteCount,
       generated: generatedCount,
+      contentPlanUsed: contentPlanUsedCount,
     };
-  }, [prompts, generatedPromptIds]);
+  }, [prompts, generatedPromptIds, contentPlanPromptIds]);
+
+  const contentPlanPromptIdSet = useMemo(
+    () => new Set(Array.isArray(contentPlanPromptIds) ? contentPlanPromptIds : []),
+    [contentPlanPromptIds]
+  );
 
   const filteredPrompts = useMemo(
     () =>
@@ -350,7 +426,7 @@ const PromptLibrary = ({ strategyId, strategyExtraContext = '', fromAnalysis = f
           typeof variables.recommended_format === 'string'
             ? variables.recommended_format.trim().toLowerCase()
             : 'single_post';
-        const mergedPrompt = buildMergedPromptText(cleanedPrompt, variables);
+        const mergedPrompt = buildMergedPromptText(cleanedPrompt, variables, strategyExtraContext);
 
         return {
           id: prompt.id,
@@ -362,6 +438,26 @@ const PromptLibrary = ({ strategyId, strategyExtraContext = '', fromAnalysis = f
     };
 
     localStorage.setItem(BULK_GENERATION_SEED_KEY, JSON.stringify(seed));
+
+    if (strategyId && selectedPrompts.length > 0) {
+      Promise.allSettled(
+        selectedPrompts.map(async (prompt) => {
+          if (!prompt?.id) return;
+          try {
+            const response = await strategyApi.markPromptUsed(prompt.id, strategyId);
+            applyPromptUsageUpdate(prompt.id, response?.data?.prompt || null);
+          } catch (error) {
+            applyPromptUsageUpdate(prompt.id);
+            console.warn('[PromptLibrary] Failed to mark bulk prompt usage:', error?.response?.data || error?.message);
+          }
+        })
+      ).then(() => {
+        if (typeof onPromptUsageUpdated === 'function') {
+          onPromptUsageUpdated();
+        }
+      });
+    }
+
     navigate('/bulk-generation', {
       state: {
         bulkGenerationSeed: seed,
@@ -369,18 +465,45 @@ const PromptLibrary = ({ strategyId, strategyExtraContext = '', fromAnalysis = f
     });
   };
 
-  const handleGeneratePrompt = (prompt) => {
+  const applyPromptUsageUpdate = (promptId, usageData = null) => {
+    setPrompts((prev) =>
+      prev.map((item) => {
+        if (item.id !== promptId) return item;
+
+        if (usageData && typeof usageData === 'object') {
+          return {
+            ...item,
+            usage_count: Number(usageData.usage_count || item.usage_count || 0),
+            last_used_at: usageData.last_used_at || new Date().toISOString(),
+          };
+        }
+
+        return {
+          ...item,
+          usage_count: Number(item.usage_count || 0) + 1,
+          last_used_at: new Date().toISOString(),
+        };
+      })
+    );
+  };
+
+  const handleGeneratePrompt = async (prompt) => {
     const variables = parseVariables(prompt.variables);
     const cleanedPrompt = cleanPromptText(prompt.prompt_text);
     const recommendedFormat =
       typeof variables.recommended_format === 'string'
         ? variables.recommended_format.trim().toLowerCase()
         : 'single_post';
-    const mergedPrompt = buildMergedPromptText(cleanedPrompt, variables);
+    const mergedPrompt = buildMergedPromptText(cleanedPrompt, variables, strategyExtraContext);
+    const finalPrompt = String(mergedPrompt || cleanedPrompt || variables?.instruction || '').trim();
+    if (!finalPrompt) {
+      toast.error('This prompt is empty. Please regenerate prompts and try again.');
+      return;
+    }
 
     const payload = {
       id: prompt.id,
-      text: mergedPrompt,
+      text: finalPrompt,
       category: prompt.category || 'general',
       source: 'strategy_library',
       recommendedFormat,
@@ -388,9 +511,24 @@ const PromptLibrary = ({ strategyId, strategyExtraContext = '', fromAnalysis = f
     };
 
     // Backward compatible fallback for older compose flows
-    localStorage.setItem('composerPrompt', mergedPrompt);
+    localStorage.setItem('composerPrompt', finalPrompt);
     localStorage.setItem('composerPromptPayload', JSON.stringify(payload));
     markPromptGenerated(prompt.id);
+
+    if (strategyId && prompt?.id) {
+      try {
+        const response = await strategyApi.markPromptUsed(prompt.id, strategyId);
+        applyPromptUsageUpdate(prompt.id, response?.data?.prompt || null);
+        if (typeof onPromptUsageUpdated === 'function') {
+          onPromptUsageUpdated();
+        }
+      } catch (error) {
+        applyPromptUsageUpdate(prompt.id);
+        console.warn('[PromptLibrary] Failed to mark prompt usage:', error?.response?.data || error?.message);
+      }
+    } else {
+      applyPromptUsageUpdate(prompt.id);
+    }
 
     navigate('/compose', {
       state: {
@@ -463,6 +601,9 @@ const PromptLibrary = ({ strategyId, strategyExtraContext = '', fromAnalysis = f
             </div>
             <div className="px-3 py-1.5 bg-white rounded-lg border border-gray-200 text-sm text-gray-700">
               <span className="font-semibold text-emerald-700">{promptStats.generated}</span> generated
+            </div>
+            <div className="px-3 py-1.5 bg-white rounded-lg border border-gray-200 text-sm text-gray-700">
+              <span className="font-semibold text-indigo-700">{promptStats.contentPlanUsed}</span> used in content plan
             </div>
           </div>
         </div>
@@ -565,7 +706,8 @@ const PromptLibrary = ({ strategyId, strategyExtraContext = '', fromAnalysis = f
             typeof variables.idea_title === 'string' ? cleanPromptText(variables.idea_title) : '';
           const angle = typeof variables.angle === 'string' ? cleanPromptText(variables.angle) : '';
           const cta = typeof variables.cta === 'string' ? cleanPromptText(variables.cta) : '';
-          const hasGenerated = generatedPromptIds.includes(prompt.id) || Number(prompt.usage_count) > 0;
+          const usedInContentPlan = contentPlanPromptIdSet.has(prompt.id);
+          const hasGenerated = generatedPromptIds.includes(prompt.id) || Number(prompt.usage_count) > 0 || usedInContentPlan;
           const isSelected = selectedPromptIds.includes(prompt.id);
 
           return (
@@ -649,11 +791,25 @@ const PromptLibrary = ({ strategyId, strategyExtraContext = '', fromAnalysis = f
                     <CheckCircle2 className="w-4 h-4" />
                     Used {prompt.usage_count} {prompt.usage_count === 1 ? 'time' : 'times'}
                   </div>
+                  {usedInContentPlan && (
+                    <div className="flex items-center gap-2 text-xs text-indigo-700 bg-indigo-50 px-2 py-1 rounded-lg font-medium border border-indigo-200">
+                      <CheckCircle2 className="w-4 h-4" />
+                      Used in Content Plan
+                    </div>
+                  )}
                   {prompt.performance_score > 0 && (
                     <span className="text-xs text-green-600 font-medium bg-green-50 px-2 py-1 rounded-lg">
                       {prompt.performance_score}% performance
                     </span>
                   )}
+                </div>
+              )}
+              {prompt.usage_count <= 0 && usedInContentPlan && (
+                <div className="flex items-center gap-2 mb-4 flex-wrap">
+                  <div className="flex items-center gap-2 text-xs text-indigo-700 bg-indigo-50 px-2 py-1 rounded-lg font-medium border border-indigo-200">
+                    <CheckCircle2 className="w-4 h-4" />
+                    Used in Content Plan
+                  </div>
                 </div>
               )}
 

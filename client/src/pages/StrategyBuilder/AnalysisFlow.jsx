@@ -12,6 +12,7 @@ import {
   Zap,
   BookOpen,
 } from 'lucide-react';
+import toast from 'react-hot-toast';
 import { profileAnalysis as analysisApi } from '../../utils/api';
 import { useAccount } from '../../contexts/AccountContext';
 
@@ -218,6 +219,35 @@ const fallbackTopicsFromContext = (analysis = {}) => {
   return ['linkedin strategy', 'content marketing', 'audience growth'];
 };
 
+const fileToBase64 = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const raw = String(reader.result || '');
+      const base64 = raw.includes(',') ? raw.split(',').pop() : raw;
+      resolve(base64 || '');
+    };
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+
+const getPdfConfidenceMeta = (confidenceRaw = '', extractionSource = 'unknown') => {
+  const confidence = String(confidenceRaw || '').toLowerCase().trim();
+  if (confidence === 'high') {
+    return { label: 'High', dotClass: 'bg-green-500', textClass: 'text-green-700' };
+  }
+  if (confidence === 'medium') {
+    return { label: 'Medium', dotClass: 'bg-amber-500', textClass: 'text-amber-700' };
+  }
+  if (confidence === 'low') {
+    return { label: 'Low', dotClass: 'bg-red-500', textClass: 'text-red-700' };
+  }
+  if (String(extractionSource || '').toLowerCase() === 'local_fallback') {
+    return { label: 'Low (fallback)', dotClass: 'bg-red-500', textClass: 'text-red-700' };
+  }
+  return { label: 'Unknown', dotClass: 'bg-gray-400', textClass: 'text-gray-600' };
+};
+
 const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
   const { selectedAccount, getCurrentAccountId } = useAccount();
   const [phase, setPhase] = useState('welcome'); // welcome | loading | confirm | reference | generating | done
@@ -244,11 +274,20 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
   const [userContext, setUserContext] = useState('');
   const [deeperUrl, setDeeperUrl] = useState('');
   const [deeperContext, setDeeperContext] = useState('');
+  const [isUploadingLinkedinPdf, setIsUploadingLinkedinPdf] = useState(false);
+  const [linkedinPdfFilename, setLinkedinPdfFilename] = useState('');
+  const [linkedinPdfDiscoveries, setLinkedinPdfDiscoveries] = useState(null);
+  const [linkedinPdfError, setLinkedinPdfError] = useState('');
+  const [linkedinPdfWarning, setLinkedinPdfWarning] = useState('');
   const scrollRef = useRef(null);
+  const linkedinPdfInputRef = useRef(null);
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [confirmStep, phase]);
+  const pdfConfidenceMeta = linkedinPdfDiscoveries
+    ? getPdfConfidenceMeta(linkedinPdfDiscoveries.confidence, linkedinPdfDiscoveries.extractionSource)
+    : null;
 
   // Welcome screen
   if (phase === 'welcome') {
@@ -293,15 +332,117 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
               />
               <p className="text-xs text-gray-400 mt-1">{userContext.length}/300</p>
             </div>
+
+            <div>
+              <label className="text-sm font-medium text-gray-700">
+                LinkedIn profile PDF
+                <span className="text-gray-400 font-normal ml-1">(optional fallback)</span>
+              </label>
+              <p className="text-xs text-gray-400 mt-1">
+                If LinkedIn API blocks profile fields, upload your LinkedIn profile PDF export and we will extract about, skills, and experience.
+              </p>
+              <input
+                ref={linkedinPdfInputRef}
+                type="file"
+                accept="application/pdf,.pdf"
+                onChange={handleLinkedinPdfFileChange}
+                className="mt-2 w-full text-sm text-gray-700 file:mr-3 file:px-3 file:py-2 file:rounded-lg file:border file:border-gray-300 file:bg-white file:text-gray-700 hover:file:bg-gray-50"
+              />
+              {isUploadingLinkedinPdf && (
+                <p className="text-xs text-blue-600 mt-2 inline-flex items-center gap-1">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  Processing PDF...
+                </p>
+              )}
+              {linkedinPdfError && (
+                <p className="text-xs text-red-600 mt-2">{linkedinPdfError}</p>
+              )}
+              {linkedinPdfWarning && !linkedinPdfError && (
+                <p className="text-xs text-amber-700 mt-2">{linkedinPdfWarning}</p>
+              )}
+              {linkedinPdfDiscoveries && (
+                <div className="mt-3 rounded-lg border border-green-200 bg-green-50 p-3 text-left">
+                  <p className="text-xs font-semibold text-green-800 mb-1 inline-flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    Extraction complete
+                  </p>
+                  <p className="text-xs text-green-700">
+                    File: {linkedinPdfFilename || 'uploaded.pdf'}
+                  </p>
+                  <p className="text-xs text-green-700">
+                    About: {linkedinPdfDiscoveries.about ? 'found' : 'not found'} | Skills: {linkedinPdfDiscoveries.skills?.length || 0} | Experience: {linkedinPdfDiscoveries.experience ? 'found' : 'not found'}
+                  </p>
+                  <div className="mt-1 flex items-center gap-3">
+                    <span className={`text-xs font-medium inline-flex items-center gap-1 ${pdfConfidenceMeta?.textClass || 'text-gray-600'}`}>
+                      <span className={`w-2 h-2 rounded-full ${pdfConfidenceMeta?.dotClass || 'bg-gray-400'}`} />
+                      Confidence: {pdfConfidenceMeta?.label || 'Unknown'}
+                    </span>
+                    <span className="text-xs text-green-700">
+                      Source: {linkedinPdfDiscoveries.extractionSource || 'unknown'}
+                    </span>
+                  </div>
+                  {linkedinPdfDiscoveries.about && (
+                    <p className="text-xs text-green-700 mt-1">
+                      About preview: {linkedinPdfDiscoveries.about.slice(0, 140)}{linkedinPdfDiscoveries.about.length > 140 ? '...' : ''}
+                    </p>
+                  )}
+                  {(linkedinPdfDiscoveries.skills || []).length > 0 && (
+                    <div className="mt-2">
+                      <p className="text-xs text-green-700 mb-1">Skills</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {linkedinPdfDiscoveries.skills.slice(0, 10).map((skill) => (
+                          <span
+                            key={skill}
+                            className="text-[11px] px-2 py-0.5 rounded-full bg-white border border-green-200 text-green-800"
+                          >
+                            {skill}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {linkedinPdfDiscoveries.experience && (
+                    <p className="text-xs text-green-700 mt-1">
+                      Experience preview: {linkedinPdfDiscoveries.experience.slice(0, 140)}{linkedinPdfDiscoveries.experience.length > 140 ? '...' : ''}
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLinkedinPdfDiscoveries(null);
+                      setLinkedinPdfFilename('');
+                      setLinkedinPdfError('');
+                      setLinkedinPdfWarning('');
+                      if (linkedinPdfInputRef.current) {
+                        linkedinPdfInputRef.current.value = '';
+                      }
+                    }}
+                    className="mt-2 text-xs text-green-800 underline"
+                  >
+                    Remove uploaded PDF
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
           
           <div className="flex justify-center">
             <button
               onClick={() => startAnalysis()}
-              className="inline-flex items-center justify-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-xl font-semibold hover:bg-blue-700 transition-colors"
+              disabled={isUploadingLinkedinPdf}
+              className="inline-flex items-center justify-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-xl font-semibold hover:bg-blue-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <Search className="w-5 h-5" />
-              Analyse my account
+              {isUploadingLinkedinPdf ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  Processing PDF...
+                </>
+              ) : (
+                <>
+                  <Search className="w-5 h-5" />
+                  Analyse my account
+                </>
+              )}
             </button>
           </div>
           <p className="text-xs text-gray-400 mt-4">Uses 5 credits for analysis + 10 for prompt generation</p>
@@ -321,6 +462,7 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
             <p className="text-sm font-medium text-blue-900 mb-2">Sources included in this run</p>
             <ul className="text-sm text-blue-700 space-y-1">
               <li>- LinkedIn posts and profile signals</li>
+              {linkedinPdfDiscoveries && <li>- Uploaded LinkedIn profile PDF discoveries</li>}
               {portfolioUrl && <li>- Portfolio or website context</li>}
               {userContext && <li>- Additional context you entered</li>}
             </ul>
@@ -428,11 +570,11 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
     {
       key: 'niche',
       title: 'Your niche',
-      description: portfolioUrl || userContext 
+      description: portfolioUrl || userContext || linkedinPdfDiscoveries
         ? 'Based on your LinkedIn activity, portfolio, and context:'
         : 'Based on your LinkedIn activity, your niche looks like:',
       value: analysisData?.niche || '',
-      badge: `Based on ${tweetsAnalysed} posts analysed${portfolioUrl ? ' + portfolio' : ''}${userContext ? ' + your context' : ''}`,
+      badge: `Based on ${tweetsAnalysed} posts analysed${portfolioUrl ? ' + portfolio' : ''}${linkedinPdfDiscoveries ? ' + LinkedIn profile PDF' : ''}${userContext ? ' + your context' : ''}`,
     },
     {
       key: 'audience',
@@ -1245,6 +1387,7 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
         selectedAccountType,
         hasPortfolioUrl: Boolean(String(portfolioUrl || '').trim()),
         hasUserContext: Boolean(String(userContext || '').trim()),
+        hasLinkedinPdfDiscoveries: Boolean(linkedinPdfDiscoveries),
       });
 
       // Start the API call
@@ -1328,6 +1471,65 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
       advanceConfirmStep();
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to save. Please try again.');
+    }
+  }
+
+  async function handleLinkedinPdfFileChange(event) {
+    const file = event?.target?.files?.[0];
+    if (!file) return;
+
+    setLinkedinPdfError('');
+    setLinkedinPdfWarning('');
+    if (file.size > 8 * 1024 * 1024) {
+      setLinkedinPdfError('PDF too large. Please upload a file under 8MB.');
+      event.target.value = '';
+      return;
+    }
+    const lowerName = String(file.name || '').toLowerCase();
+    const type = String(file.type || '').toLowerCase();
+    if (!lowerName.endsWith('.pdf') && type && !type.includes('pdf')) {
+      setLinkedinPdfError('Only PDF files are supported.');
+      event.target.value = '';
+      return;
+    }
+
+    setIsUploadingLinkedinPdf(true);
+    try {
+      const base64 = await fileToBase64(file);
+      const response = await analysisApi.uploadLinkedinProfilePdf(strategyId, {
+        base64,
+        filename: file.name || 'linkedin-profile.pdf',
+        mimetype: file.type || 'application/pdf',
+      });
+      const warning = String(response?.data?.warning || '').trim();
+      const discoveries = response?.data?.discoveries || {};
+      setLinkedinPdfFilename(discoveries.filename || file.name || 'linkedin-profile.pdf');
+      setLinkedinPdfDiscoveries({
+        about: String(discoveries.about || '').trim(),
+        skills: Array.isArray(discoveries.skills) ? discoveries.skills : [],
+        experience: String(discoveries.experience || '').trim(),
+        confidence: String(discoveries.confidence || '').trim(),
+        notes: String(discoveries.notes || '').trim(),
+        textLength: Number(discoveries.textLength || 0),
+        extractionSource: String(discoveries.extractionSource || '').trim() || 'unknown',
+      });
+      setLinkedinPdfWarning(warning);
+      console.log('[AnalysisFlow] LinkedIn profile PDF uploaded', {
+        strategyId,
+        filename: discoveries.filename || file.name || null,
+        hasAbout: Boolean(String(discoveries.about || '').trim()),
+        skillsCount: Array.isArray(discoveries.skills) ? discoveries.skills.length : 0,
+        hasExperience: Boolean(String(discoveries.experience || '').trim()),
+        warning: warning || null,
+      });
+    } catch (err) {
+      setLinkedinPdfDiscoveries(null);
+      setLinkedinPdfFilename('');
+      setLinkedinPdfError(err?.response?.data?.error || err?.message || 'Failed to process uploaded PDF.');
+      setLinkedinPdfWarning('');
+    } finally {
+      setIsUploadingLinkedinPdf(false);
+      event.target.value = '';
     }
   }
 
@@ -1430,6 +1632,7 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
 
   async function handleGeneratePrompts() {
     setError(null);
+    setIsGenerating(true);
 
     try {
       // Send additional context if provided
@@ -1440,16 +1643,21 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
         });
       }
 
-      // Start prompt generation in background (don't await)
-      analysisApi.generatePrompts(analysisId, strategyId).catch(err => {
-        console.error('[AnalysisFlow] Prompt generation failed:', err);
-      });
+      const response = await analysisApi.generatePrompts(analysisId, strategyId);
+      const contentPlan = response?.data?.contentPlan;
 
-      // Immediately redirect to strategy page to show prompts appearing
-      onComplete?.();
+      if (contentPlan?.warning) {
+        toast.error(contentPlan.warning);
+      } else {
+        toast.success('Prompt Pack and Content Plan generated.');
+      }
+
+      onComplete?.({ next: 'prompts', contentPlan });
     } catch (err) {
       console.error('[AnalysisFlow] Failed to start prompt generation:', err);
       setError(err.response?.data?.error || 'Failed to start prompt generation.');
+    } finally {
+      setIsGenerating(false);
     }
   }
 };

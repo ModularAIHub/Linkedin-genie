@@ -10,10 +10,61 @@ const PROMPT_TOPIC_STOP_WORDS = new Set([
   'add', 'unlock', 'precise', 'analysis', 'analysi', 'configured', 'yet', 'out',
 ]);
 const SHORT_TOPIC_ALLOWLIST = new Set(['ai', 'ux', 'ui', 'seo', 'api', 'b2b', 'b2c']);
+const LINKEDIN_PROMPT_TARGET_DEFAULT = 12;
+const LINKEDIN_PROMPT_TARGET_MIN = 11;
+const LINKEDIN_PROMPT_TARGET_MAX = 14;
+const PROMPT_REFILL_REGEN_THRESHOLD = 6;
+const PROMPT_FULL_REGEN_THRESHOLD = 10;
 
 class StrategyService {
   constructor() {
     this.productScope = 'linkedin-genie';
+  }
+
+  getLinkedinPromptTargetCount() {
+    const raw = Number.parseInt(
+      process.env.LINKEDIN_STRATEGY_PROMPT_TARGET || String(LINKEDIN_PROMPT_TARGET_DEFAULT),
+      10
+    );
+    const fallback = Number.isFinite(raw) ? raw : LINKEDIN_PROMPT_TARGET_DEFAULT;
+    return Math.max(LINKEDIN_PROMPT_TARGET_MIN, Math.min(LINKEDIN_PROMPT_TARGET_MAX, fallback));
+  }
+
+  getPromptRegenerationRecommendation({ usedPrompts = 0, totalPrompts = 0, targetCount = LINKEDIN_PROMPT_TARGET_DEFAULT } = {}) {
+    const used = Number(usedPrompts || 0);
+    const total = Number(totalPrompts || 0);
+    const target = Number(targetCount || LINKEDIN_PROMPT_TARGET_DEFAULT);
+    const unused = Math.max(0, total - used);
+
+    if (used >= PROMPT_FULL_REGEN_THRESHOLD || unused <= Math.max(2, Math.floor(target / 4))) {
+      return 'full';
+    }
+    if (used >= PROMPT_REFILL_REGEN_THRESHOLD) {
+      return 'partial';
+    }
+    return null;
+  }
+
+  async getPromptUsageStats(strategyId) {
+    const { rows } = await pool.query(
+      `SELECT
+         COUNT(*)::int AS total_prompts,
+         COUNT(*) FILTER (WHERE COALESCE(usage_count, 0) > 0)::int AS used_prompts,
+         COUNT(*) FILTER (WHERE COALESCE(usage_count, 0) = 0)::int AS unused_prompts,
+         COALESCE(SUM(COALESCE(usage_count, 0)), 0)::int AS total_usage,
+         MAX(last_used_at) AS last_used_at
+       FROM strategy_prompts
+       WHERE strategy_id = $1`,
+      [strategyId]
+    );
+    const row = rows[0] || {};
+    return {
+      total_prompts: Number(row.total_prompts || 0),
+      used_prompts: Number(row.used_prompts || 0),
+      unused_prompts: Number(row.unused_prompts || 0),
+      total_usage: Number(row.total_usage || 0),
+      last_used_at: row.last_used_at || null,
+    };
   }
 
   withProductScope(metadata = {}) {
@@ -480,103 +531,103 @@ class StrategyService {
     const templateBank = {
       educational: [
         (seed) => ({
-          prompt_text: `Create a myth-busting LinkedIn post for ${seed.audience} on "${seed.topicLabel}". Use this signal as proof: ${seed.insight}. Teach a 3-step framework that helps them ${seed.goalPhrase}.`,
-          instruction: `Hook with the wrong belief, teach the framework with one concrete example, then close with a measurable action for this week.`,
+          prompt_text: `Use ${seed.projectCue} as the case study. Bust one common myth about ${seed.topicLabel} for ${seed.audience}, then teach a 3-step framework grounded in ${seed.skillCue}. Proof signal: ${seed.insight}.`,
+          instruction: `Hook with the wrong belief, show what changed in your real workflow, then close with one measurable action for this week.`,
           recommended_format: 'single_post',
         }),
         (seed) => ({
-          prompt_text: `Write an educational teardown on "${seed.topicLabel}" for ${seed.audience}. Compare what most people do vs what actually works, using this context: ${seed.insight}.`,
-          instruction: `Use a before/after structure and include one benchmark readers can track in 7 days.`,
+          prompt_text: `Teardown prompt: compare the common ${seed.topicLabel} approach vs what you now run in ${seed.projectCue}. Audience: ${seed.audience}. Context: ${seed.insight}.`,
+          instruction: `Use before/after structure with one benchmark readers can track in 7 days.`,
           recommended_format: 'single_post',
         }),
         (seed) => ({
-          prompt_text: `Build a beginner-friendly explainer on "${seed.topicLabel}" focused on how to ${seed.goalPhrase}. Reference this trend/opportunity: ${seed.angleHint}.`,
-          instruction: `Use plain language, one real scenario, and a tight checklist readers can copy immediately.`,
+          prompt_text: `Build a beginner-friendly explainer on ${seed.topicLabel} using one real scenario from ${seed.projectCue}. Keep it focused on how ${seed.audience} can ${seed.goalPhrase}.`,
+          instruction: `Use plain language, one concrete scenario, and a checklist readers can copy immediately.`,
           recommended_format: 'carousel',
         }),
       ],
       engagement: [
         (seed) => ({
-          prompt_text: `Craft a comment-magnet post for ${seed.audience}: "What is your biggest blocker with ${seed.topicLabel.toLowerCase()} right now?" Anchor it to this observed signal: ${seed.insight}.`,
-          instruction: `Offer 2 concrete answer choices plus "other", then ask for specifics in the comments.`,
+          prompt_text: `Comment-magnet prompt: ask ${seed.audience} for their biggest blocker in ${seed.topicLabel.toLowerCase()}, then anchor it to what you observed in ${seed.projectCue}: ${seed.insight}.`,
+          instruction: `Offer 2 specific answer choices plus "other", then ask for details.`,
           recommended_format: 'question',
         }),
         (seed) => ({
-          prompt_text: `Create a poll about ${seed.topicLabel} for ${seed.audience} tied to how they can ${seed.goalPhrase}. Base the poll framing on: ${seed.angleHint}.`,
-          instruction: `Provide 4 realistic options and add one sentence explaining why the results matter.`,
+          prompt_text: `Poll prompt: "${seed.topicLabel} decision in ${seed.projectCue}" for ${seed.audience}. Frame it around: ${seed.angleHint}.`,
+          instruction: `Provide 4 realistic options and one sentence on why the result changes execution.`,
           recommended_format: 'poll',
         }),
         (seed) => ({
-          prompt_text: `Write an engagement post inviting ${seed.audience} to share one recent win in ${seed.topicLabel.toLowerCase()}. Connect the prompt to: ${seed.insight}.`,
-          instruction: `Open with a short personal observation, then ask a single question that is easy to answer.`,
+          prompt_text: `Engagement prompt: open with a quick field note from ${seed.projectCue}, then invite ${seed.audience} to share one recent win in ${seed.topicLabel.toLowerCase()}.`,
+          instruction: `Use one specific observation and then ask one focused question.`,
           recommended_format: 'question',
         }),
       ],
       storytelling: [
         (seed) => ({
-          prompt_text: `Write a founder-style story about fixing ${seed.topicLabel.toLowerCase()} to ${seed.goalPhrase}. Use this turning-point signal: ${seed.insight}.`,
-          instruction: `Structure as "situation -> mistake -> change -> outcome", and include one numeric result if possible.`,
+          prompt_text: `Founder story prompt: in ${seed.projectCue}, tell how you fixed ${seed.topicLabel.toLowerCase()} using ${seed.skillCue}. Turning-point signal: ${seed.insight}.`,
+          instruction: `Structure as situation -> mistake -> change -> outcome and include one numeric result.`,
           recommended_format: 'single_post',
         }),
         (seed) => ({
-          prompt_text: `Create a mini case-study post around ${seed.topicLabel.toLowerCase()} for ${seed.audience}. Use ${seed.angleHint} as the strategic angle.`,
-          instruction: `Include baseline, action taken, and the outcome. Keep each section concise and specific.`,
+          prompt_text: `Mini case-study prompt: for ${seed.audience}, break down one ${seed.topicLabel.toLowerCase()} decision from ${seed.projectCue}. Strategic angle: ${seed.angleHint}.`,
+          instruction: `Include baseline, action taken, and outcome with concrete details.`,
           recommended_format: 'single_post',
         }),
         (seed) => ({
-          prompt_text: `Tell a behind-the-scenes story showing how your workflow on ${seed.topicLabel.toLowerCase()} evolved after this insight: ${seed.insight}.`,
-          instruction: `Name one decision you changed and one practical lesson readers can apply today.`,
+          prompt_text: `Behind-the-scenes prompt: show how your ${seed.topicLabel.toLowerCase()} workflow in ${seed.projectCue} evolved after this insight: ${seed.insight}.`,
+          instruction: `Name one decision you changed and one practical lesson readers can run today.`,
           recommended_format: 'single_post',
         }),
       ],
       'tips & tricks': [
         (seed) => ({
-          prompt_text: `Create a practical checklist post on ${seed.topicLabel.toLowerCase()} for ${seed.audience}, designed to help them ${seed.goalPhrase}.`,
-          instruction: `List 5 steps in execution order. Each step must be specific and testable.`,
+          prompt_text: `Checklist prompt: extract the ${seed.topicLabel.toLowerCase()} workflow you use in ${seed.projectCue} and turn it into steps for ${seed.audience}.`,
+          instruction: `List 5 steps in execution order; each step must be specific and testable.`,
           recommended_format: 'single_post',
         }),
         (seed) => ({
-          prompt_text: `Write a "Do this / Avoid this" playbook for ${seed.topicLabel.toLowerCase()} using this observed pattern: ${seed.insight}.`,
-          instruction: `Provide 3 do/avoid pairs with a one-line rationale under each pair.`,
+          prompt_text: `Playbook prompt: "Do this / avoid this" for ${seed.topicLabel.toLowerCase()}, based on what ${seed.projectCue} revealed: ${seed.insight}.`,
+          instruction: `Provide 3 do/avoid pairs with one-line rationale under each pair.`,
           recommended_format: 'carousel',
         }),
         (seed) => ({
-          prompt_text: `Build a tactical post with 3 fast wins for ${seed.audience} on ${seed.topicLabel.toLowerCase()}. Tie each win to how they can ${seed.goalPhrase}.`,
-          instruction: `Each win should include action + expected outcome + common mistake to avoid.`,
+          prompt_text: `Tactical prompt: 3 fast wins on ${seed.topicLabel.toLowerCase()} for ${seed.audience}, each pulled from your ${seed.projectCue} execution notes.`,
+          instruction: `Each win should include action + expected outcome + common mistake.`,
           recommended_format: 'single_post',
         }),
       ],
       promotional: [
         (seed) => ({
-          prompt_text: `Write a value-first LinkedIn post showing how a repeatable ${seed.topicLabel.toLowerCase()} workflow helps ${seed.audience} ${seed.goalPhrase}.`,
-          instruction: `Deliver 80% actionable value before mentioning your product/service. Keep the CTA soft.`,
+          prompt_text: `Value-first prompt: show how the ${seed.topicLabel.toLowerCase()} workflow inside ${seed.projectCue} helps ${seed.audience} ${seed.goalPhrase}.`,
+          instruction: `Deliver 80% actionable value before mentioning product/service, with one concrete outcome.`,
           recommended_format: 'single_post',
         }),
         (seed) => ({
-          prompt_text: `Create a use-case post: how your approach solves ${seed.topicLabel.toLowerCase()} better. Support the angle with this signal: ${seed.insight}.`,
-          instruction: `Include one practical use case and one outcome. Mention your offer in one short paragraph.`,
+          prompt_text: `Use-case prompt: explain how your ${seed.skillCue}-driven approach solves ${seed.topicLabel.toLowerCase()} better in ${seed.projectCue}. Signal: ${seed.insight}.`,
+          instruction: `Include one practical use case + one outcome, then mention your offer briefly.`,
           recommended_format: 'single_post',
         }),
         (seed) => ({
-          prompt_text: `Write a "problem -> method -> result" post around ${seed.topicLabel.toLowerCase()} aimed at ${seed.audience}.`,
-          instruction: `Keep the post educational, then end with a single CTA for a demo/template.`,
+          prompt_text: `Problem -> method -> result prompt for ${seed.audience}: center it on ${seed.topicLabel.toLowerCase()} and what you changed in ${seed.projectCue}.`,
+          instruction: `Keep it educational and close with one CTA for a demo/template.`,
           recommended_format: 'single_post',
         }),
       ],
       inspirational: [
         (seed) => ({
-          prompt_text: `Write a belief-shift post for ${seed.audience}: why mastering ${seed.topicLabel.toLowerCase()} is less about talent and more about process.`,
-          instruction: `Use one relatable struggle, one reframe, and one action challenge readers can do today.`,
+          prompt_text: `Belief-shift prompt for ${seed.audience}: why mastering ${seed.topicLabel.toLowerCase()} in real products like ${seed.projectCue} is process-driven, not talent-driven.`,
+          instruction: `Use one struggle, one reframe, and one action challenge readers can do today.`,
           recommended_format: 'single_post',
         }),
         (seed) => ({
-          prompt_text: `Create a motivation-meets-practicality post around ${seed.topicLabel.toLowerCase()} and how to ${seed.goalPhrase}. Use this lens: ${seed.angleHint}.`,
-          instruction: `Avoid generic hype. Include one concrete behavior change for the next 7 days.`,
+          prompt_text: `Motivation + practicality prompt: around ${seed.topicLabel.toLowerCase()}, show how ${seed.projectCue} taught you to ${seed.goalPhrase}. Lens: ${seed.angleHint}.`,
+          instruction: `Avoid hype. Include one concrete behavior change for the next 7 days.`,
           recommended_format: 'single_post',
         }),
         (seed) => ({
-          prompt_text: `Write an encouragement post that reframes setbacks in ${seed.topicLabel.toLowerCase()} using this signal: ${seed.insight}.`,
-          instruction: `Close with a reflective CTA that invites readers to share what they will try next.`,
+          prompt_text: `Encouragement prompt: reframe setbacks in ${seed.topicLabel.toLowerCase()} using this field signal from ${seed.projectCue}: ${seed.insight}.`,
+          instruction: `Close with a reflective CTA asking what readers will try next.`,
           recommended_format: 'single_post',
         }),
       ],
@@ -624,12 +675,12 @@ class StrategyService {
       const fillersNeeded = desiredCount - templates.length;
       for (let index = 0; index < fillersNeeded; index += 1) {
         const seed = ideaSeeds[(templates.length + index) % ideaSeeds.length];
-        const promptText = `Write a practical LinkedIn post for ${seed.audience} on ${seed.topicLabel.toLowerCase()} that helps them ${seed.goalPhrase}. Use this signal: ${seed.insight}.`;
+        const promptText = `Use ${seed.projectCue} as evidence and draft a concrete ${seed.topicLabel.toLowerCase()} post for ${seed.audience} to ${seed.goalPhrase}. Include this signal: ${seed.insight}.`;
         templates.push({
           category: categories[(templates.length + index) % categories.length],
           prompt_text: promptText,
           variables: {
-            instruction: 'Use hook -> insight -> action -> CTA structure and keep it specific.',
+            instruction: `Use hook -> insight -> action -> CTA, and reference ${seed.skillCue} or another named tool from your stack.`,
             recommended_format: 'single_post',
             goal: seed.goal,
             idea_title: seed.ideaTitle,
@@ -744,9 +795,57 @@ class StrategyService {
       metadata?.analysis_cache && typeof metadata.analysis_cache === 'object' && !Array.isArray(metadata.analysis_cache)
         ? metadata.analysis_cache
         : {};
+    const contextVault =
+      metadata?.context_vault && typeof metadata.context_vault === 'object' && !Array.isArray(metadata.context_vault)
+        ? metadata.context_vault
+        : {};
+    const profileAbout = String(
+      metadata.linkedin_about ||
+        metadata.portfolio_about ||
+        contextVault.about_preview ||
+        ''
+    ).trim();
+    const profileExperience = String(
+      metadata.linkedin_experience ||
+        metadata.portfolio_experience ||
+        contextVault.experience_preview ||
+        ''
+    ).trim();
+    const topSkills = this.normalizeAndDedupe(
+      [
+        ...(Array.isArray(metadata.linkedin_skills) ? metadata.linkedin_skills : []),
+        ...(Array.isArray(metadata.portfolio_skills) ? metadata.portfolio_skills : []),
+        ...(Array.isArray(contextVault.top_skills) ? contextVault.top_skills : []),
+      ],
+      14,
+      64
+    );
+    const projectSignals = this.extractProjectSignals(
+      [
+        metadata.portfolio_title,
+        metadata.portfolio_url,
+        profileAbout,
+        profileExperience,
+        metadata.extra_context,
+      ],
+      10
+    );
 
     const gapMap = Array.isArray(analysisCache.gap_map) ? analysisCache.gap_map : [];
     const trending = Array.isArray(analysisCache.trending_topics) ? analysisCache.trending_topics : [];
+    const vaultWinningTopics = this.normalizeTopicList(
+      Array.isArray(contextVault.winning_topics) ? contextVault.winning_topics : [],
+      8
+    );
+    const vaultUnderusedTopics = this.normalizeTopicList(
+      Array.isArray(contextVault.underused_topics) ? contextVault.underused_topics : [],
+      8
+    );
+    const vaultVoiceSignals = this.normalizeAndDedupe(
+      Array.isArray(contextVault.voice_signals) ? contextVault.voice_signals : [],
+      8,
+      160
+    );
     const strengths = this.normalizeAndDedupe(
       Array.isArray(analysisCache?.strengths) ? analysisCache.strengths : [],
       8,
@@ -773,17 +872,24 @@ class StrategyService {
       8
     );
     const trendingTopics = this.normalizeTopicList(
-      trending.map((item) => (typeof item === 'string' ? item : item?.topic)),
+      [
+        ...trending.map((item) => (typeof item === 'string' ? item : item?.topic)),
+        ...vaultWinningTopics,
+      ],
       8
     );
     const strategyTopics = this.normalizeTopicList(Array.isArray(strategy?.topics) ? strategy.topics : [], 12);
 
     const priorityTopics = this.normalizeTopicList(
-      [...gapTopics, ...trendingTopics, ...strategyTopics, strategy?.niche || ''],
-      14
+      [...gapTopics, ...trendingTopics, ...vaultUnderusedTopics, ...strategyTopics, strategy?.niche || ''],
+      16
     );
 
-    const angleHints = this.normalizeAndDedupe([...nextAngles, ...opportunities, ...gaps], 12, 180);
+    const angleHints = this.normalizeAndDedupe(
+      [...nextAngles, ...opportunities, ...gaps, ...vaultVoiceSignals],
+      14,
+      180
+    );
 
     const audience = String(strategy?.target_audience || '').trim();
     const niche = String(strategy?.niche || '').trim();
@@ -804,6 +910,13 @@ class StrategyService {
       opportunities,
       nextAngles,
       angleHints,
+      projectSignals,
+      topSkills,
+      profileAbout: this.sanitizeInsight(profileAbout, 300),
+      profileExperience: this.sanitizeInsight(profileExperience, 300),
+      vaultWinningTopics,
+      vaultUnderusedTopics,
+      vaultVoiceSignals,
       gapMap: gapMap
         .map((item) => ({
           topic: this.normalizeTopicCandidate(item?.topic || ''),
@@ -853,6 +966,59 @@ class StrategyService {
     return `${(lastSpace > 24 ? sliced.slice(0, lastSpace) : sliced).trim()}...`;
   }
 
+  extractProjectSignals(values = [], limit = 8) {
+    const pool = Array.isArray(values) ? values : [values];
+    const extracted = [];
+    const blacklist = new Set([
+      'portfolio',
+      'linkedin',
+      'resume',
+      'profile',
+      'professional experience',
+      'skills',
+      'personal growth',
+    ]);
+
+    for (const value of pool) {
+      const text = this.sanitizeInsight(value, 500);
+      if (!text) continue;
+
+      const domainMatches = text.match(/\b(?:https?:\/\/)?(?:www\.)?([a-z0-9][a-z0-9-]{1,30})\.(?:in|com|io|app|dev|me)\b/gi) || [];
+      for (const match of domainMatches) {
+        const normalized = String(match || '')
+          .replace(/^https?:\/\//i, '')
+          .replace(/^www\./i, '')
+          .split('.')[0]
+          .replace(/-/g, ' ')
+          .trim();
+        if (!normalized) continue;
+        if (blacklist.has(normalized.toLowerCase())) continue;
+        extracted.push(normalized);
+      }
+
+      const actionPattern =
+        /\b(?:building|built|launching|launched|shipping|shipped|founded|founder of|working on|maintaining)\s+([A-Za-z0-9][A-Za-z0-9.\-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.\-]*){0,3})/gi;
+      for (const match of text.matchAll(actionPattern)) {
+        const candidate = String(match?.[1] || '').trim();
+        if (!candidate) continue;
+        if (blacklist.has(candidate.toLowerCase())) continue;
+        extracted.push(candidate);
+      }
+
+      for (const explicit of ['SuiteGenie', 'Anicafe', 'Sparklehood', 'Fotographiya']) {
+        if (new RegExp(`\\b${explicit}\\b`, 'i').test(text)) {
+          extracted.push(explicit);
+        }
+      }
+    }
+
+    return this.normalizeAndDedupe(
+      extracted.map((item) => item.replace(/\s+/g, ' ').trim()),
+      limit,
+      60
+    );
+  }
+
   formatGoalPhrase(value = '') {
     const goal = String(value || '').trim();
     if (!goal) return 'improve results';
@@ -898,11 +1064,28 @@ class StrategyService {
       Math.max(12, desiredCount),
       160
     );
+    const projectPool = this.normalizeAndDedupe(
+      Array.isArray(signals?.projectSignals) ? signals.projectSignals : [],
+      12,
+      60
+    );
+    const skillPool = this.normalizeAndDedupe(
+      Array.isArray(signals?.topSkills) ? signals.topSkills : [],
+      16,
+      48
+    );
+    const profileContextPool = this.normalizeAndDedupe(
+      [signals?.profileAbout, signals?.profileExperience].filter(Boolean),
+      4,
+      220
+    );
     const fallbackGoal = goals[0] || 'build authority';
     const fallbackTopic = topicPool[0] || this.normalizeTopicCandidate(niche) || 'content strategy';
     const fallbackInsight =
       insightPool[0] ||
       `Position around ${fallbackTopic} with one clear, practical workflow your audience can apply this week.`;
+    const fallbackProject = projectPool[0] || this.toDisplayLabel(niche) || 'your current project';
+    const fallbackSkill = skillPool[0] || this.toDisplayLabel(fallbackTopic) || 'your stack';
 
     const seeds = [];
     const seedCount = Math.max(desiredCount, 18);
@@ -922,11 +1105,14 @@ class StrategyService {
       const goalLabel = this.toDisplayLabel(goal) || goal;
       const gapScore = gapEntry?.score && Number(gapEntry.score) > 0 ? Number(gapEntry.score) : null;
       const gapReason = this.sanitizeInsight(gapEntry?.reason || '', 160);
+      const projectCue = projectPool[index % Math.max(projectPool.length, 1)] || fallbackProject;
+      const skillCue = skillPool[index % Math.max(skillPool.length, 1)] || fallbackSkill;
+      const profileCue = profileContextPool[index % Math.max(profileContextPool.length, 1)] || '';
 
       const hashtagSet = new Set([
         this.toHashtag(topic),
-        this.toHashtag(goal),
-        this.toHashtag(niche),
+        this.toHashtag(skillCue),
+        this.toHashtag(projectCue),
       ]);
       const hashtagsHint = Array.from(hashtagSet).filter(Boolean).slice(0, 3).join(' ');
 
@@ -942,16 +1128,16 @@ class StrategyService {
         angleHint: this.sanitizeInsight(angleHint, 160),
         gapScore,
         gapReason,
-        ideaTitle:
-          gapScore && gapReason
-            ? `${topicLabel}: close a ${gapScore}% gap`
-            : `${topicLabel}: win ${goalLabel.toLowerCase()}`,
+        projectCue,
+        skillCue,
+        profileCue,
+        ideaTitle: `${topicLabel}: ${this.toDisplayLabel(projectCue).toLowerCase()} field note`,
         cta:
           index % 3 === 0
-            ? 'Ask readers to comment "playbook" to get the template.'
+            ? 'Ask readers to comment "template" if they want your exact checklist.'
             : index % 3 === 1
-              ? 'Ask readers to reply with their biggest blocker so you can share a follow-up breakdown.'
-              : 'Invite readers to save this post and apply one step in the next 24 hours.',
+              ? 'Ask readers to reply with their blocker so you can share a follow-up breakdown.'
+              : 'Invite readers to save this and run one step in the next 24 hours.',
         hashtagsHint,
       });
     }
@@ -974,6 +1160,9 @@ class StrategyService {
       /^give tips\b/,
       /\bshare tips on\b/,
       /\bpost about\b/,
+      /\bgrow followers\b/,
+      /\bclose a \d+% gap\b/,
+      /\bfor your audience\b/,
     ];
     if (genericPatterns.some((pattern) => pattern.test(cleaned))) {
       return true;
@@ -1736,7 +1925,7 @@ Format: Just list topics separated by commas, no formatting.`;
     }
 
     try {
-      const desiredCount = 36;
+      const desiredCount = this.getLinkedinPromptTargetCount();
       const signalBundle = this.buildPromptSignalBundle(strategy);
       const compactGapMap = signalBundle.gapMap
         .slice(0, 6)
@@ -1783,6 +1972,10 @@ Format: Just list topics separated by commas, no formatting.`;
         `Tone: ${strategy.tone_style || ''}`,
         `Topics: ${(strategy.topics || []).join(', ')}`,
         `Priority topics from analysis: ${signalBundle.priorityTopics.join(', ') || 'none'}`,
+        `Key projects/products to anchor examples: ${signalBundle.projectSignals.join(', ') || 'none'}`,
+        `Top skills/tools to anchor execution details: ${signalBundle.topSkills.join(', ') || 'none'}`,
+        `Profile about evidence: ${signalBundle.profileAbout || 'none'}`,
+        `Profile experience evidence: ${signalBundle.profileExperience || 'none'}`,
         `Gap map (topic, score): ${compactGapMap || 'none'}`,
         `Trending topics from analysis: ${signalBundle.trendingTopics.join(', ') || 'none'}`,
         `Strengths from analysis: ${signalBundle.strengths.join(' | ') || 'none'}`,
@@ -1875,6 +2068,17 @@ Format: Just list topics separated by commas, no formatting.`;
         ...(strategy.metadata && typeof strategy.metadata === 'object' && !Array.isArray(strategy.metadata) ? strategy.metadata : {}),
         prompts_stale: false,
         prompts_stale_at: null,
+        prompts_refresh_recommendation: null,
+        prompts_usage_snapshot: {
+          total_prompts: insertedPrompts.length,
+          used_prompts: 0,
+          unused_prompts: insertedPrompts.length,
+          total_usage: 0,
+          target_count: desiredCount,
+          refill_threshold: PROMPT_REFILL_REGEN_THRESHOLD,
+          full_threshold: PROMPT_FULL_REGEN_THRESHOLD,
+          updated_at: new Date().toISOString(),
+        },
         prompts_last_generated_at: new Date().toISOString(),
       };
 
@@ -2025,6 +2229,90 @@ Format: Just list topics separated by commas, no formatting.`;
       [promptId]
     );
     return rows[0];
+  }
+
+  async markPromptUsed(promptId, userId, options = {}) {
+    const strategyIdFilter = options?.strategyId || null;
+    const { rows: promptRows } = await pool.query(
+      `SELECT
+         p.*,
+         s.id AS strategy_owner_id,
+         s.user_id AS strategy_user_id,
+         s.metadata AS strategy_metadata
+       FROM strategy_prompts p
+       INNER JOIN user_strategies s ON s.id = p.strategy_id
+       WHERE p.id = $1
+         AND s.user_id = $2
+         AND COALESCE(s.metadata->>'product', '') = $3
+         AND ($4::text IS NULL OR p.strategy_id::text = $4::text)
+       LIMIT 1`,
+      [promptId, userId, this.productScope, strategyIdFilter]
+    );
+
+    const promptRow = promptRows[0];
+    if (!promptRow) {
+      throw new Error('Prompt not found');
+    }
+
+    const { rows: updatedPromptRows } = await pool.query(
+      `UPDATE strategy_prompts
+       SET usage_count = COALESCE(usage_count, 0) + 1,
+           last_used_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [promptId]
+    );
+    const updatedPrompt = updatedPromptRows[0];
+
+    const usageStats = await this.getPromptUsageStats(promptRow.strategy_id);
+    const targetCount = this.getLinkedinPromptTargetCount();
+    const recommendation = this.getPromptRegenerationRecommendation({
+      usedPrompts: usageStats.used_prompts,
+      totalPrompts: usageStats.total_prompts,
+      targetCount,
+    });
+
+    const strategyMetadata =
+      promptRow.strategy_metadata && typeof promptRow.strategy_metadata === 'object' && !Array.isArray(promptRow.strategy_metadata)
+        ? { ...promptRow.strategy_metadata }
+        : {};
+
+    const nextMetadata = {
+      ...strategyMetadata,
+      prompts_last_used_at: new Date().toISOString(),
+      prompts_refresh_recommendation: recommendation || null,
+      prompts_usage_snapshot: {
+        ...usageStats,
+        target_count: targetCount,
+        refill_threshold: PROMPT_REFILL_REGEN_THRESHOLD,
+        full_threshold: PROMPT_FULL_REGEN_THRESHOLD,
+        updated_at: new Date().toISOString(),
+      },
+    };
+
+    if (recommendation) {
+      nextMetadata.prompts_stale = true;
+      nextMetadata.prompts_stale_at = new Date().toISOString();
+      nextMetadata.last_strategy_update_source =
+        nextMetadata.last_strategy_update_source || 'prompt_usage_signal';
+    }
+
+    await pool.query(
+      `UPDATE user_strategies
+       SET metadata = $1
+       WHERE id = $2
+         AND user_id = $3
+         AND COALESCE(metadata->>'product', '') = $4`,
+      [this.withProductScope(nextMetadata), promptRow.strategy_id, userId, this.productScope]
+    );
+
+    return {
+      prompt: updatedPrompt,
+      usage: {
+        ...usageStats,
+        recommendation: recommendation || null,
+      },
+    };
   }
 
   // Delete strategy

@@ -12,6 +12,7 @@ const MAX_COMPETITOR_PROFILES = 5;
 const MAX_COMPETITOR_EXAMPLES = 12;
 const MAX_POSTS_FOR_ANALYSIS = 60;
 const MAX_TEXT_FIELD_LENGTH = 1200;
+const MAX_STRATEGY_PROMPT_LENGTH = 3400;
 const DEFAULT_TONE = 'professional';
 const ALLOWED_TONES = new Set(['professional', 'educational', 'founder', 'personal-story']);
 const QUEUE_STATUSES = new Set([
@@ -41,8 +42,102 @@ const STOP_WORDS = new Set([
   'build', 'built', 'agency', 'client', 'platform', 'workflow', 'analytic', 'social',
   'tool', 'tools', 'service', 'solution', 'product', 'creator',
   'add', 'unlock', 'precise', 'analysis', 'analyses', 'analyzing'
+  , 'didn', 'don', 'isn', 'aren', 'wasn', 'weren', 'hasn', 'haven', 'hadn',
+  'won', 'wouldn', 'couldn', 'shouldn', 'mustn', 'needn', 'shan',
+  'properly'
 ]);
 const SHORT_KEYWORD_ALLOWLIST = new Set(['ai', 'ux', 'ui', 'seo', 'b2b', 'b2c', 'api']);
+const KEYWORD_CANONICAL_MAP = new Map([
+  ['softwareengineering', 'software engineering'],
+  ['socialmedia', 'social media'],
+  ['machinelearning', 'machine learning'],
+  ['webdevelopment', 'web development'],
+  ['mobiledevelopment', 'mobile development'],
+  ['cloudcomputing', 'cloud computing'],
+  ['websecurity', 'web security'],
+  ['cicd', 'ci/cd'],
+  ['datascience', 'data science'],
+  ['devop', 'devops'],
+]);
+const QUEUE_SUGGESTED_TIMES = ['09:30', '18:30'];
+const GENERIC_QUEUE_PATTERNS = [
+  /insight for (your|the) audience/i,
+  /most people overlook/i,
+  /comment ["']template["']/i,
+  /practical move they can apply this week/i,
+  /double down on/i,
+  /improve results/i,
+];
+const LOW_SIGNAL_KEYWORDS = new Set([
+  'share',
+  'journey',
+  'building',
+  'properly',
+  'thing',
+  'things',
+  'week',
+  'news',
+  'update',
+  'today',
+  'right',
+  'working',
+  'looked',
+  'users',
+  'feedback',
+  'from',
+  'with',
+  'that',
+  'this',
+  'just',
+  'more',
+  'soon',
+  'post',
+  'posts',
+  'platform',
+  'tool',
+  'tools',
+]);
+const PROJECT_SIGNAL_BLACKLIST = new Set([
+  'linkedin',
+  'portfolio',
+  'resume',
+  'professional experience',
+  'experience',
+  'skills',
+  'professional',
+  'personal growth',
+  'automation businesses',
+]);
+const TECHNOLOGY_SIGNAL_ALLOWLIST = new Set([
+  'react',
+  'react.js',
+  'node',
+  'node.js',
+  'express',
+  'express.js',
+  'aws',
+  'docker',
+  'kubernetes',
+  'jenkins',
+  'postgres',
+  'postgresql',
+  'supabase',
+  'redis',
+  'devops',
+  'ci/cd',
+  'cloud',
+  'cloud computing',
+  'cybersecurity',
+  'pentesting',
+  'web security',
+  'seo',
+  'typescript',
+  'javascript',
+  'html',
+  'css',
+  'api',
+  'automation',
+]);
 
 const SETUP_QUESTIONS = [
   'What do you do? (role + niche)',
@@ -63,10 +158,12 @@ const CONSENT_CHECKLIST = [
   'Store my profile context to improve generation',
 ];
 const STRATEGY_ANALYSIS_VERBOSE = String(process.env.STRATEGY_ANALYSIS_VERBOSE || 'true').toLowerCase() !== 'false';
+const STRATEGY_ANALYSIS_FETCH_DUMP =
+  String(process.env.STRATEGY_ANALYSIS_FETCH_DUMP || 'true').toLowerCase() !== 'false';
 const STRATEGY_LINKEDIN_API_FALLBACK =
   String(process.env.STRATEGY_LINKEDIN_API_FALLBACK || 'true').toLowerCase() !== 'false';
 const STRATEGY_LINKEDIN_ROLLING_VERSION =
-  String(process.env.STRATEGY_LINKEDIN_ROLLING_VERSION || 'false').toLowerCase() === 'true';
+  String(process.env.STRATEGY_LINKEDIN_ROLLING_VERSION || 'true').toLowerCase() !== 'false';
 const REJECTED_LINKEDIN_VERSIONS = new Set();
 
 class AutomationError extends Error {
@@ -78,9 +175,84 @@ class AutomationError extends Error {
   }
 }
 
+const sanitizeUnicodeString = (value = '') => {
+  const input = String(value ?? '');
+  if (!input) return '';
+
+  let output = '';
+  for (let index = 0; index < input.length; index += 1) {
+    const code = input.charCodeAt(index);
+
+    // Keep only valid surrogate pairs; drop lone high/low surrogates.
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const nextCode = input.charCodeAt(index + 1);
+      if (nextCode >= 0xdc00 && nextCode <= 0xdfff) {
+        output += input[index] + input[index + 1];
+        index += 1;
+      }
+      continue;
+    }
+
+    if (code >= 0xdc00 && code <= 0xdfff) {
+      continue;
+    }
+
+    output += input[index];
+  }
+
+  return output;
+};
+
 const toShortText = (value, max = MAX_TEXT_FIELD_LENGTH) => {
   if (value === undefined || value === null) return '';
-  return String(value).trim().slice(0, max);
+  const normalized = sanitizeUnicodeString(String(value)).trim();
+  if (!normalized) return '';
+  if (!Number.isFinite(max) || max <= 0) return normalized;
+  // Slice then sanitize again in case the slice boundary splits a surrogate pair.
+  return sanitizeUnicodeString(normalized.slice(0, max));
+};
+
+const safeJsonStringify = (value, fallback = '{}') => {
+  try {
+    const serialized = JSON.stringify(value, (_key, currentValue) => (
+      typeof currentValue === 'string' ? sanitizeUnicodeString(currentValue) : currentValue
+    ));
+    return serialized === undefined ? fallback : serialized;
+  } catch {
+    return fallback;
+  }
+};
+
+const trimPromptForProvider = (prompt = '', max = MAX_STRATEGY_PROMPT_LENGTH) => {
+  const normalized = sanitizeUnicodeString(String(prompt || ''));
+  if (!normalized) return '';
+  const safeMax = Number.isFinite(max) && max > 200 ? Math.floor(max) : MAX_STRATEGY_PROMPT_LENGTH;
+  if (normalized.length <= safeMax) return normalized;
+
+  const tailNote = '\n\n[Context trimmed for provider length limit]';
+  const allowed = Math.max(0, safeMax - tailNote.length);
+  return `${normalized.slice(0, allowed)}${tailNote}`;
+};
+
+const previewText = (value, max = 180) => {
+  const safeMax = Number.isFinite(max) && max > 0 ? max : 180;
+  const normalized = toShortText(value, safeMax + 1);
+  if (!normalized) return '';
+  if (normalized.length > safeMax) return `${normalized.slice(0, safeMax)}...`;
+  return normalized;
+};
+
+const previewPostRows = (rows = [], max = 3) => {
+  const safeRows = Array.isArray(rows) ? rows.slice(0, Math.max(1, max)) : [];
+  return safeRows.map((row) => ({
+    id: row?.id || null,
+    account_id: row?.account_id || null,
+    company_id: row?.company_id || null,
+    linkedin_user_id: row?.linkedin_user_id || null,
+    created_at: row?.created_at || null,
+    status: row?.status || null,
+    snippet: previewText(row?.post_content || '', 140),
+  }));
 };
 
 const normalizeTone = (value) => {
@@ -129,6 +301,36 @@ const logAnalysis = (...args) => {
 const warnAnalysis = (...args) => {
   if (!STRATEGY_ANALYSIS_VERBOSE) return;
   console.warn('[StrategyAnalysis]', ...args);
+};
+
+const sanitizeForFetchDump = (value, depth = 0) => {
+  if (depth > 4) return '[truncated]';
+  if (value === undefined || value === null) return value;
+  if (typeof value === 'string') return sanitizeUnicodeString(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'bigint') return value.toString();
+  if (Array.isArray(value)) {
+    return value.slice(0, 20).map((item) => sanitizeForFetchDump(item, depth + 1));
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value).slice(0, 40);
+    const next = {};
+    const secretFieldPattern = /(token|secret|password|authorization|cookie)/i;
+    for (const [key, currentValue] of entries) {
+      if (secretFieldPattern.test(String(key))) {
+        next[key] = '[redacted]';
+        continue;
+      }
+      next[key] = sanitizeForFetchDump(currentValue, depth + 1);
+    }
+    return next;
+  }
+  return String(value);
+};
+
+const logFetchDump = (label, payload) => {
+  if (!STRATEGY_ANALYSIS_VERBOSE || !STRATEGY_ANALYSIS_FETCH_DUMP) return;
+  console.log('[StrategyFetch]', label, sanitizeForFetchDump(payload));
 };
 
 const normalizeLinkedInVersion = (value) => {
@@ -355,6 +557,137 @@ const extractOrganizationAboutText = (payload = {}) => {
   return '';
 };
 
+const extractSkillListFromPayload = (payload = {}) => {
+  if (!payload || typeof payload !== 'object') return [];
+  const rawContainers = [
+    payload.skills,
+    payload.skills?.values,
+    payload.skills?.elements,
+    payload.profile?.skills,
+    payload.profile?.skills?.values,
+    payload.profile?.skills?.elements,
+  ];
+
+  const flattened = [];
+  for (const container of rawContainers) {
+    if (!container) continue;
+    if (Array.isArray(container)) {
+      flattened.push(...container);
+    } else if (typeof container === 'object') {
+      flattened.push(container);
+    } else if (typeof container === 'string') {
+      flattened.push(...container.split(/[,\n/|]+/));
+    }
+  }
+
+  const normalized = dedupeStrings(
+    flattened
+      .map((entry) => {
+        if (typeof entry === 'string') return toShortText(entry, 60);
+        if (!entry || typeof entry !== 'object') return '';
+        return toShortText(
+          entry.name ||
+            entry.skill ||
+            entry.localizedName ||
+            entry.title ||
+            extractTextFromUnknownNode(entry),
+          60
+        );
+      })
+      .filter(Boolean)
+      .filter((value) => !/^(skills?|profile|about|experience)$/i.test(String(value).trim()))
+      .slice(0, 30),
+    20
+  );
+
+  return normalized;
+};
+
+const extractExperienceTextFromPayload = (payload = {}) => {
+  if (!payload || typeof payload !== 'object') return '';
+
+  const positionArrays = [
+    payload.positions?.values,
+    payload.positions?.elements,
+    payload.positionGroups?.elements,
+    payload.experience?.positions,
+    payload.experience,
+    payload.workExperience,
+  ].filter(Array.isArray);
+
+  const snippets = [];
+  for (const list of positionArrays) {
+    for (const item of list.slice(0, 8)) {
+      if (!item || typeof item !== 'object') continue;
+      const title = toShortText(
+        item.title || item.positionTitle || item.role || item.localizedTitle || '',
+        120
+      );
+      const company = toShortText(
+        item.companyName ||
+          item.company ||
+          item.organization ||
+          item.employer ||
+          item.company?.name ||
+          '',
+        120
+      );
+      const summary = toShortText(
+        item.summary || item.description || item.localizedSummary || '',
+        220
+      );
+      const line = [title, company].filter(Boolean).join(' @ ');
+      if (line || summary) {
+        snippets.push([line, summary].filter(Boolean).join(' - '));
+      }
+    }
+  }
+
+  if (snippets.length > 0) {
+    return toShortText(dedupeStrings(snippets, 8).join('; '), 800);
+  }
+
+  const fallback = toShortText(
+    payload.experienceSummary ||
+      payload.workSummary ||
+      payload.summary ||
+      payload.localizedSummary ||
+      '',
+    800
+  );
+  return fallback;
+};
+
+const extractPersonalProfileInsights = (payload = {}) => {
+  if (!payload || typeof payload !== 'object') {
+    return { headline: '', about: '', skills: [], experience: '' };
+  }
+
+  const headline = toShortText(
+    payload.localizedHeadline ||
+      payload.headline ||
+      payload.profile?.headline ||
+      '',
+    255
+  );
+
+  const about = toShortText(
+    payload.localizedSummary ||
+      payload.summary ||
+      payload.about ||
+      payload.biography ||
+      payload.profile?.summary ||
+      payload.profile?.about ||
+      '',
+    800
+  );
+
+  const skills = extractSkillListFromPayload(payload);
+  const experience = extractExperienceTextFromPayload(payload);
+
+  return { headline, about, skills, experience };
+};
+
 const normalizeCompetitorProfiles = (profiles = []) => {
   const normalized = [];
 
@@ -415,6 +748,41 @@ const parseAiJson = (rawContent = '') => {
   }
 };
 
+const buildJsonRepairPrompt = ({
+  queueTarget = DEFAULT_QUEUE_TARGET,
+  rawOutput = '',
+  profileContext = {},
+  postSummary = {},
+} = {}) => {
+  const rawPreview = toShortText(rawOutput || '', 1200);
+  const profilePreview = safeJsonStringify({
+    role_niche: toShortText(profileContext?.role_niche, 120),
+    target_audience: toShortText(profileContext?.target_audience, 120),
+    outcomes_30_90: toShortText(profileContext?.outcomes_30_90, 140),
+    proof_points: toShortText(profileContext?.proof_points, 180),
+    tone_style: profileContext?.tone_style || DEFAULT_TONE,
+  }, '{}');
+  const postPreview = safeJsonStringify({
+    themes: Array.isArray(postSummary?.themes) ? postSummary.themes.slice(0, 6) : [],
+    postCount: Number(postSummary?.postCount || 0),
+    averageEngagement: Number(postSummary?.averageEngagement || 0),
+  }, '{}');
+
+  return [
+    'Your previous response was invalid or truncated.',
+    'Return ONLY valid JSON object (no markdown).',
+    'Required schema:',
+    '{"analysis":{"strengths":[],"gaps":[],"opportunities":[],"nextAngles":[]},"queue":[{"title":"","content":"","hashtags":[],"reason":"","suggested_day_offset":0,"suggested_local_time":"HH:mm"}]}',
+    `Generate exactly ${queueTarget} queue items.`,
+    'Constraints: concise but concrete, LinkedIn-native, max 4 hashtags each.',
+    'Do not use generic phrases (e.g., "most people overlook", "comment template").',
+    'Do not repeat recent posted snippets; keep each item novel.',
+    `Profile: ${profilePreview}`,
+    `Post summary: ${postPreview}`,
+    `Previous invalid output (repair intent only): ${rawPreview}`,
+  ].join('\n');
+};
+
 const normalizeKeywordToken = (rawToken = '') => {
   let token = String(rawToken || '')
     .toLowerCase()
@@ -427,11 +795,81 @@ const normalizeKeywordToken = (rawToken = '') => {
   if (/^\d+$/.test(token)) return '';
 
   if (token.endsWith('ies') && token.length > 5) token = `${token.slice(0, -3)}y`;
-  else if (token.endsWith('s') && !token.endsWith('ss') && !token.endsWith('is') && token.length > 4) token = token.slice(0, -1);
+  else if (
+    token.endsWith('s') &&
+    !token.endsWith('ss') &&
+    !token.endsWith('is') &&
+    !token.endsWith('ops') &&
+    !token.endsWith('ics') &&
+    token.length > 4
+  ) {
+    token = token.slice(0, -1);
+  }
+
+  token = KEYWORD_CANONICAL_MAP.get(token) || token;
 
   if (!token || STOP_WORDS.has(token)) return '';
-  if (token.length > 28) return '';
+  if (token.length > 32) return '';
   return token;
+};
+
+const canonicalIdentityToken = (value = '') =>
+  String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .trim();
+
+const buildIdentityBlocklist = ({ profileContext = {}, accountSnapshot = {} } = {}) => {
+  const metadata = parseJsonObject(profileContext?.metadata, {});
+  const candidates = dedupeStrings([
+    accountSnapshot?.display_name,
+    accountSnapshot?.username,
+    metadata?.profile_display_name,
+    metadata?.portfolio_title,
+    metadata?.portfolio_url,
+    metadata?.organization_name,
+  ]).filter(Boolean);
+
+  const blocklist = new Set();
+  for (const candidate of candidates) {
+    const plain = toShortText(candidate, 180);
+    if (!plain) continue;
+    const fullToken = canonicalIdentityToken(plain);
+    if (fullToken && fullToken.length >= 6) {
+      blocklist.add(fullToken);
+    }
+
+    const words = plain
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean);
+    const filteredWords = words.filter((word) => word.length >= 4 && !STOP_WORDS.has(word));
+    for (const word of filteredWords) {
+      const token = canonicalIdentityToken(word);
+      if (token.length >= 4) blocklist.add(token);
+    }
+
+    const domainPart = plain
+      .replace(/^https?:\/\//i, '')
+      .replace(/^www\./i, '')
+      .split('/')[0]
+      .split('.')[0]
+      .trim();
+    const domainToken = canonicalIdentityToken(domainPart);
+    if (domainToken && domainToken.length >= 6) {
+      blocklist.add(domainToken);
+    }
+  }
+
+  return blocklist;
+};
+
+const isIdentityLikeSignal = (value = '', identityBlocklist = new Set()) => {
+  const token = canonicalIdentityToken(value);
+  if (!token) return false;
+  if (identityBlocklist?.has(token)) return true;
+  return false;
 };
 
 const extractKeywords = (posts = []) => {
@@ -444,6 +882,7 @@ const extractKeywords = (posts = []) => {
     for (const hashtag of hashtagMatches) {
       const normalized = normalizeKeywordToken(hashtag);
       if (!normalized) continue;
+      if (LOW_SIGNAL_KEYWORDS.has(normalized)) continue;
       // Hashtags usually represent author intent, so give them higher weight.
       frequency.set(normalized, (frequency.get(normalized) || 0) + 3);
     }
@@ -459,6 +898,7 @@ const extractKeywords = (posts = []) => {
     for (const token of text) {
       const normalized = normalizeKeywordToken(token);
       if (!normalized) continue;
+      if (LOW_SIGNAL_KEYWORDS.has(normalized)) continue;
       frequency.set(normalized, (frequency.get(normalized) || 0) + 1);
     }
   }
@@ -468,9 +908,469 @@ const extractKeywords = (posts = []) => {
   if (ranked.length === 0) ranked = [...frequency.entries()];
 
   return ranked
+    .filter(([keyword, score]) => {
+      if (!keyword) return false;
+      if (LOW_SIGNAL_KEYWORDS.has(keyword)) return false;
+      // Drop noisy single-hit keywords when there is enough signal elsewhere.
+      if (score <= 1 && frequency.size > 10 && keyword.length <= 4) return false;
+      return true;
+    })
     .sort((a, b) => b[1] - a[1])
     .slice(0, 8)
     .map(([keyword]) => keyword);
+};
+
+const getQueueScheduleHint = (index = 0) => {
+  const normalizedIndex = Math.max(0, Number(index) || 0);
+  return {
+    suggested_day_offset: Math.floor(normalizedIndex / QUEUE_SUGGESTED_TIMES.length),
+    suggested_local_time: QUEUE_SUGGESTED_TIMES[normalizedIndex % QUEUE_SUGGESTED_TIMES.length] || '09:30',
+  };
+};
+
+const buildHistoricalCorpus = (postSummary = {}) => dedupeStrings([
+  ...(Array.isArray(postSummary?.recentPosts)
+    ? postSummary.recentPosts.map((post) => toShortText(post?.snippet || post?.content || '', 240))
+    : []),
+  ...(Array.isArray(postSummary?.topPosts)
+    ? postSummary.topPosts.map((post) => toShortText(post?.snippet || post?.content || '', 240))
+    : []),
+]).filter(Boolean).slice(0, 12);
+
+const tokenizeForSimilarity = (value = '') => {
+  const rawTokens = String(value || '')
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/www\.\S+/g, ' ')
+    .replace(/[^a-z0-9\s#]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+
+  const normalized = [];
+  for (const token of rawTokens) {
+    const normalizedToken = normalizeKeywordToken(token);
+    if (!normalizedToken) continue;
+    normalized.push(normalizedToken);
+  }
+
+  return new Set(normalized);
+};
+
+const similarityScore = (left = '', right = '') => {
+  const leftTokens = tokenizeForSimilarity(left);
+  const rightTokens = tokenizeForSimilarity(right);
+  if (!leftTokens.size || !rightTokens.size) return 0;
+
+  let intersection = 0;
+  for (const token of leftTokens) {
+    if (rightTokens.has(token)) intersection += 1;
+  }
+  const union = leftTokens.size + rightTokens.size - intersection;
+  if (union <= 0) return 0;
+  return intersection / union;
+};
+
+const countConcreteSignals = (value = '') => {
+  const text = String(value || '');
+  if (!text.trim()) return 0;
+
+  let score = 0;
+  if (/\b\d+(\.\d+)?\s?(%|x|hrs?|hours?|days?|weeks?|users?|followers?|bugs?|tests?|posts?)\b/i.test(text)) score += 1;
+  if (/\b(context|execution|result|baseline|change|outcome|checklist|playbook)\s*:/i.test(text)) score += 1;
+  if (/\b(i|we)\s+(built|shipped|launched|deployed|automated|migrated|fixed|scaled|tested)\b/i.test(text)) score += 1;
+  if (/\b(suitegenie|anicafe|sparklehood|fotographiya)\b/i.test(text)) score += 1;
+  if (/\b(aws|docker|jenkins|react|node|seo|security|ci\/cd|kubernetes|supabase|postgres|automation|pipeline|cloud|devops|cybersecurity|pentesting)\b/i.test(text)) score += 1;
+  return score;
+};
+
+const isGenericQueueContent = (value = '') => {
+  const text = String(value || '').trim();
+  if (!text) return true;
+  if (GENERIC_QUEUE_PATTERNS.some((pattern) => pattern.test(text))) return true;
+
+  const concreteSignals = countConcreteSignals(text);
+  if (concreteSignals >= 2) return false;
+
+  const tokenCount = tokenizeForSimilarity(text).size;
+  return tokenCount < 10 || concreteSignals < 2;
+};
+
+const scoreQueueDraftQuality = (item = {}, historyCorpus = []) => {
+  const content = toShortText(item?.content, 3000);
+  const title = toShortText(item?.title, 220);
+  const hashtags = normalizeHashtags(item?.hashtags);
+  const reason = toShortText(item?.reason, 240);
+  if (!content) return -1;
+
+  const lengthScore = content.length >= 320 && content.length <= 1600 ? 2 : 0;
+  const hashtagScore = hashtags.length > 0 ? 1 : 0;
+  const reasonScore = reason ? 1 : 0;
+  const specificityScore = isGenericQueueContent(content) ? -2 : 2;
+  const concreteSignalScore = Math.min(3, countConcreteSignals(content));
+  const similarityPenalty = historyCorpus.some((history) => similarityScore(content, history) >= 0.58) ? -3 : 0;
+  const titleScore = title ? 1 : 0;
+
+  return lengthScore + hashtagScore + reasonScore + specificityScore + concreteSignalScore + similarityPenalty + titleScore;
+};
+
+const normalizeProjectSignal = (value = '') => {
+  const cleaned = String(value || '')
+    .replace(/\s+/g, ' ')
+    .replace(/[|:]+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  const compact = cleaned.slice(0, 64);
+  const key = compact.toLowerCase();
+  if (!key || PROJECT_SIGNAL_BLACKLIST.has(key)) return '';
+  if (compact.length <= 2) return '';
+  return compact;
+};
+
+const extractProjectSignalsFromText = (value = '') => {
+  const text = toShortText(value, 2000);
+  if (!text) return [];
+  const found = [];
+
+  const domainMatches = text.match(/\b(?:https?:\/\/)?(?:www\.)?([a-z0-9][a-z0-9-]{1,30})\.(?:in|com|io|app|dev|me)\b/gi) || [];
+  for (const match of domainMatches) {
+    const base = String(match || '')
+      .replace(/^https?:\/\//i, '')
+      .replace(/^www\./i, '')
+      .split('.')[0]
+      .replace(/-/g, ' ');
+    const normalized = normalizeProjectSignal(base);
+    if (normalized) found.push(normalized);
+  }
+
+  const actionPattern =
+    /\b(?:building|built|launching|launched|shipping|shipped|founded|founder of|working on|maintaining)\s+([A-Za-z0-9][A-Za-z0-9.\-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.\-]*){0,3})/gi;
+  for (const match of text.matchAll(actionPattern)) {
+    const normalized = normalizeProjectSignal(match?.[1] || '');
+    if (normalized) found.push(normalized);
+  }
+
+  const explicitPattern = /\b(SuiteGenie|Anicafe|Sparklehood|Fotographiya)\b/gi;
+  for (const match of text.matchAll(explicitPattern)) {
+    const normalized = normalizeProjectSignal(match?.[1] || '');
+    if (normalized) found.push(normalized);
+  }
+
+  return dedupeStrings(found).slice(0, 8);
+};
+
+const collectProjectSignals = ({
+  profileContext = {},
+  postSummary = {},
+  accountSnapshot = {},
+  identityBlocklist = new Set(),
+} = {}) => {
+  const metadata = parseJsonObject(profileContext?.metadata, {});
+  const sources = [
+    metadata.portfolio_title,
+    metadata.portfolio_url,
+    metadata.portfolio_about,
+    metadata.portfolio_experience,
+    metadata.linkedin_about,
+    metadata.linkedin_experience,
+    profileContext?.proof_points,
+    profileContext?.outcomes_30_90,
+    accountSnapshot?.about,
+    accountSnapshot?.experience,
+    ...(Array.isArray(postSummary?.recentPosts) ? postSummary.recentPosts.map((item) => item?.snippet || item?.content || '') : []),
+    ...(Array.isArray(postSummary?.topPosts) ? postSummary.topPosts.map((item) => item?.snippet || item?.content || '') : []),
+  ];
+
+  const projects = [];
+  for (const source of sources) {
+    projects.push(...extractProjectSignalsFromText(source));
+  }
+
+  const normalized = dedupeStrings(projects.map((value) => normalizeProjectSignal(value)).filter(Boolean));
+  return normalized
+    .filter((value) => !PROJECT_SIGNAL_BLACKLIST.has(value.toLowerCase()))
+    .filter((value) => !isIdentityLikeSignal(value, identityBlocklist))
+    .slice(0, 8);
+};
+
+const collectTechnologySignals = ({ profileContext = {}, postSummary = {}, accountSnapshot = {} } = {}) => {
+  const metadata = parseJsonObject(profileContext?.metadata, {});
+  const pool = dedupeStrings([
+    ...(Array.isArray(metadata.linkedin_skills) ? metadata.linkedin_skills : []),
+    ...(Array.isArray(metadata.portfolio_skills) ? metadata.portfolio_skills : []),
+    ...(Array.isArray(accountSnapshot?.skills) ? accountSnapshot.skills : []),
+    ...(Array.isArray(postSummary?.themes) ? postSummary.themes : []),
+  ]);
+
+  const normalized = [];
+  for (const value of pool) {
+    const candidate = String(value || '').trim();
+    if (!candidate) continue;
+    const key = candidate.toLowerCase();
+    if (!TECHNOLOGY_SIGNAL_ALLOWLIST.has(key)) continue;
+    normalized.push(candidate);
+  }
+
+  return dedupeStrings(normalized).slice(0, 12);
+};
+
+const collectOutcomeSignals = ({ profileContext = {}, postSummary = {}, accountSnapshot = {} } = {}) => {
+  const metadata = parseJsonObject(profileContext?.metadata, {});
+  const pool = dedupeStrings([
+    toShortText(profileContext?.proof_points, 220),
+    toShortText(profileContext?.outcomes_30_90, 220),
+    toShortText(metadata.extra_context, 220),
+    toShortText(metadata.linkedin_experience, 220),
+    toShortText(metadata.portfolio_experience, 220),
+    toShortText(accountSnapshot?.about, 220),
+    toShortText(accountSnapshot?.experience, 220),
+    ...(Array.isArray(postSummary?.topPosts)
+      ? postSummary.topPosts.map((item) => toShortText(item?.snippet || item?.content || '', 220))
+      : []),
+  ]).filter(Boolean);
+
+  return pool.slice(0, 10);
+};
+
+const deriveFallbackThemes = ({
+  profileContext = {},
+  postSummary = {},
+  accountSnapshot = {},
+  projectSignals = [],
+  technologySignals = [],
+  identityBlocklist = new Set(),
+} = {}) => {
+  const themeCandidates = dedupeStrings([
+    ...projectSignals,
+    ...technologySignals,
+    ...(Array.isArray(postSummary?.themes) ? postSummary.themes : []),
+    toShortText(profileContext?.role_niche, 120),
+    toShortText(profileContext?.target_audience, 120),
+  ]);
+
+  const cleaned = [];
+  for (const candidate of themeCandidates) {
+    const normalizedKeyword = normalizeKeywordToken(candidate);
+    if (normalizedKeyword && LOW_SIGNAL_KEYWORDS.has(normalizedKeyword)) continue;
+    const value = toShortText(candidate, 80);
+    if (!value) continue;
+    if (PROJECT_SIGNAL_BLACKLIST.has(String(value).toLowerCase())) continue;
+    if (isIdentityLikeSignal(value, identityBlocklist)) continue;
+    cleaned.push(value);
+  }
+
+  const fallback = ['web development', 'cloud', 'devops', 'cybersecurity'];
+  return dedupeStrings([...cleaned, ...fallback]).slice(0, 10);
+};
+
+const buildReferenceSignals = ({ profileContext = {}, competitorConfig = {}, postSummary = {}, accountSnapshot = {} } = {}) => {
+  const metadata = parseJsonObject(profileContext?.metadata, {});
+  const skillSignals = Array.isArray(metadata.linkedin_skills)
+    ? metadata.linkedin_skills.slice(0, 10)
+    : [];
+  const portfolioSignals = Array.isArray(metadata.portfolio_skills)
+    ? metadata.portfolio_skills.slice(0, 10)
+    : [];
+  const projectSignals = collectProjectSignals({ profileContext, postSummary, accountSnapshot });
+  const outcomeSignals = collectOutcomeSignals({ profileContext, postSummary, accountSnapshot });
+
+  return dedupeStrings([
+    ...projectSignals,
+    ...outcomeSignals,
+    ...(Array.isArray(postSummary?.themes) ? postSummary.themes.slice(0, 10) : []),
+    ...skillSignals,
+    ...portfolioSignals,
+    toShortText(metadata.linkedin_about, 140),
+    toShortText(metadata.linkedin_experience, 180),
+    toShortText(metadata.portfolio_about, 140),
+    toShortText(metadata.portfolio_experience, 180),
+    toShortText(profileContext?.proof_points, 180),
+    toShortText(profileContext?.outcomes_30_90, 140),
+    toShortText(accountSnapshot?.headline, 140),
+    ...(Array.isArray(competitorConfig?.competitor_examples)
+      ? competitorConfig.competitor_examples.map((example) => toShortText(example, 120))
+      : []),
+    ...(Array.isArray(competitorConfig?.competitor_profiles)
+      ? competitorConfig.competitor_profiles.map((profile) => `reference:${profile}`)
+      : []),
+  ]).filter(Boolean).slice(0, 14);
+};
+
+const buildHighQualityFallbackItem = ({
+  index = 0,
+  theme = 'practical framework',
+  profileContext = {},
+  postSummary = {},
+  referenceSignals = [],
+  projectSignals = [],
+  technologySignals = [],
+  outcomeSignals = [],
+  winAngle = 'authority',
+  identityBlocklist = new Set(),
+} = {}) => {
+  const scheduleHint = getQueueScheduleHint(index);
+  const audience = toShortText(profileContext?.target_audience || 'builders and operators', 120);
+  const proofPoint = toShortText(profileContext?.proof_points || profileContext?.outcomes_30_90 || '', 180);
+  const topPostSnippet = toShortText(postSummary?.topPosts?.[index % Math.max(1, (postSummary?.topPosts || []).length)]?.snippet || '', 160);
+  const themeKeyword = normalizeKeywordToken(theme);
+  const normalizedTheme = isIdentityLikeSignal(theme, identityBlocklist) ||
+    (themeKeyword && LOW_SIGNAL_KEYWORDS.has(themeKeyword))
+    ? ''
+    : toShortText(theme, 72);
+  const fallbackThemePool = ['web development', 'cloud', 'devops', 'cybersecurity'];
+  const safeTheme = normalizedTheme ||
+    toShortText(technologySignals[index % Math.max(1, technologySignals.length)] || '', 72) ||
+    fallbackThemePool[index % fallbackThemePool.length];
+
+  const rawProjectCue = toShortText(projectSignals[index % Math.max(1, projectSignals.length)] || '', 80);
+  const projectCue = isIdentityLikeSignal(rawProjectCue, identityBlocklist)
+    ? ''
+    : rawProjectCue;
+  const toolCue = toShortText(technologySignals[index % Math.max(1, technologySignals.length)] || '', 80);
+  const outcomeCue = toShortText(outcomeSignals[index % Math.max(1, outcomeSignals.length)] || '', 180);
+  const referenceCue = toShortText(referenceSignals[index % Math.max(1, referenceSignals.length)] || '', 120);
+  const concreteCue = outcomeCue || proofPoint || topPostSnippet || referenceCue || toShortText(safeTheme, 100);
+  const opening = projectCue
+    ? `Build update from ${projectCue}: improving ${safeTheme}.`
+    : `Build update: improving ${safeTheme} for ${audience}.`;
+  const workflowCue = toolCue
+    ? `Execution stack: ${toolCue}. I converted this into a repeatable workflow instead of a one-off fix.`
+    : 'Execution: I converted this into a repeatable workflow that can be reused next sprint.';
+  const resultLine = outcomeCue
+    ? `Measured outcome: ${outcomeCue}.`
+    : 'Measured outcome: include one real metric (time saved, reliability gain, or defect reduction).';
+
+  const content = [
+    opening,
+    '',
+    `Context signal: ${concreteCue}.`,
+    workflowCue,
+    resultLine,
+    '',
+    `For ${audience}, structure this as: trigger -> action -> measurable outcome -> next step.`,
+    '',
+    `Angle: ${toShortText(winAngle, 80)}. Close with a concrete 5-step checklist readers can apply today.`,
+  ].join('\n');
+
+  const hashtagPool = [
+    safeTheme,
+    toolCue,
+    projectCue,
+  ]
+    .filter(Boolean)
+    .map((item) => String(item || '').replace(/\s+/g, ''))
+    .filter((item) => !isIdentityLikeSignal(item, identityBlocklist));
+
+  return {
+    title: `Execution playbook ${index + 1}: ${toShortText(safeTheme, 80)}`,
+    content: toShortText(content, 2200),
+    hashtags: normalizeHashtags(hashtagPool),
+    suggested_day_offset: scheduleHint.suggested_day_offset,
+    suggested_local_time: scheduleHint.suggested_local_time,
+    reason: `Fallback generated with signal "${toShortText(projectCue || safeTheme, 80)}" and evidence "${toShortText(concreteCue, 120)}".`,
+  };
+};
+
+const refineQueueDrafts = ({
+  aiQueue = [],
+  fallbackQueue = [],
+  queueTarget = DEFAULT_QUEUE_TARGET,
+  postSummary = {},
+} = {}) => {
+  const safeTarget = Math.max(1, Math.min(MAX_QUEUE_TARGET, Number(queueTarget) || DEFAULT_QUEUE_TARGET));
+  const historyCorpus = buildHistoricalCorpus(postSummary);
+  const accepted = [];
+
+  const tryAccept = (rawItem = null, source = 'ai') => {
+    if (!rawItem || typeof rawItem !== 'object') return false;
+
+    const content = toShortText(rawItem.content, 3000);
+    if (!content) return false;
+    const title = toShortText(rawItem.title, 220);
+
+    const score = scoreQueueDraftQuality(rawItem, historyCorpus);
+    const tooSimilarToAccepted = accepted.some((item) => similarityScore(item.content, content) >= 0.62);
+    const tooSimilarTitle = title
+      ? accepted.some((item) => similarityScore(item.title || '', title) >= 0.7)
+      : false;
+    const generic = isGenericQueueContent(content);
+
+    if (source === 'ai' && (score < 2 || tooSimilarToAccepted || tooSimilarTitle || generic)) {
+      return false;
+    }
+    if (source === 'fallback' && (tooSimilarToAccepted || tooSimilarTitle || generic || score < 2)) {
+      return false;
+    }
+
+    const scheduleHint = getQueueScheduleHint(accepted.length);
+    accepted.push({
+      title: title || `Draft ${accepted.length + 1}`,
+      content,
+      hashtags: normalizeHashtags(rawItem.hashtags),
+      suggested_day_offset: scheduleHint.suggested_day_offset,
+      suggested_local_time: scheduleHint.suggested_local_time,
+      reason: toShortText(rawItem.reason || `Generated from ${source} pipeline.`, 400),
+    });
+    return true;
+  };
+
+  for (const item of Array.isArray(aiQueue) ? aiQueue : []) {
+    if (accepted.length >= safeTarget) break;
+    tryAccept(item, 'ai');
+  }
+
+  for (const item of Array.isArray(fallbackQueue) ? fallbackQueue : []) {
+    if (accepted.length >= safeTarget) break;
+    tryAccept(item, 'fallback');
+  }
+
+  let fallbackCursor = 0;
+  const fallbackPool = Array.isArray(fallbackQueue) ? fallbackQueue : [];
+  while (accepted.length < safeTarget && fallbackPool.length > 0 && fallbackCursor < safeTarget * 3) {
+    const seed = fallbackPool[fallbackCursor % fallbackPool.length] || {};
+    const seedContent = toShortText(seed.content, 3000);
+    if (!seedContent || isGenericQueueContent(seedContent) || scoreQueueDraftQuality(seed, historyCorpus) < 1) {
+      fallbackCursor += 1;
+      continue;
+    }
+
+    const scheduleHint = getQueueScheduleHint(accepted.length);
+    accepted.push({
+      title: toShortText(seed.title, 220) || `Draft ${accepted.length + 1}`,
+      content: seedContent,
+      hashtags: normalizeHashtags(seed.hashtags),
+      suggested_day_offset: scheduleHint.suggested_day_offset,
+      suggested_local_time: scheduleHint.suggested_local_time,
+      reason: toShortText(seed.reason || 'Fallback completion draft.', 400),
+    });
+    fallbackCursor += 1;
+  }
+
+  while (accepted.length < safeTarget) {
+    const seed = fallbackPool[accepted.length % Math.max(1, fallbackPool.length)] || {};
+    const scheduleHint = getQueueScheduleHint(accepted.length);
+    const themeLabel = toShortText(seed.title || seed.reason || 'Execution playbook', 72);
+    const emergencyContent = [
+      `${themeLabel}: practical post blueprint.`,
+      '',
+      'Context: explain one real problem you faced this week.',
+      'Execution: share the exact stack/workflow you used.',
+      'Result: include one measurable signal and one tradeoff.',
+      '',
+      'Close with one step readers can run in under 30 minutes.',
+    ].join('\n');
+
+    accepted.push({
+      title: themeLabel || `Draft ${accepted.length + 1}`,
+      content: toShortText(emergencyContent, 2200),
+      hashtags: normalizeHashtags(seed.hashtags),
+      suggested_day_offset: scheduleHint.suggested_day_offset,
+      suggested_local_time: scheduleHint.suggested_local_time,
+      reason: toShortText(seed.reason || 'Fallback completion draft.', 400),
+    });
+  }
+
+  return accepted.slice(0, safeTarget);
 };
 
 const inferTone = (profileContext = {}) => {
@@ -489,35 +1389,56 @@ const normalizeHashtags = (hashtags = []) =>
       : []
   ).slice(0, 6);
 
-const buildFallbackQueue = ({ queueTarget, profileContext, postSummary, competitorConfig }) => {
-  const themes = postSummary?.themes?.length > 0
-    ? postSummary.themes
-    : dedupeStrings([
-        toShortText(profileContext?.role_niche, 120),
-        toShortText(profileContext?.target_audience, 120),
-        toShortText(profileContext?.outcomes_30_90, 120),
-      ].filter(Boolean));
-
-  const baseThemes = themes.length > 0 ? themes : ['industry insight', 'audience problem', 'practical framework'];
-  const tone = inferTone(profileContext);
+const buildFallbackQueue = ({
+  queueTarget,
+  profileContext,
+  postSummary,
+  competitorConfig,
+  accountSnapshot,
+}) => {
+  const safeTarget = Math.max(1, Math.min(MAX_QUEUE_TARGET, Number(queueTarget) || DEFAULT_QUEUE_TARGET));
+  const identityBlocklist = buildIdentityBlocklist({ profileContext, accountSnapshot });
+  const projectSignals = collectProjectSignals({
+    profileContext,
+    postSummary,
+    accountSnapshot,
+    identityBlocklist,
+  });
+  const technologySignals = collectTechnologySignals({ profileContext, postSummary, accountSnapshot });
+  const outcomeSignals = collectOutcomeSignals({ profileContext, postSummary, accountSnapshot });
+  const baseThemes = deriveFallbackThemes({
+    profileContext,
+    postSummary,
+    accountSnapshot,
+    projectSignals,
+    technologySignals,
+    identityBlocklist,
+  });
   const winAngle = toShortText(competitorConfig?.win_angle || 'authority', 64);
-  const drafts = [];
+  const referenceSignals = buildReferenceSignals({
+    profileContext,
+    competitorConfig,
+    postSummary,
+    accountSnapshot,
+  });
 
-  for (let index = 0; index < queueTarget; index += 1) {
+  const drafts = [];
+  for (let index = 0; index < safeTarget; index += 1) {
     const theme = baseThemes[index % baseThemes.length];
-    const suggestion = {
-      title: `Post angle ${index + 1}: ${theme}`,
-      content:
-        `Insight for ${toShortText(profileContext?.target_audience || 'your audience', 120)}:\n\n` +
-        `Most people overlook "${theme}" when they try to improve results.\n` +
-        `Here is one practical move they can apply this week and how to measure it.\n\n` +
-        `If useful, comment "template" and I will share a step-by-step format.`,
-      hashtags: normalizeHashtags([theme.replace(/\s+/g, ''), 'LinkedInStrategy']),
-      suggested_day_offset: index,
-      suggested_local_time: '09:00',
-      reason: `Fallback draft generated from ${winAngle} angle (${tone} tone).`,
-    };
-    drafts.push(suggestion);
+    drafts.push(
+      buildHighQualityFallbackItem({
+        index,
+        theme,
+        profileContext,
+        postSummary,
+        referenceSignals,
+        projectSignals,
+        technologySignals,
+        outcomeSignals,
+        winAngle,
+        identityBlocklist,
+      })
+    );
   }
 
   return drafts;
@@ -586,7 +1507,28 @@ class LinkedinAutomationService {
        LIMIT 1`,
       [userId]
     );
-    return rows[0] || null;
+    const row = rows[0] || null;
+    logFetchDump('linkedin_automation_profile_context', {
+      userId,
+      rowCount: rows.length,
+      rows,
+    });
+    logAnalysis('Fetched profile context row', {
+      userId,
+      found: Boolean(row),
+      preview: row
+        ? {
+            tone_style: row.tone_style || null,
+            consent_use_posts: Boolean(row.consent_use_posts),
+            consent_store_profile: Boolean(row.consent_store_profile),
+            role_niche: previewText(row.role_niche, 100) || null,
+            target_audience: previewText(row.target_audience, 100) || null,
+            outcomes_30_90: previewText(row.outcomes_30_90, 100) || null,
+            metadataKeys: Object.keys(parseJsonObject(row.metadata, {})).slice(0, 10),
+          }
+        : null,
+    });
+    return row;
   }
 
   async getCompetitorRow(userId) {
@@ -597,7 +1539,24 @@ class LinkedinAutomationService {
        LIMIT 1`,
       [userId]
     );
-    return rows[0] || null;
+    const row = rows[0] || null;
+    logFetchDump('linkedin_automation_competitors', {
+      userId,
+      rowCount: rows.length,
+      rows,
+    });
+    logAnalysis('Fetched competitor row', {
+      userId,
+      found: Boolean(row),
+      competitorCount: Array.isArray(row?.competitor_profiles) ? row.competitor_profiles.length : 0,
+      exampleCount: Array.isArray(row?.competitor_examples) ? row.competitor_examples.length : 0,
+      winAngle: row?.win_angle || null,
+      previewProfiles: Array.isArray(row?.competitor_profiles) ? row.competitor_profiles.slice(0, 3) : [],
+      previewExamples: Array.isArray(row?.competitor_examples)
+        ? row.competitor_examples.slice(0, 2).map((value) => previewText(value, 120))
+        : [],
+    });
+    return row;
   }
 
   mapProfileContext(row) {
@@ -710,7 +1669,7 @@ class LinkedinAutomationService {
         next.consent_use_posts,
         next.consent_store_profile,
         nowIso,
-        JSON.stringify(next.metadata || {}),
+        safeJsonStringify(next.metadata || {}, '{}'),
       ]
     );
 
@@ -753,10 +1712,10 @@ class LinkedinAutomationService {
          updated_at = NOW()`,
       [
         userId,
-        JSON.stringify(next.competitor_profiles),
-        JSON.stringify(next.competitor_examples),
+        safeJsonStringify(next.competitor_profiles, '[]'),
+        safeJsonStringify(next.competitor_examples, '[]'),
         next.win_angle,
-        JSON.stringify(next.metadata || {}),
+        safeJsonStringify(next.metadata || {}, '{}'),
       ]
     );
 
@@ -782,6 +1741,13 @@ class LinkedinAutomationService {
     try {
       if (accountId && String(accountType || '').toLowerCase() === 'team') {
         const teamAccount = await resolveTeamAccountForUser(userId, String(accountId));
+        logFetchDump('resolveTeamAccountForUser(snapshot)', {
+          userId,
+          accountId,
+          accountType,
+          found: Boolean(teamAccount),
+          teamAccount,
+        });
         if (teamAccount) {
           const teamMetadata = parseJsonObject(teamAccount?.metadata, {});
           const teamHeadline = toShortText(
@@ -822,6 +1788,8 @@ class LinkedinAutomationService {
                 ),
             headline: teamHeadline,
             about: teamAbout,
+            skills: Array.isArray(teamMetadata?.profile_skills) ? dedupeStrings(teamMetadata.profile_skills, 20) : [],
+            experience: toShortText(teamMetadata?.profile_experience || '', 800),
           };
 
           logAnalysis('Using team account snapshot for strategy analysis', {
@@ -860,6 +1828,32 @@ class LinkedinAutomationService {
         personalScopeAccountId ? [userId, personalScopeAccountId] : [userId]
       );
       const account = rows[0] || null;
+      logFetchDump('social_connected_accounts(snapshot)', {
+        userId,
+        accountId,
+        accountType,
+        personalScopeAccountId,
+        rowCount: rows.length,
+        rows,
+      });
+      logAnalysis('Fetched social_connected_accounts snapshot row', {
+        userId,
+        accountId,
+        accountType,
+        personalScopeAccountId,
+        rowCount: rows.length,
+        rowPreview: account
+          ? {
+              account_id: account.account_id || null,
+              account_display_name: previewText(account.account_display_name, 80) || null,
+              account_username: account.account_username || null,
+              followers_count: Number.isFinite(Number(account.followers_count))
+                ? Number(account.followers_count)
+                : null,
+              metadataKeys: Object.keys(parseJsonObject(account.metadata, {})).slice(0, 10),
+            }
+          : null,
+      });
       const metadata = parseJsonObject(account?.metadata, {});
       let headline = toShortText(metadata.headline || metadata.profile_headline || '', 255);
 
@@ -873,6 +1867,29 @@ class LinkedinAutomationService {
           [userId]
         );
         const legacy = legacyRows[0] || null;
+        logFetchDump('linkedin_auth(snapshot_fallback)', {
+          userId,
+          accountId,
+          accountType,
+          rowCount: legacyRows.length,
+          rows: legacyRows,
+        });
+        logAnalysis('Fetched linkedin_auth fallback row for snapshot', {
+          userId,
+          accountId,
+          accountType,
+          rowCount: legacyRows.length,
+          rowPreview: legacy
+            ? {
+                linkedin_display_name: previewText(legacy.linkedin_display_name, 80) || null,
+                linkedin_username: legacy.linkedin_username || null,
+                connections_count: Number.isFinite(Number(legacy.connections_count))
+                  ? Number(legacy.connections_count)
+                  : null,
+                headline: previewText(legacy.headline, 80) || null,
+              }
+            : null,
+        });
         if (!account && legacy) {
           return {
             display_name: toShortText(legacy.linkedin_display_name, 255),
@@ -882,6 +1899,8 @@ class LinkedinAutomationService {
               : 0,
             headline: toShortText(legacy.headline || '', 255),
             about: '',
+            skills: [],
+            experience: '',
           };
         }
         if (!headline && legacy?.headline) {
@@ -920,12 +1939,21 @@ class LinkedinAutomationService {
         headline,
         about: toShortText(
           metadata?.profile_about ||
+            metadata?.linkedin_about ||
             metadata?.about ||
             metadata?.description ||
             metadata?.organization_description ||
             '',
           800
         ),
+        skills: Array.isArray(metadata?.profile_skills)
+          ? dedupeStrings(metadata.profile_skills, 20)
+          : (
+              Array.isArray(metadata?.linkedin_skills)
+                ? dedupeStrings(metadata.linkedin_skills, 20)
+                : []
+            ),
+        experience: toShortText(metadata?.profile_experience || metadata?.linkedin_experience || '', 800),
       };
 
       const inferredOrgId = normalizeLinkedInActorId(
@@ -938,6 +1966,94 @@ class LinkedinAutomationService {
         explicitType === 'organization' ||
         String(accountId || '').startsWith('org:') ||
         inferredType === 'organization';
+
+      if (!isOrganizationScope && account?.access_token) {
+        const headers = {
+          Authorization: `Bearer ${account.access_token}`,
+          'X-Restli-Protocol-Version': '2.0.0',
+        };
+        const personalEndpoints = [
+          'https://api.linkedin.com/v2/me?projection=(id,localizedFirstName,localizedLastName,localizedHeadline,headline,summary,localizedSummary,biography,skills,positions,vanityName)',
+          'https://api.linkedin.com/v2/me',
+        ];
+        let personalDiscovered = {
+          hasHeadline: Boolean(snapshot.headline),
+          hasAbout: Boolean(snapshot.about),
+          skillsCount: Array.isArray(snapshot.skills) ? snapshot.skills.length : 0,
+          hasExperience: Boolean(snapshot.experience),
+        };
+
+        for (const endpoint of personalEndpoints) {
+          const alreadyComplete =
+            personalDiscovered.hasHeadline &&
+            personalDiscovered.hasAbout &&
+            personalDiscovered.skillsCount > 0 &&
+            personalDiscovered.hasExperience;
+          if (alreadyComplete) break;
+
+          try {
+            const response = await linkedinGetWithVersionRetry({
+              url: endpoint,
+              headers,
+              timeout: 12000,
+              context: {
+                userId,
+                accountId,
+                requestType: 'personal_profile',
+              },
+            });
+            const payload = response?.data || {};
+            const insights = extractPersonalProfileInsights(payload);
+            logFetchDump('linkedin_personal_profile.raw_payload', {
+              userId,
+              accountId,
+              endpoint,
+              payload,
+            });
+            logFetchDump('linkedin_personal_profile.insights', {
+              userId,
+              accountId,
+              endpoint,
+              insights,
+            });
+
+            if (!snapshot.headline && insights.headline) snapshot.headline = insights.headline;
+            if (!snapshot.about && insights.about) snapshot.about = insights.about;
+            if ((!Array.isArray(snapshot.skills) || snapshot.skills.length === 0) && insights.skills.length > 0) {
+              snapshot.skills = insights.skills.slice(0, 20);
+            }
+            if (!snapshot.experience && insights.experience) snapshot.experience = insights.experience;
+
+            personalDiscovered = {
+              hasHeadline: Boolean(snapshot.headline),
+              hasAbout: Boolean(snapshot.about),
+              skillsCount: Array.isArray(snapshot.skills) ? snapshot.skills.length : 0,
+              hasExperience: Boolean(snapshot.experience),
+            };
+
+            logAnalysis('Personal profile enrichment discovery', {
+              userId,
+              accountId,
+              endpoint,
+              hasHeadline: personalDiscovered.hasHeadline,
+              hasAbout: personalDiscovered.hasAbout,
+              skillsCount: personalDiscovered.skillsCount,
+              hasExperience: personalDiscovered.hasExperience,
+              aboutPreview: previewText(snapshot.about, 120),
+              skillsPreview: Array.isArray(snapshot.skills) ? snapshot.skills.slice(0, 6) : [],
+              experiencePreview: previewText(snapshot.experience, 120),
+            });
+          } catch (personalErr) {
+            warnAnalysis('Personal profile endpoint failed', {
+              userId,
+              accountId,
+              endpoint,
+              status: personalErr?.response?.status || null,
+              error: personalErr?.response?.data || personalErr?.message || String(personalErr),
+            });
+          }
+        }
+      }
 
       if (isOrganizationScope && snapshot.followers_count <= 0 && account?.access_token && inferredOrgId) {
         const headers = {
@@ -1065,6 +2181,9 @@ class LinkedinAutomationService {
         displayName: snapshot.display_name || null,
         username: snapshot.username || null,
         followers: snapshot.followers_count || 0,
+        hasAbout: Boolean(snapshot.about),
+        skillsCount: Array.isArray(snapshot.skills) ? snapshot.skills.length : 0,
+        hasExperience: Boolean(snapshot.experience),
       });
       return snapshot;
     } catch {
@@ -1080,16 +2199,43 @@ class LinkedinAutomationService {
   async getLinkedInApiAuthContext(userId, options = {}) {
     const { accountId = null, accountType = null } = options || {};
     const normalizedType = String(accountType || '').trim().toLowerCase();
+    logAnalysis('Resolving LinkedIn API auth context', {
+      userId,
+      accountId,
+      accountType,
+      normalizedType,
+    });
 
     if (accountId && normalizedType === 'team') {
       const teamAccount = await resolveTeamAccountForUser(userId, String(accountId));
-      if (!teamAccount?.access_token) return null;
+      logFetchDump('resolveTeamAccountForUser(api_auth)', {
+        userId,
+        accountId,
+        accountType,
+        found: Boolean(teamAccount),
+        teamAccount,
+      });
+      if (!teamAccount?.access_token) {
+        warnAnalysis('Team API auth context not found for requested account', {
+          userId,
+          accountId,
+          accountType,
+        });
+        return null;
+      }
       const isOrganization = String(teamAccount?.account_type || '').toLowerCase() === 'organization';
       const orgId = normalizeLinkedInActorId(
         teamAccount?.organization_id ||
           teamAccount?.account_id
       );
       const personId = normalizeLinkedInActorId(teamAccount?.linkedin_user_id);
+      logAnalysis('Resolved team API auth context', {
+        userId,
+        accountId,
+        accountType: isOrganization ? 'organization' : 'personal',
+        organizationId: isOrganization ? orgId : null,
+        linkedinUserId: isOrganization ? null : personId,
+      });
       return {
         accessToken: teamAccount.access_token,
         accountType: isOrganization ? 'organization' : 'personal',
@@ -1118,6 +2264,13 @@ class LinkedinAutomationService {
       params
     );
     const row = rows[0] || null;
+    logFetchDump('social_connected_accounts(api_auth)', {
+      userId,
+      accountId,
+      accountType,
+      rowCount: rows.length,
+      rows,
+    });
     if (row?.access_token) {
       const metadata = parseJsonObject(row?.metadata, {});
       const inferredType = inferLinkedInAccountType(row);
@@ -1129,6 +2282,14 @@ class LinkedinAutomationService {
         metadata?.linkedin_user_id ||
           (inferredType === 'personal' ? row.account_id : null)
       );
+      logAnalysis('Resolved personal/org API auth context from social_connected_accounts', {
+        userId,
+        accountId,
+        accountType: inferredType,
+        organizationId: inferredType === 'organization' ? organizationId : null,
+        linkedinUserId: inferredType === 'personal' ? linkedinUserId : null,
+        rowAccountId: row.account_id || null,
+      });
       return {
         accessToken: row.access_token,
         accountType: inferredType,
@@ -1146,10 +2307,31 @@ class LinkedinAutomationService {
       [userId]
     );
     const legacy = legacyRows[0] || null;
-    if (!legacy?.access_token) return null;
+    logFetchDump('linkedin_auth(api_auth_fallback)', {
+      userId,
+      accountId,
+      accountType,
+      rowCount: legacyRows.length,
+      rows: legacyRows,
+    });
+    if (!legacy?.access_token) {
+      warnAnalysis('No LinkedIn API auth context found in social or legacy tables', {
+        userId,
+        accountId,
+        accountType,
+      });
+      return null;
+    }
     const inferredType = String(legacy?.account_type || '').trim().toLowerCase() === 'organization'
       ? 'organization'
       : 'personal';
+    logAnalysis('Resolved API auth context from linkedin_auth fallback', {
+      userId,
+      accountId,
+      accountType: inferredType,
+      organizationId: inferredType === 'organization' ? normalizeLinkedInActorId(legacy.organization_id) : null,
+      linkedinUserId: inferredType === 'personal' ? normalizeLinkedInActorId(legacy.linkedin_user_id) : null,
+    });
     return {
       accessToken: legacy.access_token,
       accountType: inferredType,
@@ -1177,11 +2359,29 @@ class LinkedinAutomationService {
     const authorId = isOrganization
       ? normalizeLinkedInActorId(options?.accountId || auth.organizationId)
       : normalizeLinkedInActorId(options?.accountId || auth.linkedinUserId);
-    if (!authorId) return [];
+    if (!authorId) {
+      warnAnalysis('LinkedIn API fallback skipped: missing author id', {
+        userId,
+        accountId: options?.accountId || null,
+        accountType: options?.accountType || null,
+        resolvedAuthType: auth.accountType || null,
+      });
+      return [];
+    }
 
     const authorUrn = isOrganization
       ? `urn:li:organization:${authorId}`
       : `urn:li:person:${authorId}`;
+
+    logAnalysis('Attempting LinkedIn API fallback fetch', {
+      userId,
+      accountId: options?.accountId || null,
+      accountType: options?.accountType || null,
+      safeLimit,
+      resolvedAccountType: isOrganization ? 'organization' : 'personal',
+      authorUrn,
+      endpointCount: hasConfiguredLinkedInVersion() ? 3 : 2,
+    });
 
     const headers = {
       Authorization: `Bearer ${auth.accessToken}`,
@@ -1200,6 +2400,11 @@ class LinkedinAutomationService {
 
     for (const url of endpoints) {
       try {
+        logAnalysis('Calling LinkedIn API fallback endpoint', {
+          userId,
+          authorUrn,
+          endpoint: url,
+        });
         const response = await linkedinGetWithVersionRetry({
           url,
           headers,
@@ -1218,6 +2423,21 @@ class LinkedinAutomationService {
             : Array.isArray(payload?.items)
               ? payload.items
               : [];
+        logFetchDump('linkedin_api_recent_posts.raw_payload', {
+          userId,
+          authorUrn,
+          endpoint: url,
+          payload,
+          rawItems,
+        });
+
+        logAnalysis('LinkedIn API fallback endpoint response received', {
+          userId,
+          authorUrn,
+          endpoint: url,
+          rawCount: rawItems.length,
+          responseKeys: payload && typeof payload === 'object' ? Object.keys(payload).slice(0, 12) : [],
+        });
 
         const normalized = rawItems
           .map((item, idx) => {
@@ -1237,6 +2457,13 @@ class LinkedinAutomationService {
             };
           })
           .filter(Boolean);
+        logFetchDump('linkedin_api_recent_posts.normalized', {
+          userId,
+          authorUrn,
+          endpoint: url,
+          normalizedCount: normalized.length,
+          normalized,
+        });
 
         if (normalized.length > 0) {
           logAnalysis('LinkedIn API fallback succeeded', {
@@ -1244,6 +2471,11 @@ class LinkedinAutomationService {
             authorUrn,
             endpoint: url,
             count: normalized.length,
+            preview: normalized.slice(0, 3).map((post) => ({
+              id: post.id,
+              created_at: post.created_at,
+              snippet: previewText(post.post_content, 140),
+            })),
           });
           return normalized;
         }
@@ -1353,9 +2585,26 @@ class LinkedinAutomationService {
        LIMIT $${scopeParams.length + 1}`,
       [...scopeParams, safeLimit]
     );
+    logFetchDump('linkedin_posts(post_summary)', {
+      userId,
+      accountId,
+      accountType,
+      scopeDescription,
+      scopeParams,
+      rowCount: rows.length,
+      rows,
+    });
 
     const posts = Array.isArray(rows) ? rows : [];
     const postCount = posts.length;
+    logAnalysis('Fetched linkedin_posts for strategy summary', {
+      userId,
+      accountId,
+      accountType,
+      scopeDescription,
+      postCount,
+      preview: previewPostRows(posts, 3),
+    });
     if (!postCount) {
       const diagnostics = { total: 0, posted_total: 0, posted_personal: 0, posted_team: 0 };
       try {
@@ -1383,6 +2632,13 @@ class LinkedinAutomationService {
            LIMIT 5`,
           [userId]
         );
+        logFetchDump('linkedin_posts(post_summary_diagnostics)', {
+          userId,
+          accountId,
+          accountType,
+          diagnostics,
+          sampleRows,
+        });
 
         warnAnalysis('No posts found for active strategy scope', {
           userId,
@@ -1415,9 +2671,39 @@ class LinkedinAutomationService {
            LIMIT $${scheduledScopeParams.length + 1}`,
           [...scheduledScopeParams, safeLimit]
         );
+        logFetchDump('scheduled_linkedin_posts(post_summary_fallback)', {
+          userId,
+          accountId,
+          accountType,
+          isTeamScope,
+          scopeDescription,
+          scheduledScopeParams,
+          rowCount: scheduledRows.length,
+          rows: scheduledRows,
+        });
 
         const scheduledPosts = Array.isArray(scheduledRows) ? scheduledRows : [];
+        logAnalysis('Fetched scheduled_linkedin_posts for fallback summary', {
+          userId,
+          accountId,
+          accountType,
+          isTeamScope,
+          scopeDescription,
+          scheduledCount: scheduledPosts.length,
+          preview: previewPostRows(
+            scheduledPosts.map((post) => ({
+              ...post,
+              status: 'scheduled_fallback',
+            })),
+            3
+          ),
+        });
         if (scheduledPosts.length > 0) {
+          const recentPosts = scheduledPosts.slice(0, 8).map((post) => ({
+            id: post.id,
+            snippet: toShortText(post.post_content, 220),
+            engagement: 0,
+          }));
           logAnalysis('Using scheduled_linkedin_posts fallback for strategy summary', {
             userId,
             accountId,
@@ -1439,6 +2725,7 @@ class LinkedinAutomationService {
               comments: 0,
               shares: 0,
             })),
+            recentPosts,
             sourceScope: `${scopeDescription}:scheduled_fallback`,
           };
         }
@@ -1460,6 +2747,11 @@ class LinkedinAutomationService {
           accountType,
         });
         if (apiPosts.length > 0) {
+          const recentPosts = apiPosts.slice(0, 8).map((post) => ({
+            id: post.id,
+            snippet: toShortText(post.post_content, 220),
+            engagement: 0,
+          }));
           return {
             postCount: apiPosts.length,
             themes: extractKeywords(apiPosts),
@@ -1472,6 +2764,7 @@ class LinkedinAutomationService {
               comments: 0,
               shares: 0,
             })),
+            recentPosts,
             sourceScope: `${scopeDescription}:linkedin_api_fallback`,
           };
         }
@@ -1489,6 +2782,7 @@ class LinkedinAutomationService {
         themes: [],
         averageEngagement: 0,
         topPosts: [],
+        recentPosts: [],
         sourceScope: scopeDescription,
       };
     }
@@ -1513,12 +2807,36 @@ class LinkedinAutomationService {
       }))
       .sort((a, b) => b.engagement - a.engagement)
       .slice(0, 3);
+    const recentPosts = posts
+      .slice(0, 8)
+      .map((post, index) => ({
+        id: post.id,
+        snippet: toShortText(post.post_content, 220),
+        engagement: engagementScores[index] || 0,
+      }));
+    const extractedThemes = extractKeywords(posts);
+
+    logAnalysis('Computed strategy post summary metrics', {
+      userId,
+      accountId,
+      accountType,
+      scopeDescription,
+      postCount,
+      averageEngagement: Number(avgEngagement.toFixed(2)),
+      themes: extractedThemes.slice(0, 8),
+      topPostsPreview: topPosts.map((post) => ({
+        id: post.id,
+        engagement: post.engagement,
+        snippet: previewText(post.snippet, 120),
+      })),
+    });
 
     return {
       postCount,
-      themes: extractKeywords(posts),
+      themes: extractedThemes,
       averageEngagement: Number(avgEngagement.toFixed(2)),
       topPosts,
+      recentPosts,
       sourceScope: scopeDescription,
     };
   }
@@ -1577,57 +2895,99 @@ class LinkedinAutomationService {
   }
 
   buildRunPrompt({ queueTarget, profileContext, competitorConfig, postSummary, accountSnapshot, heuristicAnalysis }) {
+    const profileMetadata = parseJsonObject(profileContext?.metadata, {});
     const accountSummary = accountSnapshot
-      ? JSON.stringify(accountSnapshot)
+      ? safeJsonStringify({
+          display_name: toShortText(accountSnapshot.display_name, 120),
+          username: toShortText(accountSnapshot.username, 120),
+          followers_count: Number(accountSnapshot.followers_count || 0),
+          headline: toShortText(accountSnapshot.headline, 180),
+          about: toShortText(accountSnapshot.about, 260),
+          skills: Array.isArray(accountSnapshot.skills) ? accountSnapshot.skills.slice(0, 12) : [],
+          experience: toShortText(accountSnapshot.experience, 260),
+        }, '{}')
       : '{}';
-    const profileSummary = JSON.stringify({
-      role_niche: profileContext.role_niche,
-      target_audience: profileContext.target_audience,
-      outcomes_30_90: profileContext.outcomes_30_90,
-      proof_points: profileContext.proof_points,
+    const profileSummary = safeJsonStringify({
+      role_niche: toShortText(profileContext.role_niche, 180),
+      target_audience: toShortText(profileContext.target_audience, 180),
+      outcomes_30_90: toShortText(profileContext.outcomes_30_90, 220),
+      proof_points: toShortText(profileContext.proof_points, 260),
       tone_style: profileContext.tone_style,
-    });
-    const competitorSummary = JSON.stringify({
-      competitor_profiles: competitorConfig.competitor_profiles,
-      competitor_examples: competitorConfig.competitor_examples,
-      win_angle: competitorConfig.win_angle,
-    });
-    const postSummaryPayload = JSON.stringify(postSummary);
-    const heuristicPayload = JSON.stringify(heuristicAnalysis);
+      }, '{}');
+    const deepContextSummary = safeJsonStringify({
+      linkedin_about: toShortText(profileMetadata.linkedin_about, 220),
+      linkedin_experience: toShortText(profileMetadata.linkedin_experience, 260),
+      linkedin_skills: Array.isArray(profileMetadata.linkedin_skills)
+        ? profileMetadata.linkedin_skills.slice(0, 12)
+        : [],
+      portfolio_title: toShortText(profileMetadata.portfolio_title, 140),
+      portfolio_about: toShortText(profileMetadata.portfolio_about, 220),
+      portfolio_experience: toShortText(profileMetadata.portfolio_experience, 260),
+      portfolio_skills: Array.isArray(profileMetadata.portfolio_skills)
+        ? profileMetadata.portfolio_skills.slice(0, 12)
+        : [],
+      extra_context: toShortText(profileMetadata.extra_context || profileMetadata.user_context, 260),
+    }, '{}');
+    const competitorSummary = safeJsonStringify({
+      competitor_profiles: Array.isArray(competitorConfig.competitor_profiles)
+        ? competitorConfig.competitor_profiles.slice(0, 5)
+        : [],
+      competitor_examples: Array.isArray(competitorConfig.competitor_examples)
+        ? competitorConfig.competitor_examples.slice(0, 4).map((item) => toShortText(item, 120))
+        : [],
+      win_angle: toShortText(competitorConfig.win_angle, 80),
+    }, '{}');
+    const postSummaryPayload = safeJsonStringify({
+      postCount: Number(postSummary?.postCount || 0),
+      themes: Array.isArray(postSummary?.themes) ? postSummary.themes.slice(0, 8) : [],
+      averageEngagement: Number(postSummary?.averageEngagement || 0),
+      topPosts: Array.isArray(postSummary?.topPosts)
+        ? postSummary.topPosts.slice(0, 2).map((post) => ({
+            id: post?.id || null,
+            engagement: Number(post?.engagement || 0),
+            snippet: toShortText(post?.snippet || '', 140),
+          }))
+        : [],
+    }, '{}');
+    const recentPostCorpus = safeJsonStringify(
+      Array.isArray(postSummary?.recentPosts)
+        ? postSummary.recentPosts.slice(0, 6).map((post) => ({
+            id: post?.id || null,
+            engagement: Number(post?.engagement || 0),
+            snippet: toShortText(post?.snippet || '', 160),
+          }))
+        : [],
+      '[]'
+    );
+    const heuristicPayload = safeJsonStringify({
+      strengths: Array.isArray(heuristicAnalysis?.strengths) ? heuristicAnalysis.strengths.slice(0, 4) : [],
+      gaps: Array.isArray(heuristicAnalysis?.gaps) ? heuristicAnalysis.gaps.slice(0, 4) : [],
+      opportunities: Array.isArray(heuristicAnalysis?.opportunities) ? heuristicAnalysis.opportunities.slice(0, 4) : [],
+      nextAngles: Array.isArray(heuristicAnalysis?.nextAngles) ? heuristicAnalysis.nextAngles.slice(0, 4) : [],
+    }, '{}');
 
     return [
-      'Return ONLY valid JSON. No markdown, no commentary.',
-      'Schema:',
-      '{',
-      '  "analysis": {',
-      '    "strengths": string[],',
-      '    "gaps": string[],',
-      '    "opportunities": string[],',
-      '    "nextAngles": string[]',
-      '  },',
-      '  "queue": [',
-      '    {',
-      '      "title": string,',
-      '      "content": string,',
-      '      "hashtags": string[],',
-      '      "reason": string,',
-      '      "suggested_day_offset": number,',
-      '      "suggested_local_time": "HH:mm"',
-      '    }',
-      '  ]',
-      '}',
-      '',
+      'Return ONLY JSON. No markdown.',
+      'Output schema:',
+      '{"analysis":{"strengths":[],"gaps":[],"opportunities":[],"nextAngles":[]},"queue":[{"title":"","content":"","hashtags":[],"reason":"","suggested_day_offset":0,"suggested_local_time":"HH:mm"}]}',
       `Generate exactly ${queueTarget} queue items.`,
       'Constraints:',
-      '- LinkedIn-native writing style.',
-      '- Avoid generic filler.',
-      '- Use concrete hooks and proof-driven framing.',
-      '- Keep each post under 2800 characters.',
+      '- LinkedIn-native style with concrete hooks.',
+      '- Avoid generic filler; use proof-driven framing.',
+      '- Keep each post between 350 and 900 characters.',
       '- Include at most 4 hashtags per item.',
+      '- Every post must contain one concrete signal: metric, named tool, workflow, experiment, or first-hand observation.',
+      '- If project/product names are present in context, reference them explicitly (do not replace with generic labels).',
+      '- Do NOT repeat or paraphrase the recently posted content snippets.',
+      '- Prefer timely, high-signal angles from references, competitor context, portfolio updates, and niche shifts.',
+      '- Avoid cliches like "most people overlook..." and "if useful, comment template".',
+      '- If queue size is small, prioritize depth and publish-readiness over coverage.',
       '',
       `Profile context: ${profileSummary}`,
+      `Deep profile context: ${deepContextSummary}`,
       `Account snapshot: ${accountSummary}`,
       `User post summary: ${postSummaryPayload}`,
+      `Recent posted corpus (avoid repeating): ${recentPostCorpus}`,
       `Competitor context: ${competitorSummary}`,
       `Heuristic baseline analysis: ${heuristicPayload}`,
     ].join('\n');
@@ -1671,10 +3031,47 @@ class LinkedinAutomationService {
     });
     const profileContext = await this.assertConsentForRun(userId);
     const competitorConfig = this.mapCompetitors(await this.getCompetitorRow(userId));
+    logFetchDump('strategy_pipeline.inputs(profile_competitor)', {
+      userId,
+      accountId,
+      accountType,
+      profileContext,
+      competitorConfig,
+    });
+    logAnalysis('Strategy pipeline input snapshot ready', {
+      userId,
+      accountId,
+      accountType,
+      profileContext: {
+        role_niche: previewText(profileContext.role_niche, 120),
+        target_audience: previewText(profileContext.target_audience, 120),
+        outcomes_30_90: previewText(profileContext.outcomes_30_90, 120),
+        proof_points: previewText(profileContext.proof_points, 120),
+        tone_style: profileContext.tone_style,
+        consent_use_posts: Boolean(profileContext.consent_use_posts),
+        consent_store_profile: Boolean(profileContext.consent_store_profile),
+      },
+      competitorConfig: {
+        competitor_profiles: Array.isArray(competitorConfig.competitor_profiles)
+          ? competitorConfig.competitor_profiles.slice(0, 5)
+          : [],
+        competitor_examples_preview: Array.isArray(competitorConfig.competitor_examples)
+          ? competitorConfig.competitor_examples.slice(0, 3).map((value) => previewText(value, 120))
+          : [],
+        win_angle: competitorConfig.win_angle || null,
+      },
+    });
     const [postSummary, accountSnapshot] = await Promise.all([
       this.getPostSummary(userId, { limit: MAX_POSTS_FOR_ANALYSIS, accountId, accountType }),
       this.getLinkedinAccountSnapshot(userId, { accountId, accountType }),
     ]);
+    logFetchDump('strategy_pipeline.inputs(post_summary_snapshot)', {
+      userId,
+      accountId,
+      accountType,
+      postSummary,
+      accountSnapshot,
+    });
     logAnalysis('Post summary and account snapshot ready', {
       userId,
       postCount: postSummary?.postCount || 0,
@@ -1695,6 +3092,7 @@ class LinkedinAutomationService {
       profileContext,
       postSummary,
       competitorConfig,
+      accountSnapshot,
     });
 
     let aiRaw = null;
@@ -1709,8 +3107,18 @@ class LinkedinAutomationService {
         accountSnapshot,
         heuristicAnalysis,
       });
+      const providerPrompt = trimPromptForProvider(prompt, MAX_STRATEGY_PROMPT_LENGTH);
+      logAnalysis('Dispatching strategy prompt to AI provider', {
+        userId,
+        accountId,
+        accountType,
+        promptLength: prompt.length,
+        providerPromptLength: providerPrompt.length,
+        wasTrimmedForProvider: providerPrompt.length < prompt.length,
+        promptPreview: previewText(providerPrompt, 500),
+      });
       const aiResult = await aiService.generateStrategyContent(
-        prompt,
+        providerPrompt,
         'professional',
         userToken,
         userId,
@@ -1719,12 +3127,118 @@ class LinkedinAutomationService {
       aiRaw = aiResult?.content || null;
       aiProvider = aiResult?.provider || null;
       parsed = parseAiJson(aiRaw || '');
-    } catch {
+      if (!parsed && aiRaw) {
+        const repairPrompt = trimPromptForProvider(
+          buildJsonRepairPrompt({
+            queueTarget: safeQueueTarget,
+            rawOutput: aiRaw,
+            profileContext,
+            postSummary,
+          }),
+          MAX_STRATEGY_PROMPT_LENGTH
+        );
+        logAnalysis('Primary AI output invalid JSON; requesting repair pass', {
+          userId,
+          accountId,
+          accountType,
+          provider: aiProvider,
+          repairPromptLength: repairPrompt.length,
+        });
+
+        const repairedResult = await aiService.generateStrategyContent(
+          repairPrompt,
+          'professional',
+          userToken,
+          userId,
+          cookieHeader
+        );
+        const repairedRaw = repairedResult?.content || '';
+        const repairedParsed = parseAiJson(repairedRaw);
+        if (repairedParsed) {
+          aiRaw = repairedRaw;
+          aiProvider = repairedResult?.provider || aiProvider;
+          parsed = repairedParsed;
+          logAnalysis('Repair pass produced valid strategy JSON', {
+            userId,
+            accountId,
+            accountType,
+            provider: aiProvider,
+            rawLength: repairedRaw.length,
+          });
+        } else {
+          warnAnalysis('Repair pass still returned invalid JSON', {
+            userId,
+            accountId,
+            accountType,
+            provider: repairedResult?.provider || aiProvider,
+            rawLength: repairedRaw.length,
+          });
+        }
+      }
+      logFetchDump('strategy_pipeline.ai_response', {
+        userId,
+        accountId,
+        accountType,
+        provider: aiProvider,
+        raw: aiRaw,
+        parsed,
+      });
+      logAnalysis('AI strategy response received', {
+        userId,
+        accountId,
+        accountType,
+        provider: aiProvider,
+        hasRaw: Boolean(aiRaw),
+        rawLength: aiRaw ? String(aiRaw).length : 0,
+        parsed: Boolean(parsed),
+        rawPreview: previewText(aiRaw, 500),
+      });
+    } catch (aiError) {
       parsed = null;
+      warnAnalysis('AI strategy generation failed, falling back to heuristic queue', {
+        userId,
+        accountId,
+        accountType,
+        error: aiError?.message || aiError,
+      });
     }
 
-    const normalizedQueue = parseQueueItemsFromAi(parsed, fallbackQueue).slice(0, safeQueueTarget);
+    const aiQueue = parseQueueItemsFromAi(parsed, []);
+    const normalizedQueue = refineQueueDrafts({
+      aiQueue,
+      fallbackQueue,
+      queueTarget: safeQueueTarget,
+      postSummary,
+    });
     const normalizedAnalysis = normalizeAnalysis(parsed, heuristicAnalysis);
+    logFetchDump('strategy_pipeline.normalized_output', {
+      userId,
+      accountId,
+      accountType,
+      normalizedQueue,
+      normalizedAnalysis,
+      usedAi: Boolean(parsed),
+      aiProvider,
+    });
+    logAnalysis('Normalized strategy output prepared', {
+      userId,
+      accountId,
+      accountType,
+      normalizedQueueCount: normalizedQueue.length,
+      queuePreview: normalizedQueue.slice(0, 3).map((item, index) => ({
+        index: index + 1,
+        title: previewText(item.title, 100),
+        contentSnippet: previewText(item.content, 140),
+        hashtags: normalizeHashtags(item.hashtags),
+        reason: previewText(item.reason, 120),
+      })),
+      analysisPreview: {
+        strengths: Array.isArray(normalizedAnalysis?.strengths) ? normalizedAnalysis.strengths.slice(0, 3) : [],
+        gaps: Array.isArray(normalizedAnalysis?.gaps) ? normalizedAnalysis.gaps.slice(0, 3) : [],
+        opportunities: Array.isArray(normalizedAnalysis?.opportunities) ? normalizedAnalysis.opportunities.slice(0, 3) : [],
+        nextAngles: Array.isArray(normalizedAnalysis?.nextAngles) ? normalizedAnalysis.nextAngles.slice(0, 3) : [],
+      },
+    });
     const runId = crypto.randomUUID();
 
     const client = await pool.connect();
@@ -1742,19 +3256,26 @@ class LinkedinAutomationService {
           userId,
           'completed',
           safeQueueTarget,
-          JSON.stringify({
+          safeJsonStringify({
             profileContext,
             competitorConfig,
             postSummary,
             accountSnapshot,
             analysis: normalizedAnalysis,
-          }),
-          JSON.stringify({
+          }, '{}'),
+          safeJsonStringify({
             aiProvider,
             usedAi: Boolean(parsed),
-          }),
+          }, '{}'),
         ]
       );
+      logAnalysis('Inserted linkedin_automation_runs row', {
+        userId,
+        runId,
+        queueTarget: safeQueueTarget,
+        usedAi: Boolean(parsed),
+        aiProvider: aiProvider || null,
+      });
 
       const insertedQueueItems = [];
       for (const item of normalizedQueue) {
@@ -1773,20 +3294,31 @@ class LinkedinAutomationService {
             runId,
             toShortText(item.title, 220),
             mergeHashtagsIntoContent(item.content, item.hashtags),
-            JSON.stringify(normalizeHashtags(item.hashtags)),
-            JSON.stringify(normalizedAnalysis),
-            JSON.stringify({
+            safeJsonStringify(normalizeHashtags(item.hashtags), '[]'),
+            safeJsonStringify(normalizedAnalysis, '{}'),
+            safeJsonStringify({
               reason: toShortText(item.reason, 400),
               suggested_day_offset: Number(item.suggested_day_offset || 0),
               suggested_local_time: String(item.suggested_local_time || '09:00'),
               ai_provider: aiProvider,
-            }),
+            }, '{}'),
           ]
         );
         insertedQueueItems.push(rows[0]);
       }
 
+      logAnalysis('Inserted linkedin_automation_queue rows', {
+        userId,
+        runId,
+        insertedCount: insertedQueueItems.length,
+        insertedIds: insertedQueueItems.slice(0, 10).map((row) => row?.id || null),
+      });
+
       await client.query('COMMIT');
+      logAnalysis('Strategy pipeline transaction committed', {
+        userId,
+        runId,
+      });
 
       return {
         runId,
@@ -1948,12 +3480,12 @@ class LinkedinAutomationService {
       [
         queueId,
         userId,
-        JSON.stringify({
+        safeJsonStringify({
           ...currentMetadata,
           scheduled_post_id: scheduledPost?.id || null,
           scheduled_time_utc: scheduledUtc.toISO(),
           scheduled_timezone: normalizedTimezone,
-        }),
+        }, '{}'),
       ]
     );
 

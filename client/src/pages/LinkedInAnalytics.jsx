@@ -12,7 +12,7 @@ import { analytics } from '../utils/api';
 import LoadingSpinner from '../components/LoadingSpinner';
 import AccountSelector from '../components/AccountSelector';
 import { useAuth } from '../contexts/AuthContext';
-import { useAccount } from '../contexts/AccountContext';
+import { useAccount, getCurrentAccountId as resolveCurrentAccountId } from '../contexts/AccountContext';
 import { hasProPlanAccess } from '../utils/planAccess';
 import { getSuiteGenieProUpgradeUrl } from '../utils/upgradeUrl';
 import toast from 'react-hot-toast';
@@ -48,9 +48,7 @@ const LinkedInAnalytics = () => {
   const isProPlan = hasUserProPlan || hasServerProPlan;
 
   // Stable account identifier that works for both personal and team accounts
-  const accountScopeKey = selectedAccount
-    ? (selectedAccount.account_id || selectedAccount.id || null)
-    : null;
+  const accountScopeKey = resolveCurrentAccountId(selectedAccount);
 
   // Unified filter persistence for timeframe
   useEffect(() => {
@@ -87,7 +85,7 @@ const LinkedInAnalytics = () => {
         : String(FREE_DAYS);
       const params = { days: requestedDays };
       if (selectedAccount) {
-        const accountId = selectedAccount.account_id || selectedAccount.id;
+        const accountId = resolveCurrentAccountId(selectedAccount);
         const accountType = selectedAccount.isTeamAccount ? 'team' : selectedAccount.account_type;
         if (accountId && accountType) {
           params.account_id = accountId;
@@ -122,7 +120,7 @@ const LinkedInAnalytics = () => {
 
       const syncPayload = {};
       if (selectedAccount) {
-        const accountId = selectedAccount.account_id || selectedAccount.id;
+        const accountId = resolveCurrentAccountId(selectedAccount);
         const accountType = selectedAccount.isTeamAccount ? 'team' : selectedAccount.account_type;
         if (accountId && accountType) {
           syncPayload.account_id = accountId;

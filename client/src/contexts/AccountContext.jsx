@@ -49,7 +49,25 @@ export const AccountProvider = ({ children }) => {
     return organizationAccount || fetchedAccounts[0];
   }, []);
 
-  const updateSelectedAccount = useCallback((account) => {
+  const persistSelectedAccountPreference = useCallback((account) => {
+    if (!isAuthenticated || !account) return;
+
+    const payload = {
+      accountId: account.id || null,
+      accountKey: account.account_id || null,
+      accountType: account.account_type || null,
+      teamId: account.team_id || null,
+      isTeamAccount: Boolean(account.isTeamAccount),
+    };
+
+    // Fire-and-forget preference sync so UX stays instant.
+    api.post('/api/team/select-account', payload).catch((error) => {
+      console.warn('[AccountContext] Failed to persist selected account:', error?.response?.data?.error || error?.message || error);
+    });
+  }, [isAuthenticated]);
+
+  const updateSelectedAccount = useCallback((account, options = {}) => {
+    const shouldPersist = options?.persist !== false;
     setSelectedAccount(account);
 
     if (!account) {
@@ -70,7 +88,11 @@ export const AccountProvider = ({ children }) => {
         isTeamAccount: account.isTeamAccount
       })
     );
-  }, []);
+
+    if (shouldPersist) {
+      persistSelectedAccountPreference(account);
+    }
+  }, [persistSelectedAccountPreference]);
 
   const fetchAccounts = useCallback(async () => {
     if (accountsRequestInFlightRef.current) {
@@ -83,6 +105,8 @@ export const AccountProvider = ({ children }) => {
     try {
       const accountsResponse = await api.get('/api/team/accounts');
       const fetchedAccounts = accountsResponse.data.accounts || [];
+      const preferredAccountId = accountsResponse.data?.selectedAccountId || null;
+      const preferredAccountKey = accountsResponse.data?.selectedAccountKey || null;
       setAccounts(fetchedAccounts);
 
       try {
@@ -99,12 +123,22 @@ export const AccountProvider = ({ children }) => {
 
       const savedAccount = localStorage.getItem('selectedLinkedInAccount');
       let accountToSelect = null;
+
+      if (preferredAccountId || preferredAccountKey) {
+        accountToSelect = fetchedAccounts.find(
+          (acc) => (preferredAccountId && acc.id === preferredAccountId) ||
+            (preferredAccountKey && acc.account_id === preferredAccountKey)
+        ) || null;
+      }
+
       if (savedAccount) {
         try {
           const saved = JSON.parse(savedAccount);
-          accountToSelect = fetchedAccounts.find(
-            (acc) => acc.id === saved.id || acc.account_id === saved.account_id
-          );
+          if (!accountToSelect) {
+            accountToSelect = fetchedAccounts.find(
+              (acc) => acc.id === saved.id || acc.account_id === saved.account_id
+            ) || null;
+          }
         } catch {
           localStorage.removeItem('selectedLinkedInAccount');
         }
@@ -114,11 +148,11 @@ export const AccountProvider = ({ children }) => {
         accountToSelect = getDefaultAccount(fetchedAccounts);
       }
 
-      updateSelectedAccount(accountToSelect);
+      updateSelectedAccount(accountToSelect, { persist: false });
     } catch {
       setAccounts([]);
       setTeams([]);
-      updateSelectedAccount(null);
+      updateSelectedAccount(null, { persist: false });
     } finally {
       setLoading(false);
       accountsRequestInFlightRef.current = false;

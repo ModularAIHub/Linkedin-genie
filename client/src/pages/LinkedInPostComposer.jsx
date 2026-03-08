@@ -12,6 +12,7 @@ import {
   SchedulingPanel
 } from '../components/LinkedInPostComposer';
 import { useLinkedInPostComposer } from '../hooks/useLinkedInPostComposer';
+import useComposerInitialPayload from '../hooks/useComposerInitialPayload';
 import { useAccount } from '../contexts/AccountContext';
 import AccountSelector from '../components/AccountSelector';
 import api, { byok } from '../utils/api';
@@ -66,6 +67,7 @@ const LinkedInPostComposer = () => {
   const [threadsTargetAccounts, setThreadsTargetAccounts] = useState([]);
   const [selectedCrossPostTargetIds, setSelectedCrossPostTargetIds] = useState({ x: '', threads: '' });
   const [optimizeCrossPost, setOptimizeCrossPost] = useState(true);
+  const [hasAppliedStrategyPrompt, setHasAppliedStrategyPrompt] = useState(false);
 
   const fetchCrossPostStatuses = async () => {
     const teamId = selectedAccount?.team_id || selectedAccount?.teamId || null;
@@ -239,8 +241,19 @@ const LinkedInPostComposer = () => {
   // handleRemoveSlide,
     handleAIButtonClick,
     handleImageButtonClick,
-    fetchScheduledPosts
+    fetchScheduledPosts,
+    setShowAIPrompt,
   } = useLinkedInPostComposer();
+
+  useComposerInitialPayload({
+    hasApplied: hasAppliedStrategyPrompt,
+    setHasApplied: setHasAppliedStrategyPrompt,
+    setContent,
+    setAiPrompt,
+    setShowAIPrompt,
+    handleAIButtonClick,
+    showAIPrompt,
+  });
 
   useEffect(() => {
     if (accountsLoading || !Array.isArray(accounts) || accounts.length === 0) {
