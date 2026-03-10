@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   CalendarClock,
   CheckCircle2,
@@ -14,6 +14,7 @@ import {
 } from './contentPlanUtils';
 
 export default function ContentPlanQueueSection({
+  queueItems = [],
   filteredQueue = [],
   contentPlanRunId = null,
   queueStatusFilter = '',
@@ -35,6 +36,34 @@ export default function ContentPlanQueueSection({
     hashtagsText: '',
     reason: '',
   });
+  const [selectedQueueIds, setSelectedQueueIds] = useState([]);
+  const [generateMoreCount, setGenerateMoreCount] = useState(3);
+
+  const regeneratableStatuses = useMemo(
+    () => new Set(['draft', 'needs_approval', 'approved', 'rejected']),
+    []
+  );
+
+  useEffect(() => {
+    const validQueueIds = new Set(
+      (Array.isArray(queueItems) ? queueItems : [])
+        .filter((item) => regeneratableStatuses.has(String(item?.status || '').toLowerCase()))
+        .map((item) => String(item?.id || '').trim())
+        .filter(Boolean)
+    );
+    setSelectedQueueIds((current) => current.filter((id) => validQueueIds.has(id)));
+  }, [queueItems, regeneratableStatuses]);
+
+  const visibleRegeneratableIds = useMemo(
+    () =>
+      filteredQueue
+        .filter((item) => regeneratableStatuses.has(String(item?.status || '').toLowerCase()))
+        .map((item) => String(item?.id || '').trim())
+        .filter(Boolean),
+    [filteredQueue, regeneratableStatuses]
+  );
+
+  const selectedRegeneratableCount = selectedQueueIds.length;
 
   const startEditing = (item) => {
     setEditingId(item?.id || '');
@@ -72,18 +101,88 @@ export default function ContentPlanQueueSection({
     cancelEditing();
   };
 
+  const toggleQueueSelection = (queueId, checked) => {
+    const id = String(queueId || '').trim();
+    if (!id) return;
+    setSelectedQueueIds((current) => {
+      if (checked) {
+        if (current.includes(id)) return current;
+        return [...current, id];
+      }
+      return current.filter((value) => value !== id);
+    });
+  };
+
+  const handleSelectVisibleRegeneratable = () => {
+    setSelectedQueueIds(visibleRegeneratableIds);
+  };
+
+  const handleClearSelection = () => {
+    setSelectedQueueIds([]);
+  };
+
+  const handleRegenerateSelected = async () => {
+    if (selectedQueueIds.length === 0) return;
+    await onGenerateContentPlan({
+      mode: 'regenerate_selected',
+      selectedQueueIds,
+    });
+    setSelectedQueueIds([]);
+  };
+
+  const handleGenerateMore = async () => {
+    await onGenerateContentPlan({
+      mode: 'append',
+      queueTarget: generateMoreCount,
+    });
+  };
+
   return (
     <section className="rounded-xl border border-gray-200 bg-white p-5 space-y-4">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <h3 className="text-lg font-semibold text-gray-900">Publish-ready queue</h3>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={onGenerateContentPlan}
+            onClick={() => onGenerateContentPlan({ mode: 'replace' })}
             disabled={generatingContentPlan}
             className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
           >
-            {generatingContentPlan ? 'Generating...' : 'Generate Content Plan'}
+            {generatingContentPlan ? 'Running...' : 'Replace Queue'}
+          </button>
+          <div className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-2 py-1.5">
+            <span className="text-xs text-gray-600">More</span>
+            <input
+              type="number"
+              min={1}
+              max={14}
+              value={generateMoreCount}
+              onChange={(event) => {
+                const value = Number.parseInt(String(event.target.value || '3'), 10);
+                if (!Number.isFinite(value)) {
+                  setGenerateMoreCount(3);
+                  return;
+                }
+                setGenerateMoreCount(Math.max(1, Math.min(14, value)));
+              }}
+              className="w-14 rounded-md border border-gray-300 px-2 py-1 text-sm"
+            />
+            <button
+              type="button"
+              onClick={handleGenerateMore}
+              disabled={generatingContentPlan}
+              className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-60"
+            >
+              Generate More
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={handleRegenerateSelected}
+            disabled={generatingContentPlan || selectedRegeneratableCount === 0}
+            className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-100 disabled:opacity-60"
+          >
+            Regenerate Selected ({selectedRegeneratableCount})
           </button>
           <button
             type="button"
@@ -118,6 +217,27 @@ export default function ContentPlanQueueSection({
         </div>
       ) : (
         <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">
+            <button
+              type="button"
+              onClick={handleSelectVisibleRegeneratable}
+              disabled={visibleRegeneratableIds.length === 0 || generatingContentPlan}
+              className="rounded-md border border-gray-300 bg-white px-2 py-1 hover:bg-gray-50 disabled:opacity-60"
+            >
+              Select visible regeneratable
+            </button>
+            <button
+              type="button"
+              onClick={handleClearSelection}
+              disabled={selectedRegeneratableCount === 0}
+              className="rounded-md border border-gray-300 bg-white px-2 py-1 hover:bg-gray-50 disabled:opacity-60"
+            >
+              Clear selection
+            </button>
+            <span>
+              Selected: {selectedRegeneratableCount} | Visible regeneratable: {visibleRegeneratableIds.length}
+            </span>
+          </div>
           {filteredQueue.map((item) => {
             const isBusy = actionLoadingId === item.id;
             const isEditing = editingId === item.id;
@@ -125,6 +245,7 @@ export default function ContentPlanQueueSection({
               scheduled_time: buildDefaultScheduleTime(),
               timezone,
             };
+            const isRegeneratable = regeneratableStatuses.has(String(item?.status || '').toLowerCase());
             const statusLabel = item.status === 'scheduled'
               ? 'done (scheduled)'
               : item.status === 'completed'
@@ -132,23 +253,34 @@ export default function ContentPlanQueueSection({
               : item.status === 'posted'
                 ? 'done (posted)'
                 : item.status;
+            const isSelectedForRegeneration = selectedQueueIds.includes(String(item?.id || '').trim());
 
             return (
               <div key={item.id} className="rounded-lg border border-gray-200 p-4 space-y-3">
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                  <div>
-                    {isEditing ? (
+                  <div className="flex items-start gap-2">
+                    {isRegeneratable && (
                       <input
-                        type="text"
-                        value={editDraft.title}
-                        onChange={(event) => setEditDraft((prev) => ({ ...prev, title: event.target.value }))}
-                        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-900"
-                        placeholder="Post title"
+                        type="checkbox"
+                        checked={isSelectedForRegeneration}
+                        onChange={(event) => toggleQueueSelection(item.id, event.target.checked)}
+                        className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600"
                       />
-                    ) : (
-                      <h4 className="font-semibold text-gray-900">{item.title || 'Untitled queue item'}</h4>
                     )}
-                    <p className="text-xs text-gray-500">Created {formatDateTime(item.createdAt)}</p>
+                    <div>
+                      {isEditing ? (
+                        <input
+                          type="text"
+                          value={editDraft.title}
+                          onChange={(event) => setEditDraft((prev) => ({ ...prev, title: event.target.value }))}
+                          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-900"
+                          placeholder="Post title"
+                        />
+                      ) : (
+                        <h4 className="font-semibold text-gray-900">{item.title || 'Untitled queue item'}</h4>
+                      )}
+                      <p className="text-xs text-gray-500">Created {formatDateTime(item.createdAt)}</p>
+                    </div>
                   </div>
                   <span className={`inline-flex w-fit rounded-full px-2.5 py-1 text-xs font-medium ${STATUS_STYLES[item.status] || STATUS_STYLES.draft}`}>
                     {statusLabel}
@@ -255,6 +387,21 @@ export default function ContentPlanQueueSection({
                     <Sparkles className="h-3.5 w-3.5" />
                     Use in Compose
                   </button>
+                  {isRegeneratable && (
+                    <button
+                      type="button"
+                      disabled={isBusy || generatingContentPlan}
+                      onClick={() =>
+                        onGenerateContentPlan({
+                          mode: 'regenerate_selected',
+                          selectedQueueIds: [item.id],
+                        })
+                      }
+                      className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-medium text-indigo-700 hover:bg-indigo-100 disabled:opacity-60"
+                    >
+                      Regenerate
+                    </button>
+                  )}
 
                   {(item.status === 'needs_approval' || item.status === 'draft' || item.status === 'rejected') && (
                     <button

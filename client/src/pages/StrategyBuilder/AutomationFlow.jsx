@@ -94,24 +94,72 @@ export default function AutomationFlow({
     }
   };
 
-  const handleGenerateContentPlan = async () => {
+  const handleGenerateContentPlan = async (options = {}) => {
     if (!strategy?.id) return;
+    const normalizedMode = ['replace', 'append', 'regenerate_selected'].includes(
+      String(options?.mode || 'replace').toLowerCase()
+    )
+      ? String(options.mode || 'replace').toLowerCase()
+      : 'replace';
+    const selectedQueueIds = Array.isArray(options?.selectedQueueIds)
+      ? options.selectedQueueIds
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+      : [];
+    const queueTarget = Number.parseInt(String(options?.queueTarget || ''), 10);
+    const payload = {
+      mode: normalizedMode,
+    };
+    if (Number.isFinite(queueTarget) && queueTarget > 0) {
+      payload.queueTarget = queueTarget;
+    }
+    if (selectedQueueIds.length > 0) {
+      payload.selectedQueueIds = selectedQueueIds;
+    }
+
+    if (normalizedMode === 'replace' && contentPlan.runId && !options?.skipConfirm) {
+      const confirmed = window.confirm(
+        'Replace current queue with a fresh generation? Existing unscheduled items will be replaced.'
+      );
+      if (!confirmed) return;
+    }
+    if (normalizedMode === 'regenerate_selected' && selectedQueueIds.length === 0) {
+      toast.error('Select at least one queue item to regenerate.');
+      return;
+    }
 
     try {
       setGeneratingContentPlan(true);
-      const response = await strategyApi.generateContentPlan(strategy.id);
+      const response = await strategyApi.generateContentPlan(strategy.id, payload);
       const generated = response?.data?.contentPlan || {};
       await loadContentPlan({ silent: true });
       await onContentPlanGenerated?.();
       const queueCount = Number(generated.queueCount || 0);
-      toast.success(
-        queueCount > 0
-          ? `Content plan generated (${queueCount} posts)`
-          : 'Content plan generated'
-      );
+      const addedCount = Number(generated.addedCount || 0);
+      const regeneratedCount = Number(generated.regeneratedCount || 0);
+
+      if (normalizedMode === 'append') {
+        toast.success(
+          addedCount > 0
+            ? `Generated ${addedCount} more post${addedCount === 1 ? '' : 's'}`
+            : 'Generated more content'
+        );
+      } else if (normalizedMode === 'regenerate_selected') {
+        toast.success(
+          regeneratedCount > 0
+            ? `Regenerated ${regeneratedCount} selected item${regeneratedCount === 1 ? '' : 's'}`
+            : 'Selected queue regenerated'
+        );
+      } else {
+        toast.success(
+          queueCount > 0
+            ? `Content plan generated (${queueCount} posts)`
+            : 'Content plan generated'
+        );
+      }
     } catch (error) {
       console.error(error);
-      toast.error(error?.response?.data?.error || 'Failed to generate content plan');
+      toast.error(error?.response?.data?.error || 'Failed to run content plan generation');
     } finally {
       setGeneratingContentPlan(false);
     }
@@ -345,7 +393,7 @@ export default function AutomationFlow({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={handleGenerateContentPlan}
+              onClick={() => handleGenerateContentPlan({ mode: 'replace' })}
               disabled={generatingContentPlan}
               className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
             >
@@ -353,7 +401,7 @@ export default function AutomationFlow({
               {generatingContentPlan
                 ? 'Generating...'
                 : contentPlan.runId
-                  ? 'Regenerate Content Plan'
+                  ? 'Replace Queue'
                   : 'Generate Content Plan'}
             </button>
             <button
@@ -421,6 +469,7 @@ export default function AutomationFlow({
       />
 
       <ContentPlanQueueSection
+        queueItems={contentPlan.queue}
         filteredQueue={filteredQueue}
         contentPlanRunId={contentPlan.runId}
         queueStatusFilter={queueStatusFilter}

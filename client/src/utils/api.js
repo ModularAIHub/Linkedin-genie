@@ -176,7 +176,7 @@ export const strategy = {
   refreshContextVault: (id, payload = {}) => api.post(`/api/strategy/${id}/context-vault/refresh`, payload),
   applyContextVault: (id, payload = {}) => api.post(`/api/strategy/${id}/context-vault/apply`, payload),
   getContentPlan: (id) => api.get(`/api/strategy/${id}/content-plan`),
-  generateContentPlan: (id) => api.post(`/api/strategy/${id}/content-plan/generate`),
+  generateContentPlan: (id, payload = {}) => api.post(`/api/strategy/${id}/content-plan/generate`, payload),
   list: () => api.get('/api/strategy/list'),
   create: (data) => api.post('/api/strategy', data),
   chat: (message, strategyId, currentStep) =>

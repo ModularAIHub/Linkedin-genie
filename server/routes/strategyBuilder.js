@@ -15,7 +15,13 @@ import { requireProPlan } from '../middleware/planAccess.js';
 
 const router = express.Router();
 router.use(requireProPlan('Strategy Builder'));
-const CONTENT_PLAN_QUEUE_TARGET = 2;
+const CONTENT_PLAN_QUEUE_TARGET = 7;
+const CONTENT_PLAN_QUEUE_TARGET_MIN = 1;
+const CONTENT_PLAN_QUEUE_TARGET_MAX = 14;
+const CONTENT_PLAN_APPEND_DEFAULT_TARGET = 3;
+const CONTENT_PLAN_GENERATE_MODES = new Set(['replace', 'append', 'regenerate_selected']);
+const REGENERATABLE_QUEUE_STATUSES = new Set(['draft', 'needs_approval', 'approved', 'rejected']);
+const UUID_V4_LIKE_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const INIT_ANALYSIS_LOCK_TTL_MS = 10 * 60 * 1000;
 const initAnalysisLocks = new Map();
 
@@ -116,6 +122,34 @@ const pruneExpiredInitAnalysisLocks = () => {
       initAnalysisLocks.delete(key);
     }
   }
+};
+
+const normalizeContentPlanMode = (value = 'replace') => {
+  const mode = String(value || 'replace').trim().toLowerCase();
+  return CONTENT_PLAN_GENERATE_MODES.has(mode) ? mode : 'replace';
+};
+
+const normalizeContentPlanQueueTarget = (value, fallback = CONTENT_PLAN_QUEUE_TARGET) => {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  const base = Number.isFinite(parsed) ? parsed : Number.parseInt(String(fallback ?? CONTENT_PLAN_QUEUE_TARGET), 10);
+  const safe = Number.isFinite(base) ? base : CONTENT_PLAN_QUEUE_TARGET;
+  return Math.max(CONTENT_PLAN_QUEUE_TARGET_MIN, Math.min(CONTENT_PLAN_QUEUE_TARGET_MAX, safe));
+};
+
+const normalizeQueueIdList = (value = [], max = 60) =>
+  dedupeStrings(Array.isArray(value) ? value : [value], max)
+    .map((item) => String(item || '').trim())
+    .filter((item) => UUID_V4_LIKE_REGEX.test(item));
+
+const deriveDefaultContentPlanQueueTarget = (strategy = {}) => {
+  const frequency = String(strategy?.posting_frequency || '').toLowerCase().trim();
+  if (!frequency) return CONTENT_PLAN_QUEUE_TARGET;
+  if (/\b(daily|every day|7\s*times?)\b/.test(frequency)) return 7;
+  if (/\b(5\s*times?|five)\b/.test(frequency)) return 5;
+  if (/3\s*[-to]+\s*5/.test(frequency) || /\b(three to five|3-5)\b/.test(frequency)) return 5;
+  if (/2\s*[-to]+\s*3/.test(frequency) || /\b(two to three|2-3|twice)\b/.test(frequency)) return 3;
+  if (/\b(weekly|once|1\s*[-to]+\s*2|1-2)\b/.test(frequency)) return 2;
+  return CONTENT_PLAN_QUEUE_TARGET;
 };
 
 const stripMarkdownCodeFences = (value = '') =>
@@ -1858,7 +1892,10 @@ const markContentPlanPromptsUsed = async ({
   runId = null,
   queueCount = CONTENT_PLAN_QUEUE_TARGET,
 } = {}) => {
-  const safeQueueCount = Math.max(1, Math.min(8, Number(queueCount || CONTENT_PLAN_QUEUE_TARGET)));
+  const safeQueueCount = Math.max(
+    CONTENT_PLAN_QUEUE_TARGET_MIN,
+    Math.min(CONTENT_PLAN_QUEUE_TARGET_MAX, Number(queueCount || CONTENT_PLAN_QUEUE_TARGET))
+  );
   const prompts = await strategyService.getPrompts(strategyId, {
     limit: Math.max(12, safeQueueCount * 3),
   });
@@ -3649,6 +3686,19 @@ router.post('/generate-analysis-prompts', async (req, res) => {
 
     const refreshedStrategy = await strategyService.getStrategy(strategyId);
     const refreshedStrategyMetadata = parseJsonObject(refreshedStrategy?.metadata, {});
+    const mergedPromptIds = contentPlan.runId
+      ? dedupeStrings(
+          [
+            ...(Array.isArray(refreshedStrategyMetadata.content_plan_prompt_ids)
+              ? refreshedStrategyMetadata.content_plan_prompt_ids
+              : []),
+            ...contentPlanPromptIds,
+          ],
+          20
+        )
+      : (Array.isArray(refreshedStrategyMetadata.content_plan_prompt_ids)
+          ? refreshedStrategyMetadata.content_plan_prompt_ids
+          : []);
     const nextStrategyMetadata = {
       ...refreshedStrategyMetadata,
       content_plan_run_id: contentPlan.runId || refreshedStrategyMetadata.content_plan_run_id || null,
@@ -3659,11 +3709,7 @@ router.post('/generate-analysis-prompts', async (req, res) => {
           ? Number(contentPlan.queueCount || 0)
           : Number(refreshedStrategyMetadata.content_plan_queue_count || 0),
       content_plan_status: contentPlan.runId ? 'ready' : 'failed',
-      content_plan_prompt_ids: contentPlan.runId
-        ? dedupeStrings(contentPlanPromptIds, 8)
-        : (Array.isArray(refreshedStrategyMetadata.content_plan_prompt_ids)
-            ? refreshedStrategyMetadata.content_plan_prompt_ids
-            : []),
+      content_plan_prompt_ids: mergedPromptIds,
       content_plan_prompt_used_at: contentPlan.runId
         ? promptGeneratedAt
         : (refreshedStrategyMetadata.content_plan_prompt_used_at || null),
@@ -3976,6 +4022,15 @@ router.post('/:id/content-plan/generate', async (req, res) => {
     const strategyMetadata = parseJsonObject(strategy.metadata, {});
     const analysisCache = parseJsonObject(strategyMetadata.analysis_cache, {});
     const cachedAnalysisId = String(analysisCache.analysis_id || '').trim();
+    const mode = normalizeContentPlanMode(req.body?.mode);
+    const selectedQueueIds = normalizeQueueIdList(req.body?.selectedQueueIds, 80);
+    const existingRunId = String(strategyMetadata.content_plan_run_id || '').trim();
+    const defaultQueueTarget = deriveDefaultContentPlanQueueTarget(strategy);
+
+    let requestedQueueTarget = normalizeContentPlanQueueTarget(
+      req.body?.queueTarget,
+      mode === 'append' ? CONTENT_PLAN_APPEND_DEFAULT_TARGET : defaultQueueTarget
+    );
 
     let analysisRun = null;
     if (cachedAnalysisId) {
@@ -3988,6 +4043,54 @@ router.post('/:id/content-plan/generate', async (req, res) => {
       return res.status(400).json({
         error: 'No analysis found for this strategy. Run analysis first, then generate content plan.',
       });
+    }
+
+    let regenerateTargetIds = [];
+    if (mode === 'regenerate_selected') {
+      if (!existingRunId) {
+        return res.status(400).json({
+          error: 'No existing content plan found. Generate content first, then regenerate selected items.',
+        });
+      }
+      if (selectedQueueIds.length === 0) {
+        return res.status(400).json({
+          error: 'selectedQueueIds are required when mode is regenerate_selected.',
+        });
+      }
+
+      const { rows: selectedRows } = await pool.query(
+        `SELECT id, status
+         FROM linkedin_automation_queue
+         WHERE user_id = $1
+           AND run_id = $2
+           AND id = ANY($3::uuid[])`,
+        [userId, existingRunId, selectedQueueIds]
+      );
+      if (!Array.isArray(selectedRows) || selectedRows.length === 0) {
+        return res.status(400).json({
+          error: 'No matching queue items found for regeneration in the current content plan.',
+        });
+      }
+
+      const statusById = new Map(
+        selectedRows.map((row) => [String(row.id), String(row.status || '').toLowerCase()])
+      );
+      const invalidIds = selectedQueueIds.filter((id) => {
+        const status = statusById.get(id);
+        return !status || !REGENERATABLE_QUEUE_STATUSES.has(status);
+      });
+      if (invalidIds.length > 0) {
+        return res.status(400).json({
+          error: 'Some selected items cannot be regenerated because they are already scheduled/posted.',
+          invalidQueueIds: invalidIds,
+        });
+      }
+
+      regenerateTargetIds = selectedQueueIds.filter((id) => statusById.has(id));
+      requestedQueueTarget = normalizeContentPlanQueueTarget(
+        regenerateTargetIds.length,
+        regenerateTargetIds.length
+      );
     }
 
     const analysisMetadata = parseJsonObject(analysisRun.metadata, {});
@@ -4005,30 +4108,156 @@ router.post('/:id/content-plan/generate', async (req, res) => {
 
     const runResult = await linkedinAutomationService.runPipeline({
       userId,
-      queueTarget: CONTENT_PLAN_QUEUE_TARGET,
+      queueTarget: requestedQueueTarget,
       userToken: getUserTokenFromRequest(req),
       cookieHeader: buildCookieHeader(req),
       strategyId,
     });
 
     const generatedAt = new Date().toISOString();
-    const queueCount = Array.isArray(runResult?.queue) ? runResult.queue.length : 0;
+    const generatedCount = Array.isArray(runResult?.queue) ? runResult.queue.length : 0;
+    let finalRunId = runResult?.runId || null;
+    let queueCount = Number(generatedCount || 0);
+    let appendedCount = 0;
+    let regeneratedCount = 0;
+
+    if (mode === 'append' && existingRunId && runResult?.runId && runResult.runId !== existingRunId) {
+      await pool.query(
+        `UPDATE linkedin_automation_queue
+         SET run_id = $1,
+             metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+               'appended_from_run_id', $2::text,
+               'appended_at', NOW()
+             ),
+             updated_at = NOW()
+         WHERE user_id = $3
+           AND run_id = $2`,
+        [existingRunId, runResult.runId, userId]
+      );
+      const { rows: queueCountRows } = await pool.query(
+        `SELECT COUNT(*)::int AS count
+         FROM linkedin_automation_queue
+         WHERE user_id = $1
+           AND run_id = $2`,
+        [userId, existingRunId]
+      );
+      finalRunId = existingRunId;
+      queueCount = Number(queueCountRows[0]?.count || 0);
+      appendedCount = Number(generatedCount || 0);
+    }
+
+    if (mode === 'regenerate_selected' && regenerateTargetIds.length > 0) {
+      if (!existingRunId) {
+        return res.status(400).json({
+          error: 'Cannot regenerate selected queue without an active content plan run.',
+        });
+      }
+
+      const generatedRows = Array.isArray(runResult?.queue) ? runResult.queue : [];
+      if (generatedRows.length === 0) {
+        return res.status(500).json({
+          error: 'Regeneration run produced no queue rows to apply.',
+        });
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        for (let index = 0; index < regenerateTargetIds.length; index += 1) {
+          const targetQueueId = regenerateTargetIds[index];
+          const source = generatedRows[index % generatedRows.length] || {};
+          const sourceMetadata = parseJsonObject(source.metadata, {});
+          const sourceHashtags = Array.isArray(source.hashtags) ? source.hashtags : [];
+          const mergedMetadata = {
+            reason: sourceMetadata.reason || '',
+            evidence_refs: Array.isArray(sourceMetadata.evidence_refs) ? sourceMetadata.evidence_refs : [],
+            suggested_day_offset: Number(sourceMetadata.suggested_day_offset || 0),
+            suggested_local_time: String(sourceMetadata.suggested_local_time || '09:30'),
+            ai_provider: sourceMetadata.ai_provider || null,
+            grounding_score: Number(sourceMetadata.grounding_score || 0),
+            regenerated_at: generatedAt,
+            regenerated_from_run_id: runResult?.runId || null,
+            regeneration_mode: 'selected',
+          };
+
+          await client.query(
+            `UPDATE linkedin_automation_queue
+             SET title = $1,
+                 content = $2,
+                 hashtags = $3::jsonb,
+                 status = 'needs_approval',
+                 rejection_reason = NULL,
+                 analysis_snapshot = $4::jsonb,
+                 metadata = COALESCE(metadata, '{}'::jsonb) || $5::jsonb,
+                 updated_at = NOW()
+             WHERE id = $6
+               AND user_id = $7`,
+            [
+              toShortText(source.title || '', 220),
+              toShortText(source.content || '', 3200),
+              JSON.stringify(sourceHashtags),
+              safeJsonStringify(parseJsonObject(source.analysis_snapshot, {}), '{}'),
+              safeJsonStringify(mergedMetadata, '{}'),
+              targetQueueId,
+              userId,
+            ]
+          );
+        }
+
+        await client.query(
+          `DELETE FROM linkedin_automation_queue
+           WHERE user_id = $1
+             AND run_id = $2`,
+          [userId, runResult?.runId || '']
+        );
+        await client.query('COMMIT');
+      } catch (regenError) {
+        await client.query('ROLLBACK');
+        throw regenError;
+      } finally {
+        client.release();
+      }
+
+      const { rows: queueCountRows } = await pool.query(
+        `SELECT COUNT(*)::int AS count
+         FROM linkedin_automation_queue
+         WHERE user_id = $1
+           AND run_id = $2`,
+        [userId, existingRunId]
+      );
+      finalRunId = existingRunId;
+      queueCount = Number(queueCountRows[0]?.count || 0);
+      regeneratedCount = regenerateTargetIds.length;
+    }
+
+    const promptUsageCount = mode === 'replace'
+      ? Math.max(1, Number(queueCount || requestedQueueTarget || CONTENT_PLAN_QUEUE_TARGET))
+      : Math.max(1, Number(generatedCount || requestedQueueTarget || CONTENT_PLAN_APPEND_DEFAULT_TARGET));
     const contentPlanPromptIds = await markContentPlanPromptsUsed({
       userId,
       strategyId,
-      runId: runResult?.runId || null,
-      queueCount: queueCount || CONTENT_PLAN_QUEUE_TARGET,
+      runId: finalRunId,
+      queueCount: promptUsageCount,
     });
+    const mergedPromptIds = dedupeStrings(
+      [
+        ...(Array.isArray(strategyMetadata.content_plan_prompt_ids) ? strategyMetadata.content_plan_prompt_ids : []),
+        ...contentPlanPromptIds,
+      ],
+      20
+    );
     const refreshedAfterPromptUsage = await strategyService.getStrategy(strategyId);
     const refreshedMetadata = parseJsonObject(refreshedAfterPromptUsage?.metadata, {});
     const nextStrategyMetadata = {
       ...refreshedMetadata,
-      content_plan_run_id: runResult?.runId || null,
+      content_plan_run_id: finalRunId,
       content_plan_generated_at: generatedAt,
       content_plan_queue_count: Number(queueCount || 0),
       content_plan_status: 'ready',
-      content_plan_prompt_ids: dedupeStrings(contentPlanPromptIds, 8),
+      content_plan_prompt_ids: mergedPromptIds,
       content_plan_prompt_used_at: generatedAt,
+      content_plan_mode: mode,
     };
     delete nextStrategyMetadata.content_plan_warning;
 
@@ -4039,12 +4268,15 @@ router.post('/:id/content-plan/generate', async (req, res) => {
     await updateRunMetadata(analysisRun.id, {
       ...analysisMetadata,
       content_plan: {
-        run_id: runResult?.runId || null,
+        run_id: finalRunId,
         generated_at: generatedAt,
         queue_count: Number(queueCount || 0),
         status: 'ready',
         warning: null,
-        prompt_ids: dedupeStrings(contentPlanPromptIds, 8),
+        prompt_ids: mergedPromptIds,
+        mode,
+        appended_count: Number(appendedCount || 0),
+        regenerated_count: Number(regeneratedCount || 0),
       },
     });
     const refreshedStrategy = await strategyService.getStrategy(strategyId);
@@ -4057,10 +4289,13 @@ router.post('/:id/content-plan/generate', async (req, res) => {
     return res.json({
       success: true,
       contentPlan: {
-        runId: runResult?.runId || null,
+        runId: finalRunId,
         queueCount: Number(queueCount || 0),
         status: 'ready',
-        promptIds: dedupeStrings(contentPlanPromptIds, 8),
+        promptIds: mergedPromptIds,
+        mode,
+        addedCount: Number(appendedCount || generatedCount || 0),
+        regeneratedCount: Number(regeneratedCount || 0),
       },
     });
   } catch (error) {
