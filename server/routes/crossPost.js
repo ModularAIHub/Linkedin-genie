@@ -28,6 +28,8 @@ const normalizeOptionalString = (value, maxLength = 255) => {
   if (!normalized) return null;
   return normalized.slice(0, maxLength);
 };
+const isMissingRelation = (error) =>
+  error?.code === '42P01' || String(error?.message || '').toLowerCase().includes('does not exist');
 
 const normalizeLinkedInActorId = (value) => {
   const normalized = normalizeOptionalString(value, 255);
@@ -759,6 +761,146 @@ router.get('/accounts/targets', async (req, res) => {
       error: error?.message || String(error),
     });
     return res.status(500).json({ error: 'Failed to fetch LinkedIn targets' });
+  }
+});
+
+router.post('/workspace/snapshot', async (req, res) => {
+  if (!req.isInternal) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const platformUserId = String(req.headers['x-platform-user-id'] || '').trim();
+  const platformTeamId = String(req.headers['x-platform-team-id'] || '').trim() || null;
+  const limit = Math.max(1, Math.min(100, Number(req.body?.limit || 50) || 50));
+  const queueLimit = Math.max(1, Math.min(100, Number(req.body?.queueLimit || 50) || 50));
+
+  if (!platformUserId) {
+    return res.status(400).json({
+      error: 'x-platform-user-id is required',
+      code: 'PLATFORM_USER_ID_REQUIRED',
+    });
+  }
+
+  try {
+    let queueRows = [];
+    try {
+      const queueResult = await pool.query(
+        `SELECT id, run_id, title, content, status, metadata, created_at, updated_at
+         FROM linkedin_automation_queue
+         WHERE user_id = $1
+         ORDER BY created_at DESC
+         LIMIT $2`,
+        [platformUserId, queueLimit]
+      );
+      queueRows = queueResult.rows || [];
+    } catch (error) {
+      if (!isMissingRelation(error)) throw error;
+    }
+
+    const scheduleParams = [];
+    const scheduleFilters = [];
+
+    if (platformTeamId) {
+      scheduleParams.push(platformTeamId);
+      scheduleFilters.push(`slp.company_id::text = $${scheduleParams.length}::text`);
+    } else {
+      scheduleParams.push(platformUserId);
+      scheduleFilters.push(`slp.user_id = $${scheduleParams.length}`);
+      scheduleFilters.push(`(slp.company_id IS NULL OR slp.company_id::text = '')`);
+    }
+
+    scheduleParams.push(limit);
+    let scheduleRows = [];
+    try {
+      const scheduleResult = await pool.query(
+        `SELECT
+           slp.id,
+           slp.user_id,
+           slp.post_content,
+           slp.media_urls,
+           slp.post_type,
+           slp.company_id,
+           slp.scheduled_time,
+           slp.status,
+           slp.error_message,
+           slp.created_at,
+           slp.updated_at,
+           slp.posted_at
+         FROM scheduled_linkedin_posts slp
+         WHERE ${scheduleFilters.join(' AND ')}
+         ORDER BY COALESCE(slp.scheduled_time, slp.created_at) ASC
+         LIMIT $${scheduleParams.length}`,
+        scheduleParams
+      );
+      scheduleRows = scheduleResult.rows || [];
+    } catch (error) {
+      if (!isMissingRelation(error)) throw error;
+    }
+
+    const queue = queueRows.map((row) => {
+      const metadata =
+        row?.metadata && typeof row.metadata === 'object'
+          ? row.metadata
+          : {};
+      const suggestedDayOffset = Number(metadata?.suggested_day_offset || 0);
+      const suggestedLocalTime = normalizeOptionalString(metadata?.suggested_local_time, 20);
+      const scheduledForHint = suggestedLocalTime
+        ? `${suggestedDayOffset >= 0 ? `+${suggestedDayOffset}` : suggestedDayOffset}d ${suggestedLocalTime}`
+        : null;
+      return {
+        id: `liq-${row.id}`,
+        sourceId: String(row.id),
+        platform: 'linkedin',
+        kind: 'queue',
+        status: String(row.status || '').toLowerCase() || 'needs_approval',
+        title: row.title || null,
+        content: String(row.content || ''),
+        runId: row.run_id || null,
+        scheduledForHint,
+        createdAt: row.created_at || null,
+        updatedAt: row.updated_at || null,
+        teamId: platformTeamId,
+      };
+    });
+
+    const calendar = scheduleRows.map((row) => ({
+      id: `lic-${row.id}`,
+      sourceId: String(row.id),
+      platform: 'linkedin',
+      kind: 'calendar',
+      status: String(row.status || '').toLowerCase() || 'scheduled',
+      content: String(row.post_content || ''),
+      postType: row.post_type || 'single_post',
+      mediaUrls: row.media_urls || null,
+      scheduledFor: row.scheduled_time || null,
+      postedAt: row.posted_at || null,
+      errorMessage: row.error_message || null,
+      createdAt: row.created_at || null,
+      updatedAt: row.updated_at || null,
+      teamId: row.company_id ? String(row.company_id) : platformTeamId,
+      accountId: row.company_id ? String(row.company_id) : null,
+    }));
+
+    return res.json({
+      success: true,
+      platform: 'linkedin',
+      queue,
+      calendar,
+      summary: {
+        queueCount: queue.length,
+        calendarCount: calendar.length,
+      },
+    });
+  } catch (error) {
+    logger.error('[cross-post] Failed to build LinkedIn workspace snapshot', {
+      user: platformUserId,
+      teamId: platformTeamId,
+      error: error?.message || String(error),
+    });
+    return res.status(500).json({
+      error: 'Failed to fetch LinkedIn workspace snapshot',
+      code: 'LINKEDIN_WORKSPACE_SNAPSHOT_FAILED',
+    });
   }
 });
 
