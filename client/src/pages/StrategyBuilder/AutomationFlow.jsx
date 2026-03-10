@@ -243,8 +243,14 @@ export default function AutomationFlow({
 
   const filteredQueue = useMemo(() => {
     if (!queueStatusFilter) return contentPlan.queue;
+    if (queueStatusFilter === 'pending') {
+      return contentPlan.queue.filter((item) => {
+        const status = String(item?.status || '').toLowerCase();
+        return !['posted', 'completed', 'rejected'].includes(status);
+      });
+    }
     if (queueStatusFilter === 'done') {
-      return contentPlan.queue.filter((item) => ['scheduled', 'posted', 'completed'].includes(String(item?.status || '').toLowerCase()));
+      return contentPlan.queue.filter((item) => ['posted', 'completed', 'rejected'].includes(String(item?.status || '').toLowerCase()));
     }
     return contentPlan.queue.filter((item) => item.status === queueStatusFilter);
   }, [contentPlan.queue, queueStatusFilter]);
@@ -259,22 +265,18 @@ export default function AutomationFlow({
     [contentPlan.queue]
   );
   const postedCount = Number(queueStatusCounts.posted || 0);
-  const doneCount =
-    postedCount +
-    Number(queueStatusCounts.scheduled || 0) +
-    Number(queueStatusCounts.completed || 0);
-  const pendingCount =
-    Number(queueStatusCounts.draft || 0) +
-    Number(queueStatusCounts.needs_approval || 0) +
-    Number(queueStatusCounts.approved || 0);
+  const completedCount = Number(queueStatusCounts.completed || 0);
+  const rejectedCount = Number(queueStatusCounts.rejected || 0);
+  const resolvedCount = postedCount + completedCount + rejectedCount;
+  const pendingCount = Math.max(0, Number(contentPlan.queue.length || 0) - resolvedCount);
 
   const nextBestStep = useMemo(() => {
-    const pendingCount = Number(queueStatusCounts.needs_approval || 0) + Number(queueStatusCounts.draft || 0);
+    const pendingReviewCount = Number(queueStatusCounts.needs_approval || 0) + Number(queueStatusCounts.draft || 0);
     const approvedCount = Number(queueStatusCounts.approved || 0);
-    const rejectedCount = Number(queueStatusCounts.rejected || 0);
     const scheduledCount = Number(queueStatusCounts.scheduled || 0);
     const postedCount = Number(queueStatusCounts.posted || 0);
     const completedCount = Number(queueStatusCounts.completed || 0);
+    const rejectedCount = Number(queueStatusCounts.rejected || 0);
     const publishedDoneCount = postedCount + completedCount;
 
     if (!contentPlan.runId || Number(contentPlan.queueCount || contentPlan.queue.length || 0) <= 0) {
@@ -287,12 +289,12 @@ export default function AutomationFlow({
       };
     }
 
-    if (pendingCount > 0) {
+    if (pendingReviewCount > 0) {
       return {
         label: 'Review pending queue',
-        description: `${pendingCount} item(s) need approval or rejection before scheduling.`,
+        description: `${pendingReviewCount} item(s) need approval or rejection before scheduling.`,
         actionLabel: 'Show pending',
-        onAction: () => setQueueStatusFilter('needs_approval'),
+        onAction: () => setQueueStatusFilter('pending'),
         tone: 'amber',
       };
     }
@@ -429,7 +431,7 @@ export default function AutomationFlow({
             Queue items: {contentPlan.queueCount || contentPlan.queue.length || 0}
           </span>
           <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-white px-2.5 py-1">
-            Done: {doneCount}
+            Resolved: {resolvedCount}
           </span>
           <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-white px-2.5 py-1">
             Posted: {postedCount}

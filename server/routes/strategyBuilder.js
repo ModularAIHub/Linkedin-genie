@@ -15,10 +15,10 @@ import { requireProPlan } from '../middleware/planAccess.js';
 
 const router = express.Router();
 router.use(requireProPlan('Strategy Builder'));
-const CONTENT_PLAN_QUEUE_TARGET = 7;
+const CONTENT_PLAN_QUEUE_TARGET = 2;
 const CONTENT_PLAN_QUEUE_TARGET_MIN = 1;
 const CONTENT_PLAN_QUEUE_TARGET_MAX = 14;
-const CONTENT_PLAN_APPEND_DEFAULT_TARGET = 3;
+const CONTENT_PLAN_APPEND_DEFAULT_TARGET = 2;
 const CONTENT_PLAN_GENERATE_MODES = new Set(['replace', 'append', 'regenerate_selected']);
 const REGENERATABLE_QUEUE_STATUSES = new Set(['draft', 'needs_approval', 'approved', 'rejected']);
 const UUID_V4_LIKE_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -144,11 +144,8 @@ const normalizeQueueIdList = (value = [], max = 60) =>
 const deriveDefaultContentPlanQueueTarget = (strategy = {}) => {
   const frequency = String(strategy?.posting_frequency || '').toLowerCase().trim();
   if (!frequency) return CONTENT_PLAN_QUEUE_TARGET;
-  if (/\b(daily|every day|7\s*times?)\b/.test(frequency)) return 7;
-  if (/\b(5\s*times?|five)\b/.test(frequency)) return 5;
-  if (/3\s*[-to]+\s*5/.test(frequency) || /\b(three to five|3-5)\b/.test(frequency)) return 5;
-  if (/2\s*[-to]+\s*3/.test(frequency) || /\b(two to three|2-3|twice)\b/.test(frequency)) return 3;
-  if (/\b(weekly|once|1\s*[-to]+\s*2|1-2)\b/.test(frequency)) return 2;
+  if (/\b(once|1\s*[-to]+\s*1|1-1)\b/.test(frequency)) return 1;
+  if (/\b(daily|every day|7\s*times?)\b/.test(frequency)) return 2;
   return CONTENT_PLAN_QUEUE_TARGET;
 };
 

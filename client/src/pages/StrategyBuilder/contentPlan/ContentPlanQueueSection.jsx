@@ -37,7 +37,7 @@ export default function ContentPlanQueueSection({
     reason: '',
   });
   const [selectedQueueIds, setSelectedQueueIds] = useState([]);
-  const [generateMoreCount, setGenerateMoreCount] = useState(3);
+  const [generateMoreCount, setGenerateMoreCount] = useState(2);
 
   const regeneratableStatuses = useMemo(
     () => new Set(['draft', 'needs_approval', 'approved', 'rejected']),
@@ -158,9 +158,9 @@ export default function ContentPlanQueueSection({
               max={14}
               value={generateMoreCount}
               onChange={(event) => {
-                const value = Number.parseInt(String(event.target.value || '3'), 10);
+                const value = Number.parseInt(String(event.target.value || '2'), 10);
                 if (!Number.isFinite(value)) {
-                  setGenerateMoreCount(3);
+                  setGenerateMoreCount(2);
                   return;
                 }
                 setGenerateMoreCount(Math.max(1, Math.min(14, value)));
@@ -197,9 +197,10 @@ export default function ContentPlanQueueSection({
             className="rounded-lg border border-gray-300 px-3 py-2 text-sm bg-white"
           >
             <option value="">All statuses</option>
+            <option value="pending">Pending (not posted/rejected)</option>
             <option value="needs_approval">Needs approval</option>
             <option value="approved">Approved</option>
-            <option value="done">Done (scheduled + posted)</option>
+            <option value="done">Done (posted + rejected)</option>
             <option value="scheduled">Scheduled</option>
             <option value="posted">Posted</option>
             <option value="rejected">Rejected</option>
@@ -247,11 +248,11 @@ export default function ContentPlanQueueSection({
             };
             const isRegeneratable = regeneratableStatuses.has(String(item?.status || '').toLowerCase());
             const statusLabel = item.status === 'scheduled'
-              ? 'done (scheduled)'
+              ? 'scheduled'
               : item.status === 'completed'
-                ? 'done (completed)'
+                ? 'posted'
               : item.status === 'posted'
-                ? 'done (posted)'
+                ? 'posted'
                 : item.status;
             const isSelectedForRegeneration = selectedQueueIds.includes(String(item?.id || '').trim());
 
