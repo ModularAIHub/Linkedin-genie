@@ -7,6 +7,7 @@ const DEFAULT_NOTIFICATION_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const DEFAULT_MAX_USERS_PER_TICK = 25;
 const DEFAULT_COMMENT_SAMPLE_LIMIT = 3;
 const DEFAULT_READY_POST_LOOKBACK_HOURS = 24;
+const DEFAULT_READY_POST_QUEUE_WINDOW_HOURS = 36;
 const DEFAULT_AUTO_REPLY_DRAFTS_PER_USER = 2;
 const DEFAULT_AUTO_REPLY_USER_SCAN_LIMIT = 20;
 const AUTO_REPLY_MAX_COMMENT_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -73,6 +74,16 @@ const getReadyPostLookbackHours = () =>
     min: 6,
     max: 72,
   });
+
+const getReadyPostQueueWindowHours = () =>
+  toPositiveInt(
+    process.env.LINKEDIN_NOTIFICATION_READY_QUEUE_WINDOW_HOURS,
+    DEFAULT_READY_POST_QUEUE_WINDOW_HOURS,
+    {
+      min: 6,
+      max: 168,
+    }
+  );
 
 const autoReplyDraftsEnabled = () => {
   const raw = String(process.env.LINKEDIN_AUTO_REPLY_DRAFTS_ENABLED || '').trim().toLowerCase();
@@ -301,16 +312,45 @@ const fetchUsersWithCommentActivity = async ({ userLimit }) => {
   return rows || [];
 };
 
-const fetchReadyPostReminderTargets = async ({ userLimit, dailyDedupeKey, lookbackHours }) => {
+const fetchReadyPostReminderTargets = async ({
+  userLimit,
+  dailyDedupeKey,
+  lookbackHours,
+  queueWindowHours,
+}) => {
   const { rows } = await pool.query(
-    `WITH queue_summary AS (
+    `WITH run_candidates AS (
+       SELECT
+         q.user_id,
+         q.run_id,
+         MAX(q.updated_at) AS latest_queue_at
+       FROM linkedin_automation_queue q
+       WHERE q.status IN ('approved', 'needs_approval')
+         AND COALESCE(q.created_at, q.updated_at) >= NOW() - make_interval(hours => $4::INT)
+       GROUP BY q.user_id, q.run_id
+     ),
+     latest_run AS (
+       SELECT user_id, run_id, latest_queue_at
+       FROM (
+         SELECT
+           rc.*,
+           ROW_NUMBER() OVER (PARTITION BY rc.user_id ORDER BY rc.latest_queue_at DESC NULLS LAST) AS rn
+         FROM run_candidates rc
+       ) ranked
+       WHERE rn = 1
+     ),
+     queue_summary AS (
        SELECT
          q.user_id,
          COUNT(*) FILTER (WHERE q.status = 'approved')::INT AS approved_count,
          COUNT(*) FILTER (WHERE q.status = 'needs_approval')::INT AS needs_approval_count,
          MAX(q.updated_at) AS latest_queue_at
        FROM linkedin_automation_queue q
+       INNER JOIN latest_run lr
+         ON lr.user_id = q.user_id
+        AND lr.run_id = q.run_id
        WHERE q.status IN ('approved', 'needs_approval')
+         AND COALESCE(q.created_at, q.updated_at) >= NOW() - make_interval(hours => $4::INT)
        GROUP BY q.user_id
      ),
      inactive_users AS (
@@ -343,7 +383,7 @@ const fetchReadyPostReminderTargets = async ({ userLimit, dailyDedupeKey, lookba
        )
      ORDER BY i.latest_queue_at DESC NULLS LAST
      LIMIT $1`,
-    [userLimit, dailyDedupeKey, lookbackHours]
+    [userLimit, dailyDedupeKey, lookbackHours, queueWindowHours]
   );
 
   return rows || [];
@@ -424,6 +464,7 @@ export async function runLinkedinEmailNotificationTick({ force = false, trigger 
   const userLimit = getMaxUsersPerTick();
   const sampleLimit = getCommentSampleLimit();
   const lookbackHours = getReadyPostLookbackHours();
+  const readyQueueWindowHours = getReadyPostQueueWindowHours();
   const dailyDedupeKey = new Date().toISOString().slice(0, 10);
 
   const stats = {
@@ -566,6 +607,7 @@ export async function runLinkedinEmailNotificationTick({ force = false, trigger 
       userLimit,
       dailyDedupeKey,
       lookbackHours,
+      queueWindowHours: readyQueueWindowHours,
     });
     stats.readyPostTargets = readyTargets.length;
 
