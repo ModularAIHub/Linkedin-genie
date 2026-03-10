@@ -74,6 +74,17 @@ Response fields:
 - `feedback.reviews` (approval/rejection/posted signals + top rejection reasons)
 - `feedback.analyticsLearning` (posted queue analytics coverage + best/weak queue topics)
 
+## Cron Endpoints
+Protected by `Authorization: Bearer <CRON_SECRET>`:
+- `POST /api/cron/scheduler`
+  - Runs the LinkedIn scheduler tick (publishing due scheduled posts).
+- `POST /api/cron/daily-content-plan`
+  - Generates daily content-plan queue items for eligible strategies.
+  - Defaults: 1 strategy/user (latest active), `queueTarget=2`, skip if already generated today, skip if pending queue still >= target.
+  - Triggers ready-post email notifier tick after generation.
+  - Controlled by env flag `LINKEDIN_DAILY_CONTENT_CRON_ENABLED` (default `true`).
+  - Optional query/body params: `force`, `notify`, `userLimit`, `queueTarget`, `tickId`.
+
 ## Important Logs
 Useful log tags for support/debug:
 - `[Strategy] linkedin profile pdf uploaded`

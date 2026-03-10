@@ -20,6 +20,7 @@ import { logger } from './utils/logger.js';
 import internalAuth from './middleware/internalAuth.js';
 import pool from './config/database.js';
 import { runSchedulerTick } from './workers/linkedinScheduler.js';
+import { runDailyContentPlanCronTick } from './workers/dailyContentPlanCron.js';
 
 dotenv.config({ quiet: true });
 
@@ -83,6 +84,28 @@ const getLinkedInHealthPayload = () => ({
     },
   },
 });
+
+const parseBooleanParam = (value, fallback = false) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+};
+
+const getProvidedCronToken = (req) => {
+  const authHeader = req.headers['authorization'] || '';
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    return authHeader.slice(7).trim();
+  }
+  return String(authHeader || req.query.secret || req.body?.secret || '').trim();
+};
+
+const isCronAuthorized = (req) => {
+  const cronSecret = String(process.env.CRON_SECRET || '').trim();
+  const providedToken = getProvidedCronToken(req);
+  return Boolean(cronSecret) && Boolean(providedToken) && providedToken === cronSecret;
+};
 
 const maybeStartEmbeddedScheduler = async () => {
   if (process.env.VERCEL || !runSchedulerInApi || linkedinRuntimeState.schedulerStarted) {
@@ -263,10 +286,7 @@ app.use('/api/cleanup', cleanupRoutes);
 // Called every minute by Vercel (see server/vercel.json). Auth via CRON_SECRET.
 // setInterval workers are killed between Vercel requests — this is their replacement.
 app.post('/api/cron/scheduler', async (req, res) => {
-  const cronSecret = (process.env.CRON_SECRET || '').trim();
-  const authHeader = req.headers['authorization'] || '';
-  const providedToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : (authHeader || req.query.secret || '');
-  if (!cronSecret || providedToken !== cronSecret) {
+  if (!isCronAuthorized(req)) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   try {
@@ -274,6 +294,30 @@ app.post('/api/cron/scheduler', async (req, res) => {
     return res.json({ ok: true });
   } catch (error) {
     logger.error('[LinkedInSchedulerCron] Tick failed', error);
+    return res.status(500).json({ ok: false, error: error?.message || 'unknown_error' });
+  }
+});
+
+// QStash/Vercel cron trigger for daily strategy content generation.
+// Generates up to 2 posts per eligible user strategy/day and then triggers ready-post notifications.
+app.post('/api/cron/daily-content-plan', async (req, res) => {
+  if (!isCronAuthorized(req)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const payload = {
+      trigger: 'cron_endpoint_daily_content_plan',
+      force: parseBooleanParam(req.query.force ?? req.body?.force, false),
+      notify: parseBooleanParam(req.query.notify ?? req.body?.notify, true),
+      userLimit: req.query.userLimit ?? req.body?.userLimit ?? null,
+      queueTarget: req.query.queueTarget ?? req.body?.queueTarget ?? null,
+      tickId: String(req.query.tickId || req.body?.tickId || '').trim() || null,
+    };
+    const result = await runDailyContentPlanCronTick(payload);
+    return res.json({ ok: true, ...result });
+  } catch (error) {
+    logger.error('[LinkedInDailyContentPlanCron] Tick failed', error);
     return res.status(500).json({ ok: false, error: error?.message || 'unknown_error' });
   }
 });
