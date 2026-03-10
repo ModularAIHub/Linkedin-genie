@@ -4,6 +4,7 @@ import { createLinkedInPost } from '../services/linkedinService.js';
 import { logger } from '../utils/logger.js';
 import { buildCrossPostPayloads, detectCrossPostMedia } from '../utils/crossPostOptimizer.js';
 import { resolveLinkedInAuthorIdentity } from '../utils/linkedinAuthorIdentity.js';
+import { runLinkedinEmailNotificationTick } from './linkedinEmailNotifier.js';
 
 dotenv.config({ quiet: true });
 
@@ -53,6 +54,21 @@ const lastTickSummary = {
   failed: 0,
   status: 'idle',
   error: null
+};
+
+const runEmailNotificationsForTick = async ({ tickId }) => {
+  try {
+    await runLinkedinEmailNotificationTick({
+      force: false,
+      trigger: 'scheduler',
+      tickId,
+    });
+  } catch (error) {
+    logger.warn('[LinkedIn Scheduler] Email notification tick failed (non-blocking)', {
+      tickId,
+      error: safeErrorMessage(error),
+    });
+  }
 };
 
 const safeErrorMessage = (error) => {
@@ -1037,6 +1053,7 @@ async function schedulerTick() {
   try {
     const duePosts = await claimDueScheduledPosts(BATCH_SIZE);
     if (!duePosts.length) {
+      await runEmailNotificationsForTick({ tickId });
       transientFailureBackoffMs = 0;
       nextAllowedTickAt = 0;
       schedulerStats.noopTicks += 1;
@@ -1083,6 +1100,7 @@ async function schedulerTick() {
         }
       }
     }
+    await runEmailNotificationsForTick({ tickId });
     lastTickSummary.status = 'ok';
   } catch (error) {
     lastTickSummary.status = 'error';

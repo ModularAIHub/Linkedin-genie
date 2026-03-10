@@ -58,6 +58,7 @@ const StrategyBuilder = () => {
   const [strategyOptions, setStrategyOptions] = useState([]);
   const [switchingStrategyId, setSwitchingStrategyId] = useState('');
   const [showAnalysisFlow, setShowAnalysisFlow] = useState(false);
+  const [analysisFlowPhase, setAnalysisFlowPhase] = useState('idle');
   const [setupMode, setSetupMode] = useState('auto');
 
   const openCreateStrategyForm = () => {
@@ -343,6 +344,7 @@ const StrategyBuilder = () => {
 
     setShowCreateForm(false);
     setShowAnalysisFlow(true);
+    setAnalysisFlowPhase('welcome');
     setCurrentView('chat');
     setSetupMode('auto');
   };
@@ -352,6 +354,7 @@ const StrategyBuilder = () => {
     const nextView = requestedNext === 'overview' ? 'overview' : 'prompts';
 
     setShowAnalysisFlow(false);
+    setAnalysisFlowPhase('idle');
     setIsGeneratingPrompts(nextView === 'prompts');
     setCurrentView(nextView);
 
@@ -373,6 +376,7 @@ const StrategyBuilder = () => {
 
   const handleAnalysisCancel = () => {
     setShowAnalysisFlow(false);
+    setAnalysisFlowPhase('idle');
     setCurrentView(strategy?.status === 'active' ? 'overview' : 'chat');
   };
 
@@ -470,6 +474,21 @@ const StrategyBuilder = () => {
   };
 
   const primaryAction = useMemo(() => {
+    if (showAnalysisFlow) {
+      if (analysisFlowPhase === 'loading') {
+        return {
+          type: 'analysis_running',
+          label: 'Auto analysis running',
+          description: 'Current analysis is in progress. Please wait for completion.',
+        };
+      }
+      return {
+        type: 'analysis_continue',
+        label: 'Continue analysis flow',
+        description: 'Complete analysis review to unlock prompt pack and content generation.',
+      };
+    }
+
     if (!strategy) {
       return {
         type: 'chat',
@@ -515,7 +534,7 @@ const StrategyBuilder = () => {
       label: 'Review content plan',
       description: 'Approve, schedule, or send posts to Compose.',
     };
-  }, [strategy, tabCompletion]);
+  }, [strategy, tabCompletion, showAnalysisFlow, analysisFlowPhase]);
 
   useEffect(() => {
     const requestedTab = (searchParams.get('tab') || '').trim().toLowerCase();
@@ -550,6 +569,13 @@ const StrategyBuilder = () => {
 
   const handlePrimaryAction = async () => {
     switch (primaryAction.type) {
+      case 'analysis_running':
+        return;
+      case 'analysis_continue':
+        setShowCreateForm(false);
+        setCurrentView('chat');
+        setShowAnalysisFlow(true);
+        return;
       case 'analysis':
         await handleStartAnalysisFlow();
         return;
@@ -807,7 +833,12 @@ const StrategyBuilder = () => {
             <button
               type="button"
               onClick={handlePrimaryAction}
-              className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+              disabled={primaryAction.type === 'analysis_running'}
+              className={`inline-flex items-center gap-1 rounded-lg px-3 py-2 text-sm font-semibold text-white ${
+                primaryAction.type === 'analysis_running'
+                  ? 'cursor-not-allowed bg-emerald-400'
+                  : 'bg-emerald-600 hover:bg-emerald-700'
+              }`}
             >
               {primaryAction.label}
               <ArrowRight className="h-4 w-4" />
@@ -843,6 +874,7 @@ const StrategyBuilder = () => {
             strategyId={strategy.id}
             onComplete={handleAnalysisComplete}
             onCancel={handleAnalysisCancel}
+            onPhaseChange={setAnalysisFlowPhase}
           />
         )}
 

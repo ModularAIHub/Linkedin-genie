@@ -82,13 +82,62 @@ const UI_TOPIC_STOP_WORDS = new Set([
   'competitor', 'competitors', 'profile', 'configured', 'yet',
   'mapped', 'opportunity', 'analysis', 'connected', 'current', 'angle', 'score', 'sharpen', 'gap', 'gaps',
   'build', 'built', 'agency', 'client', 'workflow', 'analytic',
+  'service', 'solution', 'product', 'creator', 'update', 'growth', 'strategy', 'marketing', 'business',
   'add', 'unlock', 'precise', 'analysi', 'analysis'
 ]);
+const UI_TOPIC_SHORT_ALLOWLIST = new Set(['ai', 'ux', 'ui', 'seo', 'b2b', 'b2c', 'api']);
+const UI_WEAK_SINGLE_TOPIC_TOKENS = new Set([
+  'build', 'built', 'agency', 'client', 'platform', 'workflow', 'analytic', 'social', 'growth',
+  'resume', 'portfolio', 'member', 'managed', 'manager', 'led',
+]);
+const UI_ROLE_FRAGMENT_WORDS = new Set([
+  'managed', 'manage', 'manager', 'member', 'members', 'led', 'lead', 'leading',
+  'currently', 'building', 'builder', 'community',
+]);
+const UI_TECHNICAL_SIGNAL_WORDS = new Set([
+  'web', 'development', 'developer', 'cloud', 'computing', 'devops', 'cybersecurity', 'security',
+  'software', 'engineering', 'frontend', 'backend', 'react', 'node', 'javascript', 'typescript',
+  'aws', 'docker', 'kubernetes', 'automation', 'api', 'saas', 'data', 'machine', 'learning',
+]);
+
+const isRoleFragmentNoise = (words = []) => {
+  if (!Array.isArray(words) || words.length < 2) return false;
+  const roleHits = words.filter((word) => UI_ROLE_FRAGMENT_WORDS.has(word)).length;
+  const technicalHits = words.filter((word) => UI_TECHNICAL_SIGNAL_WORDS.has(word)).length;
+  if (
+    words.length === 2 &&
+    technicalHits === 0 &&
+    words.includes('community') &&
+    words.some((word) => ['managed', 'manage', 'manager', 'member', 'led', 'lead', 'leading'].includes(word))
+  ) {
+    return true;
+  }
+  if (words.length < 3) return false;
+  return roleHits >= 3 && technicalHits === 0;
+};
+
+const isLikelyMergedNoiseToken = (value = '') => {
+  const token = String(value || '').trim().toLowerCase();
+  if (!token || token.includes(' ')) return false;
+  if (token.length >= 18) return true;
+  if (/^(for|and|with|about|from)[a-z]{5,}$/i.test(token)) return true;
+  if (/(resume|portfolio|andmanaged|memberled|communitymember)/i.test(token)) return true;
+  if (token.length >= 14 && token.includes('and')) return true;
+  return false;
+};
 
 const normalizeTopicForUi = (rawValue = '') => {
   const value = String(rawValue || '')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
     .replace(/\bcontentcreation\b/gi, 'content creation')
     .replace(/\bsocialmediamanagement\b/gi, 'social media management')
+    .replace(/\bsocialmedia\b/gi, 'social media')
+    .replace(/\bsoftwareengineering\b/gi, 'software engineering')
+    .replace(/\bmachinelearning\b/gi, 'machine learning')
+    .replace(/\bwebdevelopment\b/gi, 'web development')
+    .replace(/\bmobiledevelopment\b/gi, 'mobile development')
+    .replace(/\bdatascience\b/gi, 'data science')
+    .replace(/\bcloudcomputing\b/gi, 'cloud computing')
     .replace(/\bmarketingtool\b/gi, 'marketing tool')
     .replace(/\bproductupdate\b/gi, 'product update')
     .replace(/\bagencylife\b/gi, 'agency life')
@@ -107,14 +156,34 @@ const normalizeTopicForUi = (rawValue = '') => {
     .split(' ')
     .map((word) => {
       if (!word) return '';
+      if (word.endsWith("'s")) return word.slice(0, -2);
       if (word.endsWith('ies') && word.length > 5) return `${word.slice(0, -3)}y`;
-      if (word.endsWith('s') && !word.endsWith('ss') && word.length > 4) return word.slice(0, -1);
+      if (
+        word.endsWith('s') &&
+        !word.endsWith('ss') &&
+        !word.endsWith('is') &&
+        !word.endsWith('us') &&
+        !word.endsWith('ops') &&
+        !word.endsWith('ics') &&
+        word.length > 4
+      ) {
+        return word.slice(0, -1);
+      }
       return word;
     })
-    .filter((word) => word && word.length >= 3 && !UI_TOPIC_STOP_WORDS.has(word));
+    .filter((word) => {
+      if (!word) return false;
+      if (/^\d+$/.test(word)) return false;
+      if (!UI_TOPIC_SHORT_ALLOWLIST.has(word) && word.length < 3) return false;
+      if (UI_TOPIC_STOP_WORDS.has(word)) return false;
+      return true;
+    });
 
   if (words.length === 0 || words.length > 2) return '';
+  if (isRoleFragmentNoise(words)) return '';
+  if (words.length === 1 && UI_WEAK_SINGLE_TOPIC_TOKENS.has(words[0])) return '';
   const normalized = words.join(' ').trim();
+  if (isLikelyMergedNoiseToken(normalized)) return '';
   if (normalized.length > 36) return '';
   return normalized;
 };
@@ -248,7 +317,7 @@ const getPdfConfidenceMeta = (confidenceRaw = '', extractionSource = 'unknown') 
   return { label: 'Unknown', dotClass: 'bg-gray-400', textClass: 'text-gray-600' };
 };
 
-const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
+const AnalysisFlow = ({ strategyId, onComplete, onCancel, onPhaseChange }) => {
   const { selectedAccount, getCurrentAccountId } = useAccount();
   const [phase, setPhase] = useState('welcome'); // welcome | loading | confirm | reference | generating | done
   const [analysisId, setAnalysisId] = useState(null);
@@ -267,6 +336,10 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
   const [customTopicInput, setCustomTopicInput] = useState('');
   const [referenceHandles, setReferenceHandles] = useState(['', '']);
   const [referenceResults, setReferenceResults] = useState([]);
+  const [referenceExamples, setReferenceExamples] = useState('');
+  const [referenceWinAngle, setReferenceWinAngle] = useState('authority');
+  const [referenceScrapeConsent, setReferenceScrapeConsent] = useState(false);
+  const [referenceScrapeReport, setReferenceScrapeReport] = useState(null);
   const [isAnalysing, setIsAnalysing] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState(null);
@@ -285,6 +358,19 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [confirmStep, phase]);
+
+  useEffect(() => {
+    if (typeof onPhaseChange === 'function') {
+      onPhaseChange(phase);
+    }
+  }, [phase, onPhaseChange]);
+
+  useEffect(() => () => {
+    if (typeof onPhaseChange === 'function') {
+      onPhaseChange('idle');
+    }
+  }, [onPhaseChange]);
+
   const pdfConfidenceMeta = linkedinPdfDiscoveries
     ? getPdfConfidenceMeta(linkedinPdfDiscoveries.confidence, linkedinPdfDiscoveries.extractionSource)
     : null;
@@ -638,7 +724,7 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
         <div className="bg-white rounded-2xl shadow-lg p-6">
           <h3 className="text-lg font-bold text-gray-900 mb-2">Want to go deeper?</h3>
           <p className="text-gray-600 text-sm mb-6">
-            Add up to 2 LinkedIn profiles you want to learn from - competitors or creators in your niche you respect.
+            Add up to 2 competitor profiles. You can also add manual examples and optionally allow public-page scraping.
           </p>
           <div className="space-y-3 mb-6">
             {referenceHandles.map((handle, idx) => (
@@ -663,6 +749,36 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
               />
             ))}
+          </div>
+
+          <div className="space-y-3 mb-6">
+            <label className="text-xs font-medium text-gray-500 uppercase tracking-wide">Win angle</label>
+            <select
+              value={referenceWinAngle}
+              onChange={(e) => setReferenceWinAngle(e.target.value)}
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="authority">Authority</option>
+              <option value="clarity">Clarity</option>
+              <option value="originality">Originality</option>
+              <option value="consistency">Consistency</option>
+            </select>
+            <textarea
+              placeholder="Optional manual examples or benchmark notes (one per line)"
+              value={referenceExamples}
+              onChange={(e) => setReferenceExamples(e.target.value.slice(0, 1200))}
+              rows={3}
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+            />
+            <label className="inline-flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={referenceScrapeConsent}
+                onChange={(e) => setReferenceScrapeConsent(e.target.checked)}
+                className="mt-0.5"
+              />
+              Allow competitor scraping on public pages from allowlisted domains.
+            </label>
           </div>
 
           <div className="space-y-3 mt-4 pt-4 border-t border-gray-100">
@@ -735,7 +851,7 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
           )}
 
           <div className="flex gap-3">
-            {referenceHandles.some((h) => h.trim()) && referenceResults.length === 0 && (
+            {(referenceHandles.some((h) => h.trim()) || referenceExamples.trim()) && referenceResults.length === 0 && (
               <button
                 onClick={handleAnalyseReferences}
                 disabled={isAnalysing}
@@ -752,7 +868,7 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
               onClick={handleGeneratePrompts}
               disabled={isGenerating}
               className={`flex-1 inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-semibold transition-colors ${
-                referenceResults.length > 0 || !referenceHandles.some((h) => h.trim())
+                referenceResults.length > 0 || (!referenceHandles.some((h) => h.trim()) && !referenceExamples.trim())
                   ? 'bg-green-600 text-white hover:bg-green-700'
                   : 'border border-gray-300 text-gray-700 hover:bg-gray-50'
               }`}
@@ -761,7 +877,7 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
                 <><Loader2 className="w-4 h-4 animate-spin" /> Starting generation...</>
               ) : (
                 <>
-                  {referenceResults.length > 0 || !referenceHandles.some((h) => h.trim())
+                  {referenceResults.length > 0 || (!referenceHandles.some((h) => h.trim()) && !referenceExamples.trim())
                     ? 'Generate my content'
                     : 'Skip and generate my content'}
                 </>
@@ -902,6 +1018,17 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
                   <p className="text-sm font-medium text-gray-900 mt-1">{goal.label}</p>
                 </button>
               ))}
+            </div>
+          )}
+
+          {referenceScrapeReport?.warnings?.length > 0 && (
+            <div className="mb-6 rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <p className="text-xs font-semibold text-amber-700 mb-1">Competitor analysis warnings</p>
+              <ul className="list-disc pl-4 space-y-1 text-xs text-amber-700">
+                {referenceScrapeReport.warnings.slice(0, 4).map((warning, idx) => (
+                  <li key={`${warning}-${idx}`}>{warning}</li>
+                ))}
+              </ul>
             </div>
           )}
 
@@ -1370,6 +1497,8 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
     setError(null);
     setLoadingSteps({ connected: 'done', tweets: 'loading' });
     setGapMap([]);
+    setReferenceResults([]);
+    setReferenceScrapeReport(null);
 
     try {
       const selectedAccountId = getCurrentAccountId();
@@ -1408,27 +1537,7 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
       // Wait for API to complete
       const response = await apiPromise;
       const data = response.data;
-      console.log('[AnalysisFlow] Analysis response', {
-        analysisId: data?.analysisId,
-        tweetsAnalysed: data?.tweetsAnalysed || 0,
-        confidence: data?.confidence || 'unknown',
-        trendingCount: Array.isArray(data?.trending) ? data.trending.length : 0,
-      });
-
-      const cleanedAnalysis = {
-        ...(data.analysis || {}),
-        top_topics: sanitizeTopicListForUi(data?.analysis?.top_topics || [], 12),
-      };
-      if ((cleanedAnalysis.top_topics || []).length === 0) {
-        cleanedAnalysis.top_topics = fallbackTopicsFromContext(cleanedAnalysis);
-      }
-      const preselectedGoalIds = mapGoalLabelsToIds(cleanedAnalysis?.goals || cleanedAnalysis?.content_goals || []);
-      setTweetsAnalysed(data.tweetsAnalysed || 0);
-      setAnalysisData(cleanedAnalysis);
-      setTrendingTopics(sanitizeTrendingTopicsForUi(data.trending || [], 12));
-      setGapMap(sanitizeGapMapForUi(data.gapMap || [], 5));
-      setConfidence(data.confidence || 'low');
-      setConfidenceReason(data.confidenceReason || '');
+      applyAnalysisPayload(data);
       setSelectedGoals(preselectedGoalIds.length > 0 ? preselectedGoalIds : ['followers']);
       
       setLoadingSteps({ connected: 'done', tweets: 'done', analysing: 'done', trending: 'loading' });
@@ -1447,6 +1556,38 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
       setConfirmStep(0);
     } catch (err) {
       console.error('[AnalysisFlow] Analysis failed:', err);
+      const statusCode = Number(err?.response?.status || 0);
+      const responseCode = String(err?.response?.data?.code || '').trim();
+      const runningAnalysisId = String(err?.response?.data?.runId || '').trim();
+      if (statusCode === 409 && responseCode === 'ANALYSIS_ALREADY_RUNNING' && runningAnalysisId) {
+        setError('Auto analysis is already running. Syncing latest progress...');
+        setAnalysisId(runningAnalysisId);
+        try {
+          const statusResponse = await analysisApi.getStatus(runningAnalysisId);
+          const statusData = statusResponse?.data || {};
+          if (statusData?.analysisData && statusData?.analysisData !== null) {
+            applyAnalysisPayload({
+              analysisId: runningAnalysisId,
+              analysis: statusData.analysisData,
+              trending: statusData.trendingTopics || [],
+              gapMap: statusData.gapMap || [],
+              tweetsAnalysed: statusData.tweetsAnalysed || 0,
+              confidence: statusData.confidence || 'low',
+              confidenceReason: statusData.confidenceReason || '',
+            });
+            setLoadingSteps({ connected: 'done', tweets: 'done', analysing: 'done', trending: 'done' });
+            setPhase('confirm');
+            setConfirmStep(0);
+            setError(null);
+            return;
+          }
+          setError('Auto analysis is still running. Wait a few seconds and click Run auto analysis again.');
+        } catch (statusErr) {
+          console.error('[AnalysisFlow] Failed to sync running analysis', statusErr);
+          setError('Auto analysis is already running. Please retry in a few seconds.');
+        }
+        return;
+      }
       setError(err.response?.data?.error || err.message || 'Analysis failed. Please try again.');
       setLoadingSteps((prev) => {
         const next = { ...prev };
@@ -1472,6 +1613,31 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to save. Please try again.');
     }
+  }
+
+  function applyAnalysisPayload(data = {}) {
+    console.log('[AnalysisFlow] Analysis response', {
+      analysisId: data?.analysisId,
+      tweetsAnalysed: data?.tweetsAnalysed || 0,
+      confidence: data?.confidence || 'unknown',
+      trendingCount: Array.isArray(data?.trending) ? data.trending.length : 0,
+    });
+
+    const cleanedAnalysis = {
+      ...(data.analysis || {}),
+      top_topics: sanitizeTopicListForUi(data?.analysis?.top_topics || [], 12),
+    };
+    if ((cleanedAnalysis.top_topics || []).length === 0) {
+      cleanedAnalysis.top_topics = fallbackTopicsFromContext(cleanedAnalysis);
+    }
+    const preselectedGoalIds = mapGoalLabelsToIds(cleanedAnalysis?.goals || cleanedAnalysis?.content_goals || []);
+    setTweetsAnalysed(data.tweetsAnalysed || 0);
+    setAnalysisData(cleanedAnalysis);
+    setTrendingTopics(sanitizeTrendingTopicsForUi(data.trending || [], 12));
+    setGapMap(sanitizeGapMapForUi(data.gapMap || [], 5));
+    setConfidence(data.confidence || 'low');
+    setConfidenceReason(data.confidenceReason || '');
+    setSelectedGoals(preselectedGoalIds.length > 0 ? preselectedGoalIds : ['followers']);
   }
 
   async function handleLinkedinPdfFileChange(event) {
@@ -1612,16 +1778,32 @@ const AnalysisFlow = ({ strategyId, onComplete, onCancel }) => {
 
   async function handleAnalyseReferences() {
     const handles = referenceHandles.filter((h) => h.trim());
-    if (handles.length === 0) return;
+    const manualExamples = referenceExamples
+      .split(/\r?\n|;/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, 12);
+    if (handles.length === 0 && manualExamples.length === 0) return;
 
     setIsAnalysing(true);
     setError(null);
+    setReferenceScrapeReport(null);
 
     try {
-      const response = await analysisApi.analyseReferenceAccounts(analysisId, handles);
+      const response = await analysisApi.analyseReferenceAccounts(analysisId, {
+        handles,
+        competitorTargets: handles,
+        manualExamples,
+        winAngle: referenceWinAngle,
+        consentScrape: referenceScrapeConsent,
+      });
       setReferenceResults(response.data?.referenceAccounts || []);
+      setReferenceScrapeReport(response.data?.scrapeReport || null);
       if (Array.isArray(response?.data?.gapMap)) {
         setGapMap(sanitizeGapMapForUi(response.data.gapMap, 5));
+      }
+      if (response?.data?.partial) {
+        toast('Competitor analysis completed with partial data.');
       }
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to analyse reference accounts.');

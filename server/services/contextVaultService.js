@@ -1,5 +1,6 @@
 import { pool } from '../config/database.js';
 import linkedinAutomationService from './linkedinAutomationService.js';
+import personaVaultService from './personaVaultService.js';
 
 const PRODUCT_SCOPE = 'linkedin-genie';
 const VAULT_VERSION = 1;
@@ -13,6 +14,9 @@ const TOPIC_STOP_WORDS = new Set([
   'about', 'after', 'before', 'while', 'when', 'where', 'what', 'why', 'how',
   'has', 'have', 'had', 'was', 'were', 'will', 'would', 'can', 'could', 'should',
   'build', 'building', 'built', 'share', 'sharing', 'more', 'most', 'just',
+  'agency', 'client', 'platform', 'workflow', 'analytic', 'tool', 'tools',
+  'service', 'solution', 'product', 'creator', 'update', 'growth', 'strategy',
+  'brand', 'marketing', 'business', 'team',
 ]);
 
 const sanitizeUnicodeString = (value = '') => {
@@ -468,8 +472,9 @@ class ContextVaultService {
 
     const strategyMetadata = parseJsonObject(strategy.metadata, {});
 
-    const [profileRow, latestRunRows, recentPostRows, promptUsageRows, reviewQueueRows] = await Promise.all([
+    const [profileRow, personaVault, latestRunRows, recentPostRows, promptUsageRows, reviewQueueRows] = await Promise.all([
       linkedinAutomationService.getProfileContextRow(userId),
+      personaVaultService.getByUser({ userId }),
       pool.query(
         `SELECT *
          FROM linkedin_automation_runs
@@ -553,6 +558,8 @@ class ContextVaultService {
         ...(Array.isArray(strategy?.topics) ? strategy.topics : []),
         ...(Array.isArray(queueAnalytics?.bestTopics) ? queueAnalytics.bestTopics : []),
         ...(Array.isArray(queueAnalytics?.weakTopics) ? queueAnalytics.weakTopics : []),
+        ...(Array.isArray(personaVault?.signals?.topic_signals) ? personaVault.signals.topic_signals : []),
+        ...(Array.isArray(personaVault?.signals?.niche_candidates) ? personaVault.signals.niche_candidates : []),
         strategy?.niche || '',
       ],
       24
@@ -598,6 +605,7 @@ class ContextVaultService {
       [
         ...(Array.isArray(profileMetadata.linkedin_skills) ? profileMetadata.linkedin_skills : []),
         ...(Array.isArray(profileMetadata.portfolio_skills) ? profileMetadata.portfolio_skills : []),
+        ...(Array.isArray(personaVault?.signals?.skills) ? personaVault.signals.skills : []),
       ],
       14
     );
@@ -605,6 +613,7 @@ class ContextVaultService {
     const aboutPreview = toShortText(
       profileMetadata.linkedin_about ||
         profileMetadata.portfolio_about ||
+        personaVault?.signals?.about ||
         strategyMetadata.linkedin_about ||
         strategyMetadata.portfolio_about ||
         '',
@@ -613,6 +622,7 @@ class ContextVaultService {
     const experiencePreview = toShortText(
       profileMetadata.linkedin_experience ||
         profileMetadata.portfolio_experience ||
+        personaVault?.signals?.experience ||
         strategyMetadata.linkedin_experience ||
         strategyMetadata.portfolio_experience ||
         '',
@@ -650,6 +660,25 @@ class ContextVaultService {
         pdfUploadedAt: profileMetadata.linkedin_profile_pdf_uploaded_at || null,
         pdfExtractionSource: profileMetadata.linkedin_profile_pdf_extraction_source || null,
       },
+      persona: {
+        status: personaVault?.status || 'missing',
+        available: Boolean(personaVault),
+        lastEnrichedAt: personaVault?.lastEnrichedAt || null,
+        freshnessHours: personaVault?.lastEnrichedAt
+          ? Number(
+              (
+                (Date.now() - new Date(personaVault.lastEnrichedAt).getTime()) /
+                (1000 * 60 * 60)
+              ).toFixed(2)
+            )
+          : null,
+        nicheSignals: Array.isArray(personaVault?.signals?.niche_candidates)
+          ? personaVault.signals.niche_candidates.slice(0, 6)
+          : [],
+        skillsCount: Array.isArray(personaVault?.signals?.skills) ? personaVault.signals.skills.length : 0,
+        sourceHealth: parseJsonObject(personaVault?.sourceHealth, {}),
+        evidenceSummary: parseJsonObject(personaVault?.evidenceSummary, {}),
+      },
       references: {
         count: Array.isArray(latestRunMetadata.reference_accounts) ? latestRunMetadata.reference_accounts.length : 0,
       },
@@ -686,6 +715,9 @@ class ContextVaultService {
           ...(Array.isArray(parseJsonObject(strategyMetadata.analysis_cache, {}).next_angles)
             ? parseJsonObject(strategyMetadata.analysis_cache, {}).next_angles
             : []),
+          ...(Array.isArray(personaVault?.signals?.proof_points)
+            ? personaVault.signals.proof_points.slice(0, 4).map((point) => `Ground at least one post in this proof point: ${point}`)
+            : []),
           ...topicPerformance.underusedTopics.slice(0, 3).map((topic) => `Create proof-backed posts on ${topic}.`),
           ...(Array.isArray(queueAnalytics.bestTopics)
             ? queueAnalytics.bestTopics.slice(0, 3).map((topic) => `Repeat ${topic} with fresh project updates and measurable outcomes.`)
@@ -696,6 +728,17 @@ class ContextVaultService {
         ],
         12
       ),
+      personaSignals: {
+        nicheCandidates: Array.isArray(personaVault?.signals?.niche_candidates)
+          ? personaVault.signals.niche_candidates.slice(0, 8)
+          : [],
+        audienceCandidates: Array.isArray(personaVault?.signals?.audience_candidates)
+          ? personaVault.signals.audience_candidates.slice(0, 8)
+          : [],
+        proofPoints: Array.isArray(personaVault?.signals?.proof_points)
+          ? personaVault.signals.proof_points.slice(0, 10)
+          : [],
+      },
       topicPerformance: topicPerformance.scored,
       queueTopicPerformance: Array.isArray(queueAnalytics.topicScores) ? queueAnalytics.topicScores : [],
     };
@@ -740,6 +783,13 @@ class ContextVaultService {
           lowPostedCoverage
             ? 'Only part of posted queue content is reflected in current analytics history; sync analytics before next generation.'
             : '',
+          !personaVault
+            ? 'Persona Vault is empty. Run persona enrichment to improve niche and proof-point grounding.'
+            : '',
+          personaVault?.lastEnrichedAt &&
+          (Date.now() - new Date(personaVault.lastEnrichedAt).getTime()) > 1000 * 60 * 60 * 24 * 14
+            ? 'Persona Vault is older than 14 days. Refresh persona enrichment for fresher signals.'
+            : '',
         ],
         8
       ),
@@ -768,6 +818,7 @@ class ContextVaultService {
             ...(Array.isArray(strategy.topics) ? strategy.topics : []),
             ...(Array.isArray(analysisData.top_topics) ? analysisData.top_topics : []),
             ...(Array.isArray(postSummary?.themes) ? postSummary.themes : []),
+            ...(Array.isArray(personaVault?.signals?.topic_signals) ? personaVault.signals.topic_signals : []),
           ],
           12
         ),
@@ -852,6 +903,7 @@ class ContextVaultService {
         posts: Number(sources.posts.count || 0),
         portfolio: sources.portfolio.active ? 1 : 0,
         pdf: sources.linkedinProfile.hasPdf ? 1 : 0,
+        persona: sources.persona.available ? 1 : 0,
         references: Number(sources.references.count || 0),
         reviews: Number(reviewFeedback.reviewedCount || 0),
       },
@@ -859,6 +911,12 @@ class ContextVaultService {
       underused_topics: discoveries.underusedTopics.slice(0, 8),
       voice_signals: discoveries.voiceSignals.slice(0, 5),
       top_skills: topSkills.slice(0, 12),
+      persona: {
+        status: sources.persona.status,
+        last_enriched_at: sources.persona.lastEnrichedAt,
+        freshness_hours: sources.persona.freshnessHours,
+        niche_signals: Array.isArray(sources.persona.nicheSignals) ? sources.persona.nicheSignals.slice(0, 8) : [],
+      },
       prompts: {
         total: totalPrompts,
         used: usedPrompts,
@@ -882,6 +940,11 @@ class ContextVaultService {
 
     const metadataPatch = sanitizeJsonSafeValue({
       context_vault: contextVaultSummary,
+      ...(personaVault
+        ? {
+            persona_vault: personaVaultService.buildStrategyPersonaSummary(personaVault),
+          }
+        : {}),
     });
 
     await pool.query(

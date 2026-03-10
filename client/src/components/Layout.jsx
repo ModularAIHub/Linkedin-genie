@@ -19,6 +19,7 @@ import {
   History,
   Sparkles,
   Lock,
+  MessageCircle,
 } from 'lucide-react';
 
 const Layout = ({ children }) => {
@@ -36,6 +37,7 @@ const Layout = ({ children }) => {
     { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     { name: 'Compose', href: '/compose', icon: Edit3 },
     { name: 'Strategy Builder', href: '/strategy', icon: Sparkles, badge: 'New', proOnly: true },
+    { name: 'Engagement', href: '/engagement', icon: MessageCircle, proOnly: true },
     { name: 'Bulk Generation', href: '/bulk-generation', icon: BarChart3, proOnly: true },
     { name: 'Scheduling', href: '/scheduling', icon: Calendar },
     { name: 'History', href: '/history', icon: History },
@@ -90,7 +92,7 @@ const Layout = ({ children }) => {
   }, [user]);
 
   return (
-    <div className="min-h-screen bg-[#f3f6f8] flex">
+    <div className="h-screen overflow-hidden bg-[#f3f6f8] flex">
       {/* Mobile sidebar backdrop */}
       {isSidebarOpen && (
         <div
@@ -99,7 +101,7 @@ const Layout = ({ children }) => {
         />
       )}
       <div
-        className={`fixed inset-y-0 left-0 z-50 w-64 bg-white/80 backdrop-blur-xl shadow-2xl border-r border-blue-100/50 transform transition-transform duration-300 ease-in-out lg:translate-x-0 lg:relative lg:flex lg:flex-col ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
+        className={`fixed inset-y-0 left-0 z-50 w-64 bg-white/80 backdrop-blur-xl shadow-2xl border-r border-blue-100/50 transform transition-transform duration-300 ease-in-out lg:translate-x-0 lg:sticky lg:top-0 lg:h-screen lg:flex lg:flex-col lg:shrink-0 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
           }`}
       >
         <div className="flex items-center justify-between h-16 px-6 border-b border-blue-100/50">
@@ -157,7 +159,7 @@ const Layout = ({ children }) => {
           </ul>
         </nav>
         {/* Credits display */}
-        <div className="p-4 border-t border-blue-200 flex-shrink-0">
+        <div className="p-4 border-t border-blue-200 flex-shrink-0 sticky bottom-0 bg-white/95 backdrop-blur">
           <div className="bg-blue-50 rounded-lg p-4">
             <div className="flex items-center justify-between mb-2">
               <span className="text-sm font-medium text-blue-700">Credits</span>
@@ -175,7 +177,7 @@ const Layout = ({ children }) => {
         </div>
       </div>
       {/* Main content */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0">
         {/* Top header */}
         <header className="bg-white shadow-sm border-b border-blue-200 flex-shrink-0">
           <div className="flex items-center justify-between h-16 px-4 sm:px-6 lg:px-8">
@@ -234,7 +236,7 @@ const Layout = ({ children }) => {
           </div>
         </header>
         {/* Page content */}
-        <main className="flex-1 p-4 sm:p-6 lg:p-8 overflow-auto">
+        <main className="flex-1 min-h-0 p-4 sm:p-6 lg:p-8 overflow-y-auto overflow-x-hidden">
           <div className="page-transition h-full">
             {children}
           </div>

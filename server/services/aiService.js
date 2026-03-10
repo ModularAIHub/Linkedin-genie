@@ -205,6 +205,27 @@ const STRATEGY_RESPONSE_SCHEMA = {
   required: ['analysis', 'queue'],
 };
 
+const TREND_SIGNALS_RESPONSE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    trends: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          topic: { type: 'STRING' },
+          trigger: { type: 'STRING' },
+          implication: { type: 'STRING' },
+          source: { type: 'STRING' },
+          confidence: { type: 'STRING' },
+        },
+        required: ['topic', 'trigger', 'implication'],
+      },
+    },
+  },
+  required: ['trends'],
+};
+
 class AIService {
   constructor() {
     if (process.env.OPENAI_API_KEY) {
@@ -997,6 +1018,301 @@ Generate the post now:`;
     }
 
     throw new Error(`All strategy AI providers failed. Last error: ${lastError?.message || 'Unknown error'}`);
+  }
+
+  normalizeTrendSignals(items = [], maxItems = 8) {
+    const safeMax = Math.max(1, Math.min(12, Number(maxItems) || 8));
+    const seen = new Set();
+    const out = [];
+    const rows = Array.isArray(items) ? items : [];
+
+    for (const rawItem of rows) {
+      const item = rawItem && typeof rawItem === 'object' ? rawItem : { topic: rawItem };
+      const topic = normalizeSimpleText(item.topic || item.name || '', 64).toLowerCase();
+      if (!topic || topic.length < 3) continue;
+
+      const trigger = normalizeSimpleText(item.trigger || item.signal || item.trend || '', 180);
+      const implication = normalizeSimpleText(item.implication || item.angle || item.recommendation || '', 200);
+      const source = normalizeSimpleText(item.source || item.sources || '', 120);
+      const confidenceRaw = String(item.confidence || '').toLowerCase();
+      const confidence = ['high', 'medium', 'low'].includes(confidenceRaw) ? confidenceRaw : 'medium';
+      const key = `${topic}|${trigger}`.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      out.push({
+        topic,
+        trigger: trigger || `New updates are shaping ${topic} right now.`,
+        implication: implication || `Translate this ${topic} shift into one applied workflow update this week.`,
+        source,
+        confidence,
+      });
+
+      if (out.length >= safeMax) break;
+    }
+
+    return out;
+  }
+
+  buildTrendFallback({ niche = '', topics = [], maxItems = 6 } = {}) {
+    const safeMax = Math.max(1, Math.min(8, Number(maxItems) || 6));
+    const seedTopics = normalizeStringArray(
+      [...(Array.isArray(topics) ? topics : []), niche],
+      safeMax + 4,
+      56
+    )
+      .map((value) => normalizeSimpleText(value, 56).toLowerCase())
+      .filter(Boolean);
+
+    const fallbackPool = seedTopics.length > 0 ? seedTopics : ['web development', 'cloud', 'devops', 'saas'];
+
+    return fallbackPool.slice(0, safeMax).map((topic) => ({
+      topic,
+      trigger: `Market conversations around ${topic} are accelerating this week.`,
+      implication: `Share one change you applied in your product because of this ${topic} shift.`,
+      source: 'fallback',
+      confidence: 'low',
+    }));
+  }
+
+  async fetchNicheTrendSignals({
+    niche = '',
+    topics = [],
+    audience = '',
+    projectContext = '',
+    maxItems = 6,
+    userToken = null,
+    userId = null,
+    cookieHeader = null,
+  } = {}) {
+    if (userId) {
+      const rateCheck = checkRateLimit(userId);
+      if (!rateCheck.allowed) {
+        throw new Error(rateCheck.error);
+      }
+    }
+
+    const safeMax = Math.max(1, Math.min(8, Number(maxItems) || 6));
+    const normalizedNiche = normalizeSimpleText(niche, 120);
+    const normalizedTopics = normalizeStringArray(topics, 12, 56);
+    const normalizedAudience = normalizeSimpleText(audience, 120);
+    const normalizedProjectContext = normalizeSimpleText(projectContext, 220);
+    const today = new Date().toISOString().slice(0, 10);
+
+    const prompt = [
+      'Return ONLY JSON.',
+      'Schema:',
+      '{"trends":[{"topic":"","trigger":"","implication":"","source":"","confidence":"high|medium|low"}]}',
+      `Date: ${today}`,
+      `Find up to ${safeMax} high-signal trend shifts relevant to this niche in the last 60 days when possible.`,
+      'Trend shifts can include: feature releases, benchmark changes, API updates, platform policy shifts, ecosystem launches.',
+      'Keep each trigger practical and specific (max 140 chars).',
+      'Each implication must say what a builder should do this week (max 170 chars).',
+      'Avoid generic terms like growth strategy or personal branding.',
+      `Niche: ${normalizedNiche || 'not provided'}`,
+      `Topics: ${normalizedTopics.join(', ') || 'not provided'}`,
+      `Audience: ${normalizedAudience || 'not provided'}`,
+      `Project context: ${normalizedProjectContext || 'not provided'}`,
+    ].join('\n');
+
+    let preference = 'platform';
+    let userKeys = [];
+
+    if (userToken) {
+      try {
+        const prefResult = await getUserPreferenceAndKeys(userToken, 3, cookieHeader);
+        preference = prefResult.preference || 'platform';
+        userKeys = Array.isArray(prefResult.userKeys) ? prefResult.userKeys : [];
+      } catch (error) {
+        console.error('[AI Service] Failed to fetch preference for trend signals:', error.message);
+      }
+    }
+
+    const providers = [];
+    const perplexityKey =
+      preference === 'byok'
+        ? userKeys.find((key) => key.provider === 'perplexity')?.apiKey
+        : this.perplexityApiKey;
+    if (perplexityKey) {
+      providers.push({
+        name: 'perplexity',
+        keyType: preference === 'byok' ? 'BYOK' : 'platform',
+        usedLiveSearch: true,
+        method: (trendPrompt) => this.fetchTrendSignalsWithPerplexity(trendPrompt, perplexityKey),
+      });
+    }
+
+    const googleKey =
+      preference === 'byok'
+        ? userKeys.find((key) => key.provider === 'gemini')?.apiKey
+        : this.googleApiKey;
+    if (googleKey) {
+      providers.push({
+        name: 'google',
+        keyType: preference === 'byok' ? 'BYOK' : 'platform',
+        usedLiveSearch: true,
+        method: (trendPrompt) => this.fetchTrendSignalsWithGoogle(trendPrompt, googleKey),
+      });
+    }
+
+    let lastError = null;
+    for (const provider of providers) {
+      try {
+        const parsed = await provider.method(prompt);
+        const normalized = this.normalizeTrendSignals(parsed?.trends || parsed, safeMax);
+        if (normalized.length === 0) {
+          throw new Error('Trend response contained no valid signals');
+        }
+        return {
+          trends: normalized,
+          provider: provider.name,
+          keyType: provider.keyType,
+          usedLiveSearch: provider.usedLiveSearch,
+          fallback: false,
+        };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    return {
+      trends: this.buildTrendFallback({
+        niche: normalizedNiche,
+        topics: normalizedTopics,
+        maxItems: safeMax,
+      }),
+      provider: 'fallback',
+      keyType: null,
+      usedLiveSearch: false,
+      fallback: true,
+      error: lastError?.message || null,
+    };
+  }
+
+  async fetchTrendSignalsWithPerplexity(prompt, apiKey = null) {
+    const keyToUse = apiKey || this.perplexityApiKey;
+    if (!keyToUse) {
+      throw new Error('Perplexity API key not configured');
+    }
+
+    const response = await axios.post(
+      'https://api.perplexity.ai/chat/completions',
+      {
+        model: 'sonar',
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a niche trend analyst for LinkedIn creators. Return only strict JSON in the exact requested schema.',
+          },
+          { role: 'user', content: prompt },
+        ],
+        max_tokens: 1000,
+        temperature: 0.2,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${keyToUse}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 45000,
+      }
+    );
+
+    const content =
+      response.data?.choices?.[0]?.message?.content?.trim() ||
+      response.data?.choices?.[0]?.text?.trim() ||
+      response.data?.output_text?.trim() ||
+      response.data?.result?.text?.trim();
+
+    if (!content) {
+      throw new Error('No trend signals generated by Perplexity');
+    }
+
+    const parsed = extractJsonObjectFromText(content) || extractJsonObjectLoose(content);
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error('Perplexity trend response was not valid JSON');
+    }
+
+    return parsed;
+  }
+
+  async fetchTrendSignalsWithGoogle(prompt, apiKey = null) {
+    const keyToUse = apiKey || this.googleApiKey;
+    if (!keyToUse) {
+      throw new Error('Google AI API key not configured');
+    }
+
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${keyToUse}`;
+    const buildPayload = (useSearchTool = false) => {
+      const payload = {
+        contents: [
+          {
+            parts: [
+              {
+                text:
+                  'You are a niche trend analyst for LinkedIn creators. Return only strict JSON in the exact requested schema.',
+              },
+              { text: prompt },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.2,
+          topK: 1,
+          topP: 1,
+          maxOutputTokens: 1600,
+          responseMimeType: 'application/json',
+          responseSchema: TREND_SIGNALS_RESPONSE_SCHEMA,
+        },
+      };
+      if (useSearchTool) {
+        // Best-effort live grounding. If the account/model does not support this tool,
+        // we fallback to the standard generation request.
+        payload.tools = [{ google_search: {} }];
+      }
+      return payload;
+    };
+
+    let lastError = null;
+    for (const useSearchTool of [true, false]) {
+      try {
+        const response = await axios.post(
+          endpoint,
+          buildPayload(useSearchTool),
+          {
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            timeout: 45000,
+          }
+        );
+
+        const parts = Array.isArray(response.data?.candidates?.[0]?.content?.parts)
+          ? response.data.candidates[0].content.parts
+          : [];
+        const textParts = parts
+          .map((part) => (typeof part?.text === 'string' ? part.text.trim() : ''))
+          .filter(Boolean);
+
+        if (textParts.length === 0) {
+          throw new Error('No trend signals generated by Google Gemini');
+        }
+
+        for (const text of textParts) {
+          const parsed = extractJsonObjectFromText(text) || extractJsonObjectLoose(text);
+          if (parsed && typeof parsed === 'object') {
+            return parsed;
+          }
+        }
+
+        throw new Error('Google trend response was not valid JSON');
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw lastError || new Error('Google trend signal generation failed');
   }
 
   async generateStrategyWithPerplexity(prompt, apiKey = null) {

@@ -1,7 +1,9 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   CalendarClock,
   CheckCircle2,
+  Pencil,
+  Save,
   Sparkles,
   XCircle,
 } from 'lucide-react';
@@ -26,6 +28,50 @@ export default function ContentPlanQueueSection({
   onQueueAction = () => {},
   onUseInCompose = () => {},
 }) {
+  const [editingId, setEditingId] = useState('');
+  const [editDraft, setEditDraft] = useState({
+    title: '',
+    content: '',
+    hashtagsText: '',
+    reason: '',
+  });
+
+  const startEditing = (item) => {
+    setEditingId(item?.id || '');
+    setEditDraft({
+      title: String(item?.title || '').trim(),
+      content: String(item?.content || '').trim(),
+      hashtagsText: Array.isArray(item?.hashtags) ? item.hashtags.join(', ') : '',
+      reason: String(item?.reason || '').trim(),
+    });
+  };
+
+  const cancelEditing = () => {
+    setEditingId('');
+    setEditDraft({
+      title: '',
+      content: '',
+      hashtagsText: '',
+      reason: '',
+    });
+  };
+
+  const saveEditing = async (item) => {
+    const hashtags = String(editDraft.hashtagsText || '')
+      .split(/[,\n]+/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+    await onQueueAction(item, 'update', {
+      title: editDraft.title,
+      content: editDraft.content,
+      hashtags,
+      reason: editDraft.reason,
+    });
+
+    cancelEditing();
+  };
+
   return (
     <section className="rounded-xl border border-gray-200 bg-white p-5 space-y-4">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -54,6 +100,7 @@ export default function ContentPlanQueueSection({
             <option value="">All statuses</option>
             <option value="needs_approval">Needs approval</option>
             <option value="approved">Approved</option>
+            <option value="done">Done (scheduled + posted)</option>
             <option value="scheduled">Scheduled</option>
             <option value="posted">Posted</option>
             <option value="rejected">Rejected</option>
@@ -73,26 +120,62 @@ export default function ContentPlanQueueSection({
         <div className="space-y-4">
           {filteredQueue.map((item) => {
             const isBusy = actionLoadingId === item.id;
+            const isEditing = editingId === item.id;
             const scheduleState = scheduleInputs[item.id] || {
               scheduled_time: buildDefaultScheduleTime(),
               timezone,
             };
+            const statusLabel = item.status === 'scheduled'
+              ? 'done (scheduled)'
+              : item.status === 'completed'
+                ? 'done (completed)'
+              : item.status === 'posted'
+                ? 'done (posted)'
+                : item.status;
 
             return (
               <div key={item.id} className="rounded-lg border border-gray-200 p-4 space-y-3">
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                   <div>
-                    <h4 className="font-semibold text-gray-900">{item.title || 'Untitled queue item'}</h4>
+                    {isEditing ? (
+                      <input
+                        type="text"
+                        value={editDraft.title}
+                        onChange={(event) => setEditDraft((prev) => ({ ...prev, title: event.target.value }))}
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-900"
+                        placeholder="Post title"
+                      />
+                    ) : (
+                      <h4 className="font-semibold text-gray-900">{item.title || 'Untitled queue item'}</h4>
+                    )}
                     <p className="text-xs text-gray-500">Created {formatDateTime(item.createdAt)}</p>
                   </div>
                   <span className={`inline-flex w-fit rounded-full px-2.5 py-1 text-xs font-medium ${STATUS_STYLES[item.status] || STATUS_STYLES.draft}`}>
-                    {item.status}
+                    {statusLabel}
                   </span>
                 </div>
 
-                <p className="whitespace-pre-wrap text-sm text-gray-700">{item.content}</p>
+                {isEditing ? (
+                  <textarea
+                    rows={8}
+                    value={editDraft.content}
+                    onChange={(event) => setEditDraft((prev) => ({ ...prev, content: event.target.value }))}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-800"
+                    placeholder="Edit post content..."
+                  />
+                ) : (
+                  <p className="whitespace-pre-wrap text-sm text-gray-700">{item.content}</p>
+                )}
 
-                {item.hashtags.length > 0 && (
+                {isEditing ? (
+                  <input
+                    type="text"
+                    value={editDraft.hashtagsText}
+                    onChange={(event) => setEditDraft((prev) => ({ ...prev, hashtagsText: event.target.value }))}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700"
+                    placeholder="Hashtags (comma-separated)"
+                  />
+                ) : item.hashtags.length > 0 ? (
                   <div className="flex flex-wrap gap-2">
                     {item.hashtags.map((tag) => (
                       <span key={`${item.id}-${tag}`} className="rounded-full bg-blue-50 px-2 py-1 text-xs text-blue-700 border border-blue-100">
@@ -100,13 +183,21 @@ export default function ContentPlanQueueSection({
                       </span>
                     ))}
                   </div>
-                )}
+                ) : null}
 
-                {item.reason && (
+                {isEditing ? (
+                  <input
+                    type="text"
+                    value={editDraft.reason}
+                    onChange={(event) => setEditDraft((prev) => ({ ...prev, reason: event.target.value }))}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700"
+                    placeholder="Reason / angle (optional)"
+                  />
+                ) : item.reason ? (
                   <p className="text-xs text-gray-500">
                     <strong>Reason:</strong> {item.reason}
                   </p>
-                )}
+                ) : null}
 
                 {(item.suggestedDayOffset || item.suggestedLocalTime) && (
                   <p className="text-xs text-gray-500">
@@ -121,6 +212,41 @@ export default function ContentPlanQueueSection({
                 )}
 
                 <div className="flex flex-wrap items-center gap-2">
+                  {(item.status === 'needs_approval' || item.status === 'draft' || item.status === 'rejected' || item.status === 'approved') && (
+                    !isEditing ? (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => startEditing(item)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                        Edit
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          disabled={isBusy || !String(editDraft.content || '').trim()}
+                          onClick={() => saveEditing(item)}
+                          className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60"
+                        >
+                          <Save className="h-3.5 w-3.5" />
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={cancelEditing}
+                          className="inline-flex items-center gap-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                        >
+                          <XCircle className="h-3.5 w-3.5" />
+                          Cancel edit
+                        </button>
+                      </>
+                    )
+                  )}
+
                   <button
                     type="button"
                     onClick={() => onUseInCompose(item)}

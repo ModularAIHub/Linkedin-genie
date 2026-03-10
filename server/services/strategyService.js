@@ -67,6 +67,71 @@ class StrategyService {
     };
   }
 
+  async getHistoricalContentCorpus({ userId, strategyId = null, limit = 72 } = {}) {
+    const safeLimit = Math.max(12, Math.min(120, Number(limit) || 72));
+
+    const [postedRows, scheduledRows, queueRows] = await Promise.all([
+      pool.query(
+        `SELECT post_content
+         FROM linkedin_posts
+         WHERE user_id = $1
+           AND status = 'posted'
+           AND COALESCE(post_content, '') <> ''
+         ORDER BY created_at DESC
+         LIMIT $2`,
+        [userId, safeLimit]
+      ),
+      pool.query(
+        `SELECT post_content
+         FROM scheduled_linkedin_posts
+         WHERE user_id = $1
+           AND status IN ('completed', 'posted')
+           AND COALESCE(post_content, '') <> ''
+         ORDER BY COALESCE(posted_at, created_at) DESC
+         LIMIT $2`,
+        [userId, Math.max(8, Math.floor(safeLimit / 2))]
+      ),
+      strategyId
+        ? pool.query(
+            `SELECT q.content
+             FROM linkedin_automation_queue q
+             INNER JOIN linkedin_automation_runs r ON r.id = q.run_id
+             WHERE q.user_id = $1
+               AND q.status IN ('draft', 'needs_approval', 'approved', 'scheduled', 'posted')
+               AND r.user_id = $1
+               AND r.metadata->>'strategy_id' = $2
+               AND COALESCE(q.content, '') <> ''
+             ORDER BY q.created_at DESC
+             LIMIT $3`,
+            [userId, strategyId, Math.max(12, Math.floor(safeLimit / 2))]
+          )
+        : pool.query(
+            `SELECT q.content
+             FROM linkedin_automation_queue q
+             WHERE q.user_id = $1
+               AND q.status IN ('scheduled', 'posted')
+               AND COALESCE(q.content, '') <> ''
+             ORDER BY q.created_at DESC
+             LIMIT $2`,
+            [userId, Math.max(8, Math.floor(safeLimit / 3))]
+          ),
+    ]);
+
+    const rawCorpus = [
+      ...(Array.isArray(postedRows?.rows) ? postedRows.rows.map((row) => row?.post_content) : []),
+      ...(Array.isArray(scheduledRows?.rows) ? scheduledRows.rows.map((row) => row?.post_content) : []),
+      ...(Array.isArray(queueRows?.rows) ? queueRows.rows.map((row) => row?.content) : []),
+    ];
+
+    return this.normalizeAndDedupe(
+      rawCorpus
+        .map((item) => this.sanitizeInsight(item, 240))
+        .filter((item) => item.length >= 20),
+      safeLimit,
+      240
+    );
+  }
+
   withProductScope(metadata = {}) {
     const baseMetadata =
       metadata && typeof metadata === 'object' && !Array.isArray(metadata)
@@ -545,6 +610,11 @@ class StrategyService {
           instruction: `Use plain language, one concrete scenario, and a checklist readers can copy immediately.`,
           recommended_format: 'carousel',
         }),
+        (seed) => ({
+          prompt_text: `Niche radar prompt: pick one recent ${seed.topicLabel.toLowerCase()} update or feature release and explain what it changes for ${seed.audience} this week.`,
+          instruction: `Structure as what changed -> why it matters -> 3 practical actions. Keep it actionable, not news commentary.`,
+          recommended_format: 'single_post',
+        }),
       ],
       engagement: [
         (seed) => ({
@@ -596,6 +666,11 @@ class StrategyService {
           instruction: `Each win should include action + expected outcome + common mistake.`,
           recommended_format: 'single_post',
         }),
+        (seed) => ({
+          prompt_text: `Trend-to-action prompt: translate one emerging ${seed.topicLabel.toLowerCase()} trend into a practical weekly checklist for ${seed.audience}.`,
+          instruction: `Use this structure: trend signal -> risk/opportunity -> exact actions for the next 7 days.`,
+          recommended_format: 'carousel',
+        }),
       ],
       promotional: [
         (seed) => ({
@@ -611,6 +686,11 @@ class StrategyService {
         (seed) => ({
           prompt_text: `Problem -> method -> result prompt for ${seed.audience}: center it on ${seed.topicLabel.toLowerCase()} and what you changed in ${seed.projectCue}.`,
           instruction: `Keep it educational and close with one CTA for a demo/template.`,
+          recommended_format: 'single_post',
+        }),
+        (seed) => ({
+          prompt_text: `Niche update case prompt: connect a recent ${seed.topicLabel.toLowerCase()} market shift to how your approach in ${seed.projectCue} helps ${seed.audience} avoid common mistakes.`,
+          instruction: `Lead with the shift, then show one concrete adaptation and expected outcome. Keep promotional mention short.`,
           recommended_format: 'single_post',
         }),
       ],
@@ -667,6 +747,18 @@ class StrategyService {
           tone_hint: tone,
           audience_hint: seed.audience,
           topic: seed.topicLabel,
+          evidence_refs: this.normalizeAndDedupe(
+            [seed.projectCue, seed.skillCue, seed.insight, seed.gapReason, seed.topicLabel],
+            6,
+            160
+          ),
+          provenance: this.buildPromptProvenance({
+            promptText,
+            instruction,
+            category,
+            signalBundle: signals,
+            source: 'fallback_template',
+          }),
         },
       });
     }
@@ -691,6 +783,18 @@ class StrategyService {
             tone_hint: tone,
             audience_hint: seed.audience,
             topic: seed.topicLabel,
+            evidence_refs: this.normalizeAndDedupe(
+              [seed.projectCue, seed.skillCue, seed.insight, seed.topicLabel],
+              6,
+              160
+            ),
+            provenance: this.buildPromptProvenance({
+              promptText,
+              instruction: `Use hook -> insight -> action -> CTA, and reference ${seed.skillCue} or another named tool from your stack.`,
+              category: categories[(templates.length + index) % categories.length],
+              signalBundle: signals,
+              source: 'fallback_filler',
+            }),
           },
         });
       }
@@ -799,15 +903,33 @@ class StrategyService {
       metadata?.context_vault && typeof metadata.context_vault === 'object' && !Array.isArray(metadata.context_vault)
         ? metadata.context_vault
         : {};
+    const personaVault =
+      metadata?.persona_vault && typeof metadata.persona_vault === 'object' && !Array.isArray(metadata.persona_vault)
+        ? metadata.persona_vault
+        : {};
+    const adaptiveLoop =
+      metadata?.adaptive_loop && typeof metadata.adaptive_loop === 'object' && !Array.isArray(metadata.adaptive_loop)
+        ? metadata.adaptive_loop
+        : {};
+    const personaSignals =
+      personaVault?.signals && typeof personaVault.signals === 'object' && !Array.isArray(personaVault.signals)
+        ? personaVault.signals
+        : {};
+    const personaEvidence =
+      personaVault?.evidence_summary && typeof personaVault.evidence_summary === 'object' && !Array.isArray(personaVault.evidence_summary)
+        ? personaVault.evidence_summary
+        : {};
     const profileAbout = String(
       metadata.linkedin_about ||
         metadata.portfolio_about ||
+        personaSignals.about ||
         contextVault.about_preview ||
         ''
     ).trim();
     const profileExperience = String(
       metadata.linkedin_experience ||
         metadata.portfolio_experience ||
+        personaSignals.experience ||
         contextVault.experience_preview ||
         ''
     ).trim();
@@ -815,6 +937,7 @@ class StrategyService {
       [
         ...(Array.isArray(metadata.linkedin_skills) ? metadata.linkedin_skills : []),
         ...(Array.isArray(metadata.portfolio_skills) ? metadata.portfolio_skills : []),
+        ...(Array.isArray(personaSignals.skills) ? personaSignals.skills : []),
         ...(Array.isArray(contextVault.top_skills) ? contextVault.top_skills : []),
       ],
       14,
@@ -826,6 +949,8 @@ class StrategyService {
         metadata.portfolio_url,
         profileAbout,
         profileExperience,
+        ...(Array.isArray(personaSignals.projects) ? personaSignals.projects : []),
+        ...(Array.isArray(personaSignals.proof_points) ? personaSignals.proof_points : []),
         metadata.extra_context,
       ],
       10
@@ -833,6 +958,7 @@ class StrategyService {
 
     const gapMap = Array.isArray(analysisCache.gap_map) ? analysisCache.gap_map : [];
     const trending = Array.isArray(analysisCache.trending_topics) ? analysisCache.trending_topics : [];
+    const trendSignals = Array.isArray(analysisCache.trend_signals) ? analysisCache.trend_signals : [];
     const vaultWinningTopics = this.normalizeTopicList(
       Array.isArray(contextVault.winning_topics) ? contextVault.winning_topics : [],
       8
@@ -843,6 +969,28 @@ class StrategyService {
     );
     const vaultVoiceSignals = this.normalizeAndDedupe(
       Array.isArray(contextVault.voice_signals) ? contextVault.voice_signals : [],
+      8,
+      160
+    );
+    const adaptiveRecommendedTopics = this.normalizeTopicList(
+      Array.isArray(adaptiveLoop.recommended_topics) ? adaptiveLoop.recommended_topics : [],
+      8
+    );
+    const adaptiveGlobalWinningTopics = this.normalizeTopicList(
+      Array.isArray(adaptiveLoop.global_winning_topics) ? adaptiveLoop.global_winning_topics : [],
+      10
+    );
+    const adaptiveGlobalUnderusedTopics = this.normalizeTopicList(
+      Array.isArray(adaptiveLoop.global_underused_topics) ? adaptiveLoop.global_underused_topics : [],
+      8
+    );
+    const adaptiveVoiceSignals = this.normalizeAndDedupe(
+      Array.isArray(adaptiveLoop.global_voice_signals) ? adaptiveLoop.global_voice_signals : [],
+      8,
+      160
+    );
+    const adaptiveRejectionPatterns = this.normalizeAndDedupe(
+      Array.isArray(adaptiveLoop.global_rejection_patterns) ? adaptiveLoop.global_rejection_patterns : [],
       8,
       160
     );
@@ -874,6 +1022,7 @@ class StrategyService {
     const trendingTopics = this.normalizeTopicList(
       [
         ...trending.map((item) => (typeof item === 'string' ? item : item?.topic)),
+        ...trendSignals.map((item) => (typeof item === 'string' ? item : item?.topic)),
         ...vaultWinningTopics,
       ],
       8
@@ -881,12 +1030,33 @@ class StrategyService {
     const strategyTopics = this.normalizeTopicList(Array.isArray(strategy?.topics) ? strategy.topics : [], 12);
 
     const priorityTopics = this.normalizeTopicList(
-      [...gapTopics, ...trendingTopics, ...vaultUnderusedTopics, ...strategyTopics, strategy?.niche || ''],
+      [
+        ...adaptiveRecommendedTopics,
+        ...adaptiveGlobalWinningTopics,
+        ...adaptiveGlobalUnderusedTopics,
+        ...gapTopics,
+        ...trendingTopics,
+        ...vaultUnderusedTopics,
+        ...(Array.isArray(personaSignals.topic_signals) ? personaSignals.topic_signals : []),
+        ...(Array.isArray(personaSignals.niche_candidates) ? personaSignals.niche_candidates : []),
+        ...strategyTopics,
+        strategy?.niche || '',
+      ],
       16
     );
 
     const angleHints = this.normalizeAndDedupe(
-      [...nextAngles, ...opportunities, ...gaps, ...vaultVoiceSignals],
+      [
+        ...nextAngles,
+        ...opportunities,
+        ...gaps,
+        ...vaultVoiceSignals,
+        ...adaptiveVoiceSignals,
+        ...adaptiveRejectionPatterns.map((pattern) => `Avoid this pattern: ${pattern}`),
+        ...(Array.isArray(personaSignals.proof_points)
+          ? personaSignals.proof_points.map((point) => `Ground a post in this proof point: ${point}`)
+          : []),
+      ],
       14,
       180
     );
@@ -894,6 +1064,21 @@ class StrategyService {
     const audience = String(strategy?.target_audience || '').trim();
     const niche = String(strategy?.niche || '').trim();
     const goals = this.normalizeAndDedupe(Array.isArray(strategy?.content_goals) ? strategy.content_goals : [], 10, 120);
+    const evidenceAnchors = this.normalizeAndDedupe(
+      [
+        ...projectSignals,
+        ...topSkills,
+        ...adaptiveRecommendedTopics,
+        ...adaptiveGlobalWinningTopics,
+        ...adaptiveVoiceSignals,
+        ...(Array.isArray(personaSignals.proof_points) ? personaSignals.proof_points : []),
+        ...(Array.isArray(personaEvidence.highlights) ? personaEvidence.highlights : []),
+        profileAbout,
+        profileExperience,
+      ],
+      20,
+      220
+    );
 
     return {
       confidence: String(analysisCache?.confidence || '').trim(),
@@ -914,9 +1099,29 @@ class StrategyService {
       topSkills,
       profileAbout: this.sanitizeInsight(profileAbout, 300),
       profileExperience: this.sanitizeInsight(profileExperience, 300),
+      evidenceAnchors,
       vaultWinningTopics,
       vaultUnderusedTopics,
       vaultVoiceSignals,
+      adaptiveRecommendedTopics,
+      adaptiveGlobalWinningTopics,
+      adaptiveGlobalUnderusedTopics,
+      adaptiveVoiceSignals,
+      adaptiveRejectionPatterns,
+      personaSignals: {
+        nicheCandidates: this.normalizeAndDedupe(Array.isArray(personaSignals.niche_candidates) ? personaSignals.niche_candidates : [], 8, 80),
+        audienceCandidates: this.normalizeAndDedupe(Array.isArray(personaSignals.audience_candidates) ? personaSignals.audience_candidates : [], 8, 120),
+        proofPoints: this.normalizeAndDedupe(Array.isArray(personaSignals.proof_points) ? personaSignals.proof_points : [], 10, 180),
+        skills: this.normalizeAndDedupe(Array.isArray(personaSignals.skills) ? personaSignals.skills : [], 14, 80),
+        projects: this.normalizeAndDedupe(Array.isArray(personaSignals.projects) ? personaSignals.projects : [], 10, 120),
+        topicSignals: this.normalizeAndDedupe(Array.isArray(personaSignals.topic_signals) ? personaSignals.topic_signals : [], 10, 80),
+      },
+      provenance: {
+        personaVaultAvailable: Boolean(personaSignals && Object.keys(personaSignals).length > 0),
+        contextVaultAvailable: Boolean(contextVault && Object.keys(contextVault).length > 0),
+        adaptiveLoopAvailable: Boolean(adaptiveLoop && Object.keys(adaptiveLoop).length > 0),
+        evidenceAnchorCount: evidenceAnchors.length,
+      },
       gapMap: gapMap
         .map((item) => ({
           topic: this.normalizeTopicCandidate(item?.topic || ''),
@@ -973,11 +1178,25 @@ class StrategyService {
       'portfolio',
       'linkedin',
       'resume',
+      'for resume',
+      'for a resume',
       'profile',
       'professional experience',
       'skills',
+      'cv',
       'personal growth',
     ]);
+    const isWeakProjectCandidate = (candidate = '') => {
+      const cleaned = String(candidate || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      if (!cleaned) return true;
+      if (blacklist.has(cleaned)) return true;
+      if (/\b(for\s+a\s+resume|resume|cv|portfolio)\b/i.test(cleaned)) return true;
+      const words = cleaned.split(' ').filter(Boolean);
+      if (words.length > 0 && ['for', 'to', 'a', 'an', 'the', 'my', 'our', 'your'].includes(words[0]) && words.length <= 4) {
+        return true;
+      }
+      return false;
+    };
 
     for (const value of pool) {
       const text = this.sanitizeInsight(value, 500);
@@ -1001,14 +1220,8 @@ class StrategyService {
       for (const match of text.matchAll(actionPattern)) {
         const candidate = String(match?.[1] || '').trim();
         if (!candidate) continue;
-        if (blacklist.has(candidate.toLowerCase())) continue;
+        if (isWeakProjectCandidate(candidate)) continue;
         extracted.push(candidate);
-      }
-
-      for (const explicit of ['SuiteGenie', 'Anicafe', 'Sparklehood', 'Fotographiya']) {
-        if (new RegExp(`\\b${explicit}\\b`, 'i').test(text)) {
-          extracted.push(explicit);
-        }
       }
     }
 
@@ -1134,9 +1347,9 @@ class StrategyService {
         ideaTitle: `${topicLabel}: ${this.toDisplayLabel(projectCue).toLowerCase()} field note`,
         cta:
           index % 3 === 0
-            ? 'Ask readers to comment "template" if they want your exact checklist.'
+            ? 'Ask readers which step they would apply first and why.'
             : index % 3 === 1
-              ? 'Ask readers to reply with their blocker so you can share a follow-up breakdown.'
+              ? 'Ask readers to share their current blocker so you can post a focused follow-up.'
               : 'Invite readers to save this and run one step in the next 24 hours.',
         hashtagsHint,
       });
@@ -1172,6 +1385,59 @@ class StrategyService {
     if (words.length < 9) return true;
 
     return false;
+  }
+
+  extractGroundingHits(text = '', signalBundle = {}) {
+    const corpus = String(text || '').toLowerCase();
+    const candidates = this.normalizeAndDedupe(
+      [
+        ...(Array.isArray(signalBundle?.projectSignals) ? signalBundle.projectSignals : []),
+        ...(Array.isArray(signalBundle?.topSkills) ? signalBundle.topSkills : []),
+        ...(Array.isArray(signalBundle?.priorityTopics) ? signalBundle.priorityTopics : []),
+        ...(Array.isArray(signalBundle?.evidenceAnchors) ? signalBundle.evidenceAnchors : []),
+        ...(Array.isArray(signalBundle?.personaSignals?.proofPoints) ? signalBundle.personaSignals.proofPoints : []),
+      ],
+      40,
+      120
+    );
+    const hits = [];
+    for (const candidate of candidates) {
+      const normalized = String(candidate || '').toLowerCase().trim();
+      if (!normalized || normalized.length < 3) continue;
+      if (corpus.includes(normalized)) {
+        hits.push(candidate);
+      }
+      if (hits.length >= 8) break;
+    }
+    return hits;
+  }
+
+  passesGroundingPolicy({ promptText = '', instruction = '', signalBundle = {} } = {}) {
+    const text = `${promptText} ${instruction}`.trim();
+    if (!text) return false;
+    const groundingHits = this.extractGroundingHits(text, signalBundle);
+    const hasNumericSignal = /\b\d+(?:\.\d+)?%?\b/.test(text);
+    const hasConcreteVerb = /\b(measured|benchmark|workflow|experiment|case study|playbook|checklist|framework)\b/i.test(text);
+    return groundingHits.length > 0 || (hasNumericSignal && hasConcreteVerb);
+  }
+
+  buildPromptProvenance({ promptText = '', instruction = '', category = '', signalBundle = {}, source = 'ai' } = {}) {
+    const hits = this.extractGroundingHits(`${promptText} ${instruction}`, signalBundle);
+    return {
+      source,
+      category,
+      generated_at: new Date().toISOString(),
+      signals_used: hits.slice(0, 10),
+      signal_counts: {
+        projects: Array.isArray(signalBundle?.projectSignals) ? signalBundle.projectSignals.length : 0,
+        skills: Array.isArray(signalBundle?.topSkills) ? signalBundle.topSkills.length : 0,
+        topics: Array.isArray(signalBundle?.priorityTopics) ? signalBundle.priorityTopics.length : 0,
+        persona_proof_points: Array.isArray(signalBundle?.personaSignals?.proofPoints)
+          ? signalBundle.personaSignals.proofPoints.length
+          : 0,
+      },
+      confidence: signalBundle?.confidence || 'unknown',
+    };
   }
 
   normalizeAndDedupe(items = [], limit = 10, maxItemLength = Infinity) {
@@ -1927,6 +2193,15 @@ Format: Just list topics separated by commas, no formatting.`;
     try {
       const desiredCount = this.getLinkedinPromptTargetCount();
       const signalBundle = this.buildPromptSignalBundle(strategy);
+      const historicalCorpus = await this.getHistoricalContentCorpus({
+        userId,
+        strategyId,
+        limit: Math.max(36, desiredCount * 6),
+      });
+      const historicalFingerprints = historicalCorpus
+        .map((item) => this.buildPromptFingerprint(item))
+        .filter(Boolean);
+      const historicalCorpusPreview = historicalCorpus.slice(0, 10).join(' | ');
       const compactGapMap = signalBundle.gapMap
         .slice(0, 6)
         .map((item) => `${item.topic} (${item.score}%)`)
@@ -1945,12 +2220,13 @@ Format: Just list topics separated by commas, no formatting.`;
         '      "idea_title": "string",',
         '      "angle": "string",',
         '      "cta": "string",',
-        '      "hashtags_hint": "string"',
+        '      "hashtags_hint": "string",',
+        '      "evidence_refs": ["string"]',
         '    }',
         '  ]',
         '}',
         'Example object:',
-        '{"category":"educational","prompt_text":"Myth: posting more is enough. Write a post showing why audience-language fit matters for B2B founders, with a 3-step rewrite process.","instruction":"Use one real example, before/after copy, and end with one action for this week.","recommended_format":"single_post","goal":"Build authority","idea_title":"Audience-language fit playbook","angle":"Expose why generic hooks fail for this audience","cta":"Ask readers to comment \\"rewrite\\" for a template.","hashtags_hint":"#b2b #contentstrategy"}',
+        '{"category":"educational","prompt_text":"Myth: posting more is enough. Write a post showing why audience-language fit matters for B2B founders, with a 3-step rewrite process.","instruction":"Use one real example, before/after copy, and end with one action for this week.","recommended_format":"single_post","goal":"Build authority","idea_title":"Audience-language fit playbook","angle":"Expose why generic hooks fail for this audience","cta":"Ask readers to comment \\"rewrite\\" for a template.","hashtags_hint":"#b2b #contentstrategy","evidence_refs":["audience-language fit","B2B founder workflows"]}',
         `Generate exactly ${desiredCount} prompts with balanced category distribution.`,
         'Requirements:',
         '- prompt_text should be specific, concrete, and easy to execute.',
@@ -1962,9 +2238,13 @@ Format: Just list topics separated by commas, no formatting.`;
         '- each category must contain multiple distinct frameworks, not the same sentence pattern.',
         '- avoid repeating the same first 5-6 words across prompts in the same category.',
         '- bias ideas toward competitor/content gaps and trending opportunities when available.',
+        '- at least 35% of prompts should be niche or industry trend angles (feature releases, benchmark shifts, ecosystem changes), not personal-story-only posts.',
+        '- niche/trend prompts must still end with practical action for the target audience.',
         '- every prompt should be publish-ready for LinkedIn (clear hook, insight, action).',
         '- each prompt must include one specific scenario, benchmark, or outcome claim in prompt_text or instruction.',
+        '- each prompt must include evidence_refs with 1-4 concrete signals used for grounding.',
         '- idea_title must be a concise angle + outcome title, not generic.',
+        '- do not repeat the framing of previously posted, scheduled, or already-generated content memory.',
         '- if placeholders are useful, use {placeholder_name} tokens.',
         `Niche: ${strategy.niche || ''}`,
         `Target Audience: ${strategy.target_audience || ''}`,
@@ -1972,16 +2252,21 @@ Format: Just list topics separated by commas, no formatting.`;
         `Tone: ${strategy.tone_style || ''}`,
         `Topics: ${(strategy.topics || []).join(', ')}`,
         `Priority topics from analysis: ${signalBundle.priorityTopics.join(', ') || 'none'}`,
+        `Adaptive recommended topics (cross-strategy): ${signalBundle.adaptiveRecommendedTopics.join(', ') || 'none'}`,
+        `Cross-strategy winning topics: ${signalBundle.adaptiveGlobalWinningTopics.join(', ') || 'none'}`,
+        `Cross-strategy underused topics: ${signalBundle.adaptiveGlobalUnderusedTopics.join(', ') || 'none'}`,
         `Key projects/products to anchor examples: ${signalBundle.projectSignals.join(', ') || 'none'}`,
         `Top skills/tools to anchor execution details: ${signalBundle.topSkills.join(', ') || 'none'}`,
         `Profile about evidence: ${signalBundle.profileAbout || 'none'}`,
         `Profile experience evidence: ${signalBundle.profileExperience || 'none'}`,
         `Gap map (topic, score): ${compactGapMap || 'none'}`,
         `Trending topics from analysis: ${signalBundle.trendingTopics.join(', ') || 'none'}`,
+        `Historical content memory (avoid repeats): ${historicalCorpusPreview || 'none'}`,
         `Strengths from analysis: ${signalBundle.strengths.join(' | ') || 'none'}`,
         `Gaps from analysis: ${signalBundle.gaps.join(' | ') || 'none'}`,
         `Opportunities from analysis: ${signalBundle.opportunities.join(' | ') || 'none'}`,
         `Suggested angle hints: ${signalBundle.angleHints.join(' | ') || 'none'}`,
+        `Cross-strategy rejection patterns to avoid: ${signalBundle.adaptiveRejectionPatterns.join(' | ') || 'none'}`,
         `Analysis confidence: ${signalBundle.confidence || 'unknown'} (${signalBundle.confidenceReason || 'no reason provided'})`,
       ].join('\n');
 
@@ -2003,6 +2288,16 @@ Format: Just list topics separated by commas, no formatting.`;
                 : ''
             );
             const category = this.normalizePromptCategory(item?.category);
+            const evidenceRefs = this.normalizeAndDedupe(
+              [
+                ...(Array.isArray(item?.evidence_refs) ? item.evidence_refs : []),
+                typeof item?.source_signal === 'string' ? item.source_signal : '',
+                ...(Array.isArray(signalBundle?.projectSignals) ? signalBundle.projectSignals.slice(0, 2) : []),
+                ...(Array.isArray(signalBundle?.topSkills) ? signalBundle.topSkills.slice(0, 2) : []),
+              ],
+              8,
+              180
+            );
 
             const extractedVariables = {};
             const variableMatches = promptText.match(/\{([^}]+)\}/g);
@@ -2028,11 +2323,30 @@ Format: Just list topics separated by commas, no formatting.`;
                 angle: typeof item?.angle === 'string' ? item.angle.trim() : '',
                 cta: typeof item?.cta === 'string' ? item.cta.trim() : '',
                 hashtags_hint: typeof item?.hashtags_hint === 'string' ? item.hashtags_hint.trim() : '',
+                evidence_refs: evidenceRefs,
+                provenance: this.buildPromptProvenance({
+                  promptText,
+                  instruction,
+                  category,
+                  signalBundle,
+                  source: 'ai',
+                }),
               },
+              _groundingPass: this.passesGroundingPolicy({
+                promptText,
+                instruction,
+                signalBundle,
+              }),
             };
           })
           .filter((prompt) => prompt.prompt_text.length >= 12)
-          .filter((prompt) => !this.isWeakPromptCandidate(prompt.prompt_text));
+          .filter((prompt) => !this.isWeakPromptCandidate(prompt.prompt_text))
+          .filter((prompt) => !this.isNearDuplicateFingerprint(
+            this.buildPromptFingerprint(prompt.prompt_text),
+            historicalFingerprints,
+            0.66
+          ))
+          .filter((prompt) => Boolean(prompt._groundingPass));
 
         if (normalizedPrompts.length === 0) {
           throw new Error('No prompt items could be parsed from provider response');
@@ -2042,7 +2356,21 @@ Format: Just list topics separated by commas, no formatting.`;
       }
 
       const fallbackPrompts = this.buildFallbackPromptTemplates(strategy, desiredCount, signalBundle);
-      normalizedPrompts = [...normalizedPrompts, ...fallbackPrompts];
+      const combinedPrompts = [...normalizedPrompts, ...fallbackPrompts];
+      const antiRepeatPrompts = combinedPrompts.filter((prompt) => !this.isNearDuplicateFingerprint(
+        this.buildPromptFingerprint(prompt?.prompt_text || ''),
+        historicalFingerprints,
+        0.66
+      ));
+      normalizedPrompts = antiRepeatPrompts.length >= Math.max(6, Math.ceil(desiredCount * 0.6))
+        ? antiRepeatPrompts
+        : combinedPrompts;
+      const groundedPrompts = normalizedPrompts.filter((prompt) => this.passesGroundingPolicy({
+        promptText: prompt?.prompt_text || '',
+        instruction: prompt?.variables?.instruction || '',
+        signalBundle,
+      }));
+      normalizedPrompts = groundedPrompts.length > 0 ? groundedPrompts : fallbackPrompts;
 
       const finalPrompts = this.selectDiverseBalancedPrompts(normalizedPrompts, desiredCount);
 
@@ -2069,6 +2397,17 @@ Format: Just list topics separated by commas, no formatting.`;
         prompts_stale: false,
         prompts_stale_at: null,
         prompts_refresh_recommendation: null,
+        prompts_grounding: {
+          generated_at: new Date().toISOString(),
+          evidence_anchor_count: Array.isArray(signalBundle?.evidenceAnchors) ? signalBundle.evidenceAnchors.length : 0,
+          evidence_anchor_preview: Array.isArray(signalBundle?.evidenceAnchors)
+            ? signalBundle.evidenceAnchors.slice(0, 8)
+            : [],
+          provenance: signalBundle?.provenance || {},
+          persona_signals_used: Array.isArray(signalBundle?.personaSignals?.proofPoints)
+            ? signalBundle.personaSignals.proofPoints.slice(0, 6)
+            : [],
+        },
         prompts_usage_snapshot: {
           total_prompts: insertedPrompts.length,
           used_prompts: 0,

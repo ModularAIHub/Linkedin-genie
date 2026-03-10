@@ -1,17 +1,122 @@
 import express from 'express';
 import axios from 'axios';
 import zlib from 'zlib';
+import crypto from 'crypto';
 import { strategyService } from '../services/strategyService.js';
 import creditService from '../services/creditService.js';
 import aiService from '../services/aiService.js';
 import { pool } from '../config/database.js';
 import linkedinAutomationService from '../services/linkedinAutomationService.js';
 import contextVaultService from '../services/contextVaultService.js';
+import personaVaultService from '../services/personaVaultService.js';
+import personaCoreService from '../services/personaCoreService.js';
+import competitorIntelService from '../services/competitorIntelService.js';
 import { requireProPlan } from '../middleware/planAccess.js';
 
 const router = express.Router();
 router.use(requireProPlan('Strategy Builder'));
 const CONTENT_PLAN_QUEUE_TARGET = 2;
+const INIT_ANALYSIS_LOCK_TTL_MS = 10 * 60 * 1000;
+const initAnalysisLocks = new Map();
+
+const createRunContext = (req, {
+  strategyId = null,
+  analysisId = null,
+  jobId = null,
+} = {}) => {
+  const headerRunId = String(req.headers['x-run-id'] || req.headers['x-correlation-id'] || '').trim();
+  return {
+    runId: headerRunId || crypto.randomUUID(),
+    userId: req.user?.id || null,
+    strategyId: strategyId || null,
+    analysisId: analysisId || null,
+    jobId: jobId || null,
+  };
+};
+
+const logRunEvent = (event = '', runContext = {}, payload = {}) => {
+  console.log('[Strategy]', {
+    event,
+    runId: runContext?.runId || null,
+    userId: runContext?.userId || null,
+    strategyId: runContext?.strategyId || null,
+    analysisId: runContext?.analysisId || null,
+    jobId: runContext?.jobId || null,
+    ...payload,
+  });
+};
+
+const upsertStageStatus = (metadata = {}, stage = '', {
+  status = 'pending',
+  code = null,
+  message = '',
+  details = null,
+} = {}) => {
+  if (!stage) return metadata;
+  const safeMetadata = parseJsonObject(metadata, {});
+  const current = parseJsonObject(safeMetadata.stage_status, {});
+  const next = {
+    ...current,
+    [stage]: sanitizeJsonSafeValue({
+      status: String(status || 'pending').toLowerCase(),
+      code: code ? String(code).trim() : null,
+      message: toShortText(message || '', 260) || null,
+      details: details && typeof details === 'object' && !Array.isArray(details)
+        ? details
+        : null,
+      updated_at: new Date().toISOString(),
+    }),
+  };
+  return {
+    ...safeMetadata,
+    stage_status: next,
+  };
+};
+
+const buildSourceHealthBreakdown = ({
+  postsCount = 0,
+  hasPortfolio = false,
+  hasResume = false,
+  hasPersona = false,
+  competitorCount = 0,
+  personaSourceHealth = {},
+} = {}) => ({
+  posts: {
+    status: Number(postsCount || 0) > 0 ? 'ready' : 'sparse',
+    count: Number(postsCount || 0),
+  },
+  portfolio: {
+    status: hasPortfolio ? 'ready' : 'missing',
+    count: hasPortfolio ? 1 : 0,
+  },
+  resume: {
+    status: hasResume ? 'ready' : 'missing',
+    count: hasResume ? 1 : 0,
+  },
+  persona: {
+    status: hasPersona ? 'ready' : 'missing',
+    count: hasPersona ? 1 : 0,
+    source_health: personaSourceHealth && typeof personaSourceHealth === 'object'
+      ? personaSourceHealth
+      : {},
+  },
+  competitors: {
+    status: Number(competitorCount || 0) > 0 ? 'ready' : 'missing',
+    count: Number(competitorCount || 0),
+  },
+});
+
+const getInitAnalysisLockKey = (userId = '', strategyId = '') =>
+  `${String(userId || '').trim()}:${String(strategyId || '').trim()}`;
+
+const pruneExpiredInitAnalysisLocks = () => {
+  const now = Date.now();
+  for (const [key, lock] of initAnalysisLocks.entries()) {
+    if (!lock?.startedAt || now - Number(lock.startedAt) > INIT_ANALYSIS_LOCK_TTL_MS) {
+      initAnalysisLocks.delete(key);
+    }
+  }
+};
 
 const stripMarkdownCodeFences = (value = '') =>
   String(value)
@@ -734,6 +839,16 @@ const TOPIC_BLACKLIST_PATTERNS = [
 ];
 const WEAK_SINGLE_TOPIC_TOKENS = new Set([
   'build', 'built', 'agency', 'client', 'platform', 'workflow', 'analytic', 'social', 'growth',
+  'resume', 'portfolio', 'member', 'managed', 'manager', 'led',
+]);
+const ROLE_FRAGMENT_TOPIC_WORDS = new Set([
+  'managed', 'manage', 'manager', 'member', 'members', 'led', 'lead', 'leading',
+  'currently', 'building', 'builder', 'community',
+]);
+const TECHNICAL_SIGNAL_TOPIC_WORDS = new Set([
+  'web', 'development', 'developer', 'cloud', 'computing', 'devops', 'cybersecurity', 'security',
+  'software', 'engineering', 'frontend', 'backend', 'react', 'node', 'javascript', 'typescript',
+  'aws', 'docker', 'kubernetes', 'automation', 'api', 'saas', 'data', 'machine', 'learning',
 ]);
 const ACRONYM_WORDS = new Set(['ai', 'ux', 'ui', 'seo', 'b2b', 'b2c', 'api', 'saas']);
 const titleCaseWords = (value = '') =>
@@ -742,6 +857,32 @@ const titleCaseWords = (value = '') =>
     .map((word) => (ACRONYM_WORDS.has(word) ? word.toUpperCase() : `${word.charAt(0).toUpperCase()}${word.slice(1)}`))
     .join(' ')
     .trim();
+
+const isRoleFragmentTopic = (words = []) => {
+  if (!Array.isArray(words) || words.length < 2) return false;
+  const roleHits = words.filter((word) => ROLE_FRAGMENT_TOPIC_WORDS.has(word)).length;
+  const technicalHits = words.filter((word) => TECHNICAL_SIGNAL_TOPIC_WORDS.has(word)).length;
+  if (
+    words.length === 2 &&
+    technicalHits === 0 &&
+    words.includes('community') &&
+    words.some((word) => ['managed', 'manage', 'manager', 'member', 'led', 'lead', 'leading'].includes(word))
+  ) {
+    return true;
+  }
+  if (words.length < 3) return false;
+  return roleHits >= 3 && technicalHits === 0;
+};
+
+const isLikelyMergedNoiseToken = (value = '') => {
+  const token = String(value || '').trim().toLowerCase();
+  if (!token || token.includes(' ')) return false;
+  if (token.length >= 18) return true;
+  if (/^(for|and|with|about|from)[a-z]{5,}$/i.test(token)) return true;
+  if (/(resume|portfolio|andmanaged|memberled|communitymember)/i.test(token)) return true;
+  if (token.length >= 14 && token.includes('and')) return true;
+  return false;
+};
 
 const normalizeCompoundTokens = (value = '') =>
   String(value || '')
@@ -753,6 +894,7 @@ const normalizeCompoundTokens = (value = '') =>
     .replace(/\bwebdevelopment\b/gi, 'web development')
     .replace(/\bmobiledevelopment\b/gi, 'mobile development')
     .replace(/\bdatascience\b/gi, 'data science')
+    .replace(/\bcloudcomputing\b/gi, 'cloud computing')
     .replace(/\bmarketingtool\b/gi, 'marketing tool')
     .replace(/\bproductupdate\b/gi, 'product update')
     .replace(/\bagencylife\b/gi, 'agency life')
@@ -804,11 +946,13 @@ const normalizeTopicCandidate = (rawValue = '') => {
 
   if (words.length === 0) return '';
   if (words.length > 4) return '';
+  if (isRoleFragmentTopic(words)) return '';
   if (words.length === 1 && WEAK_SINGLE_TOPIC_TOKENS.has(words[0])) return '';
   if (words.length === 2 && words.every((word) => WEAK_SINGLE_TOPIC_TOKENS.has(word))) return '';
 
   const compact = words.join(' ').trim();
   if (compact.length > 36) return '';
+  if (isLikelyMergedNoiseToken(compact)) return '';
 
   return compact;
 };
@@ -872,7 +1016,7 @@ const sanitizeAnalysisData = (value = {}) => {
   const raw = parseJsonObject(value, {});
   return {
     ...raw,
-    niche: extractCompactNicheFromText(raw?.niche || '') || 'LinkedIn Growth Strategy',
+    niche: extractCompactNicheFromText(raw?.niche || '') || 'Professional Expertise',
     audience: String(raw?.audience || '').trim(),
     tone: String(raw?.tone || '').trim(),
     goals: dedupeStrings(
@@ -929,6 +1073,24 @@ const normalizeHandle = (rawValue = '') => {
   return value.slice(0, 80);
 };
 
+const normalizeCompetitorTarget = (rawValue = '') => {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return '';
+  const url = normalizePortfolioUrl(raw);
+  if (url) return url;
+  const handle = normalizeHandle(raw);
+  if (!handle) return '';
+  return `@${handle}`;
+};
+
+const normalizeManualExamples = (value = [], max = 12) =>
+  dedupeStrings(
+    (Array.isArray(value) ? value : [value])
+      .map((item) => toShortText(item, 220))
+      .filter(Boolean),
+    max
+  );
+
 const getUserTokenFromRequest = (req) => {
   const authHeader = req.headers.authorization || req.headers.Authorization;
   const bearerToken =
@@ -952,7 +1114,11 @@ const hashtagsFromQueue = (queue = []) => {
   for (const item of Array.isArray(queue) ? queue : []) {
     const tags = Array.isArray(item?.hashtags) ? item.hashtags : [];
     for (const rawTag of tags) {
-      const tag = String(rawTag || '').replace(/^#+/, '').trim().toLowerCase();
+      const tag = String(rawTag || '')
+        .replace(/^#+/, '')
+        .replace(/([a-z])([A-Z])/g, '$1 $2')
+        .trim()
+        .toLowerCase();
       if (!tag) continue;
       frequency.set(tag, (frequency.get(tag) || 0) + 1);
     }
@@ -960,10 +1126,34 @@ const hashtagsFromQueue = (queue = []) => {
   return [...frequency.entries()].sort((a, b) => b[1] - a[1]);
 };
 
-const buildTrendingTopics = (queue = [], fallbackTopics = [], excludeTopics = []) => {
+const buildTrendingTopics = (queue = [], fallbackTopics = [], excludeTopics = [], priorityTopics = []) => {
   const excluded = new Set(normalizeTopicList(excludeTopics, 40).map((topic) => topic.toLowerCase()));
   const seen = new Set();
   const weighted = [];
+
+  for (const rawPriority of Array.isArray(priorityTopics) ? priorityTopics : []) {
+    const topic = normalizeTopicCandidate(
+      typeof rawPriority === 'string' ? rawPriority : rawPriority?.topic
+    );
+    if (!topic) continue;
+    if (excluded.has(topic)) continue;
+    if (seen.has(topic)) continue;
+    seen.add(topic);
+
+    const rawVolume = Number(rawPriority?.volume ?? rawPriority?.score ?? rawPriority?.relevanceScore);
+    const volume = Number.isFinite(rawVolume)
+      ? Math.max(1, Math.min(99, Math.round(rawVolume)))
+      : Math.max(4, 12 - weighted.length);
+    weighted.push({
+      topic,
+      volume,
+      relevance: String(rawPriority?.relevance || '').toLowerCase() === 'high' ? 'high' : 'medium',
+      context: typeof rawPriority?.trigger === 'string'
+        ? rawPriority.trigger.slice(0, 180)
+        : (typeof rawPriority?.context === 'string' ? rawPriority.context.slice(0, 180) : ''),
+    });
+    if (weighted.length >= 8) break;
+  }
 
   for (const [rawTopic, volume] of hashtagsFromQueue(queue)) {
     const topic = normalizeTopicCandidate(String(rawTopic || '').replace(/[-_]/g, ' '));
@@ -1042,6 +1232,7 @@ const buildGapMap = ({
   postSummary = {},
   runAnalysis = {},
   competitorConfig = {},
+  personaSignals = {},
 } = {}) => {
   const summaryThemes = normalizeTopicList(postSummary?.themes || [], 10);
   const analysisTopics = normalizeTopicList(
@@ -1052,7 +1243,13 @@ const buildGapMap = ({
     10
   );
   const candidateTopics = normalizeTopicList(
-    [...(Array.isArray(topTopics) ? topTopics : []), ...summaryThemes, ...analysisTopics],
+    [
+      ...(Array.isArray(topTopics) ? topTopics : []),
+      ...summaryThemes,
+      ...analysisTopics,
+      ...(Array.isArray(personaSignals?.topic_signals) ? personaSignals.topic_signals : []),
+      ...(Array.isArray(personaSignals?.niche_candidates) ? personaSignals.niche_candidates : []),
+    ],
     10
   ).filter((topic) => {
     if (isWeakTopicCandidate(topic)) return false;
@@ -1061,9 +1258,13 @@ const buildGapMap = ({
   });
   const fallbackNicheTopic = normalizeTopicCandidate(niche);
 
-  const competitorCount = Array.isArray(competitorConfig?.competitor_profiles)
-    ? competitorConfig.competitor_profiles.length
-    : 0;
+  const competitorCount =
+    (Array.isArray(competitorConfig?.competitor_profiles)
+      ? competitorConfig.competitor_profiles.length
+      : 0) +
+    (Array.isArray(competitorConfig?.competitor_examples)
+      ? Math.min(2, competitorConfig.competitor_examples.length)
+      : 0);
   const opportunityText = Array.isArray(runAnalysis?.opportunities)
     ? runAnalysis.opportunities.join(' ').toLowerCase()
     : '';
@@ -1128,6 +1329,7 @@ const WEAK_NICHE_TOKENS = new Set([
   'suitegenie', 'linkedin', 'growth', 'strategy', 'content', 'social', 'post', 'marketing',
   'brand', 'company', 'business', 'team', 'hashtag',
   'build', 'built', 'agency', 'client', 'platform', 'workflow', 'analytic',
+  'managed', 'manager', 'member', 'led', 'community', 'resume', 'portfolio',
 ]);
 const GENERIC_NICHE_PATTERNS = [
   /^personal\s+growth$/i,
@@ -1146,12 +1348,16 @@ const isWeakNicheValue = (value = '') => {
   if (!normalized) return true;
   const tokens = normalized.split(' ').filter(Boolean);
   if (tokens.length === 0) return true;
+  if (isRoleFragmentTopic(tokens)) return true;
   if (tokens.length <= 2) {
     return tokens.every((token) => WEAK_NICHE_TOKENS.has(token));
   }
   if (tokens.length === 3) {
     return tokens.filter((token) => WEAK_NICHE_TOKENS.has(token)).length >= 2;
   }
+  const weakTokenCount = tokens.filter((token) => WEAK_NICHE_TOKENS.has(token)).length;
+  const technicalTokenCount = tokens.filter((token) => TECHNICAL_SIGNAL_TOPIC_WORDS.has(token)).length;
+  if (tokens.length >= 4 && weakTokenCount >= 2 && technicalTokenCount === 0) return true;
   return false;
 };
 
@@ -1167,6 +1373,9 @@ const isJunkNicheCandidate = (value = '', profileDisplayName = '') => {
   if (!normalized) return true;
 
   const compact = normalized.replace(/\s+/g, ' ').trim();
+  const tokens = compact.split(' ').filter(Boolean);
+  if (isRoleFragmentTopic(tokens)) return true;
+  if (isLikelyMergedNoiseToken(compact)) return true;
   if (/^(his|her|their|my|our|your)\b/i.test(compact)) {
     return true;
   }
@@ -1182,6 +1391,9 @@ const isJunkNicheCandidate = (value = '', profileDisplayName = '') => {
   if (/\b(portfolio|resume|cv)\b/i.test(compact) && compact.split(' ').length <= 4) {
     return true;
   }
+  if (/\b(member\s+led|managed\s+community|community\s+member)\b/i.test(compact)) {
+    return true;
+  }
 
   const personName = normalizeTopicCandidate(profileDisplayName);
   if (personName && compact === personName) return true;
@@ -1190,12 +1402,17 @@ const isJunkNicheCandidate = (value = '', profileDisplayName = '') => {
   return false;
 };
 
-const extractCompactNicheFromText = (value = '') => {
+const extractCompactNicheFromText = (value = '', profileDisplayName = '') => {
   const raw = String(value || '').replace(/\s+/g, ' ').trim();
   if (!raw) return '';
 
   const directNormalized = normalizeTopicCandidate(raw);
-  if (directNormalized && !isWeakNicheValue(directNormalized)) {
+  if (
+    directNormalized &&
+    !isWeakNicheValue(directNormalized) &&
+    !isOverlyGenericNicheValue(directNormalized) &&
+    !isJunkNicheCandidate(directNormalized, profileDisplayName)
+  ) {
     return titleCaseWords(directNormalized);
   }
 
@@ -1218,6 +1435,8 @@ const extractCompactNicheFromText = (value = '') => {
     const normalized = normalizeTopicCandidate(segment);
     if (!normalized) continue;
     if (isWeakNicheValue(normalized)) continue;
+    if (isOverlyGenericNicheValue(normalized)) continue;
+    if (isJunkNicheCandidate(normalized, profileDisplayName)) continue;
     return titleCaseWords(normalized);
   }
 
@@ -1232,20 +1451,67 @@ const extractCompactNicheFromText = (value = '') => {
       .join(' ')
   );
 
-  if (compressed && !isWeakNicheValue(compressed)) {
+  if (
+    compressed &&
+    !isWeakNicheValue(compressed) &&
+    !isOverlyGenericNicheValue(compressed) &&
+    !isJunkNicheCandidate(compressed, profileDisplayName)
+  ) {
     return titleCaseWords(compressed);
   }
 
   return '';
 };
 
-const deriveNicheValue = ({ profileContext, strategy, accountSnapshot, topTopics }) => {
+const nicheHasTopicOverlap = (candidateNiche = '', strongTopics = []) => {
+  const nicheTokens = normalizeTopicCandidate(candidateNiche)
+    .split(' ')
+    .map((token) => token.trim().toLowerCase())
+    .filter(Boolean);
+  if (nicheTokens.length === 0) return false;
+
+  const topicTokens = new Set(
+    normalizeTopicList(strongTopics, 8)
+      .flatMap((topic) => String(topic || '').toLowerCase().split(' '))
+      .map((token) => token.trim())
+      .filter(Boolean)
+  );
+  if (topicTokens.size === 0) return false;
+
+  return nicheTokens.some((token) => topicTokens.has(token));
+};
+
+const deriveNicheValue = ({ profileContext, strategy, accountSnapshot, topTopics, personaSignals = {} }) => {
   const metadata = parseJsonObject(profileContext?.metadata, {});
   const profileDisplayName = String(metadata?.profile_display_name || accountSnapshot?.display_name || '').trim();
   const topicBased = normalizeTopicList(topTopics || [], 8);
   const strongTopicBased = topicBased.filter(
     (topic) => !isWeakNicheValue(topic) && !isWeakTopicCandidate(topic)
   );
+  const explicitStrategyNiche = extractCompactNicheFromText(strategy?.niche || '', profileDisplayName);
+  if (
+    explicitStrategyNiche &&
+    !isWeakNicheValue(explicitStrategyNiche) &&
+    !isOverlyGenericNicheValue(explicitStrategyNiche) &&
+    !isJunkNicheCandidate(explicitStrategyNiche, profileDisplayName) &&
+    (strongTopicBased.length === 0 || nicheHasTopicOverlap(explicitStrategyNiche, strongTopicBased))
+  ) {
+    return explicitStrategyNiche;
+  }
+
+  const personaNicheCandidates = normalizeTopicList(
+    Array.isArray(personaSignals?.niche_candidates) ? personaSignals.niche_candidates : [],
+    8
+  ).filter((topic) => {
+    if (isWeakNicheValue(topic)) return false;
+    if (isOverlyGenericNicheValue(topic)) return false;
+    if (isJunkNicheCandidate(topic, profileDisplayName)) return false;
+    if (strongTopicBased.length > 0 && !nicheHasTopicOverlap(topic, strongTopicBased)) return false;
+    return true;
+  });
+  if (personaNicheCandidates.length > 0) {
+    return titleCaseWords(personaNicheCandidates[0]);
+  }
 
   const accountAndPortfolioCandidates = [
     { value: accountSnapshot?.headline, source: 'account_headline' },
@@ -1271,10 +1537,11 @@ const deriveNicheValue = ({ profileContext, strategy, accountSnapshot, topTopics
     if (source === 'portfolio_title' && isJunkNicheCandidate(candidate, profileDisplayName)) {
       continue;
     }
-    const compact = extractCompactNicheFromText(candidate);
+    const compact = extractCompactNicheFromText(candidate, profileDisplayName);
     if (!compact) continue;
     if (isJunkNicheCandidate(compact, profileDisplayName)) continue;
     if (isOverlyGenericNicheValue(compact) && strongTopicBased.length > 0) continue;
+    if (strongTopicBased.length > 0 && !nicheHasTopicOverlap(compact, strongTopicBased)) continue;
     return compact;
   }
 
@@ -1293,21 +1560,51 @@ const deriveNicheValue = ({ profileContext, strategy, accountSnapshot, topTopics
     .filter(Boolean);
 
   for (const candidate of seededCandidates) {
-    const compact = extractCompactNicheFromText(candidate);
+    const compact = extractCompactNicheFromText(candidate, profileDisplayName);
     if (!compact) continue;
     if (isOverlyGenericNicheValue(compact)) continue;
+    if (isJunkNicheCandidate(compact, profileDisplayName)) continue;
+    if (strongTopicBased.length > 0 && !nicheHasTopicOverlap(compact, strongTopicBased)) continue;
     return compact;
   }
 
-  const fallbackStrategyNiche = extractCompactNicheFromText(strategy?.niche || '');
-  if (fallbackStrategyNiche) {
+  const fallbackStrategyNiche = extractCompactNicheFromText(strategy?.niche || '', profileDisplayName);
+  if (
+    fallbackStrategyNiche &&
+    !isWeakNicheValue(fallbackStrategyNiche) &&
+    !isOverlyGenericNicheValue(fallbackStrategyNiche) &&
+    !isJunkNicheCandidate(fallbackStrategyNiche, profileDisplayName) &&
+    (strongTopicBased.length === 0 || nicheHasTopicOverlap(fallbackStrategyNiche, strongTopicBased))
+  ) {
     return fallbackStrategyNiche;
   }
 
-  return 'LinkedIn Growth Strategy';
+  const terminalFallbackTopics = normalizeTopicList(
+    [
+      ...(Array.isArray(strategy?.topics) ? strategy.topics : []),
+      strategy?.niche,
+      profileContext?.role_niche,
+      ...strongTopicBased,
+    ],
+    6
+  ).filter((topic) => !isWeakNicheValue(topic) && !isOverlyGenericNicheValue(topic));
+
+  if (terminalFallbackTopics.length >= 2) {
+    return titleCaseWords(`${terminalFallbackTopics[0]} and ${terminalFallbackTopics[1]}`);
+  }
+  if (terminalFallbackTopics.length === 1) {
+    return titleCaseWords(terminalFallbackTopics[0]);
+  }
+
+  return 'Professional Expertise';
 };
 
-const deriveAudienceValue = ({ profileContext, strategy, topTopics }) => {
+const deriveAudienceValue = ({ profileContext, strategy, topTopics, personaSignals = {} }) => {
+  const personaAudience = Array.isArray(personaSignals?.audience_candidates)
+    ? personaSignals.audience_candidates.map((value) => String(value || '').trim()).find(Boolean)
+    : '';
+  if (personaAudience) return personaAudience;
+
   const direct = String(profileContext?.target_audience || strategy?.target_audience || '').trim();
   if (direct) return direct;
 
@@ -1326,31 +1623,83 @@ const buildAnalysisData = ({
   queue,
   runAnalysis,
   postSummary,
+  personaVault = null,
+  competitorInsights = [],
 }) => {
   const fallbackGoals = Array.isArray(strategy?.content_goals) ? strategy.content_goals : [];
   const profileGoals = splitToList(profileContext?.outcomes_30_90 || '', 10);
   const goals = dedupeStrings([...profileGoals, ...fallbackGoals], 10);
   const profileMetadata = parseJsonObject(profileContext?.metadata, {});
+  const strategyMetadata = parseJsonObject(strategy?.metadata, {});
+  const personaSignals = parseJsonObject(personaVault?.signals, {});
   const portfolioSignalTopics = normalizeTopicList(
     [
       ...(Array.isArray(profileMetadata?.linkedin_skills) ? profileMetadata.linkedin_skills : []),
       ...(Array.isArray(profileMetadata?.portfolio_skills) ? profileMetadata.portfolio_skills : []),
+      ...(Array.isArray(personaSignals?.skills) ? personaSignals.skills : []),
+      ...(Array.isArray(personaSignals?.topic_signals) ? personaSignals.topic_signals : []),
+      ...(Array.isArray(personaSignals?.niche_candidates) ? personaSignals.niche_candidates : []),
       profileMetadata?.linkedin_about,
       profileMetadata?.linkedin_experience,
       profileMetadata?.portfolio_title,
       profileMetadata?.portfolio_description,
       profileMetadata?.portfolio_about,
       profileMetadata?.portfolio_experience,
+      ...(Array.isArray(personaSignals?.projects) ? personaSignals.projects : []),
     ],
     12
   );
 
   const queueTopics = hashtagsFromQueue(queue).map(([tag]) => tag.replace(/[-_]/g, ' '));
   const strategyTopics = Array.isArray(strategy?.topics) ? strategy.topics : [];
+  const strategyTopicAnchors = normalizeTopicList([
+    ...strategyTopics,
+    strategy?.niche,
+    profileContext?.role_niche,
+  ], 16);
+  const strategyAnchorTopicSet = new Set(strategyTopicAnchors.map((topic) => String(topic || '').toLowerCase()));
+  const strategyAnchorTokenSet = new Set(
+    strategyTopicAnchors
+      .flatMap((topic) => String(topic || '').toLowerCase().split(' '))
+      .map((token) => token.trim())
+      .filter(Boolean)
+  );
+  const coreTechTokenSet = new Set([
+    'web', 'development', 'cloud', 'computing', 'devops', 'cybersecurity', 'security', 'automation',
+    'saas', 'software', 'api', 'react', 'node', 'javascript', 'typescript', 'docker', 'kubernetes', 'aws',
+  ]);
+  const projectTokenize = (value = '') =>
+    normalizeTopicCandidate(value)
+      .split(' ')
+      .map((token) => token.trim().toLowerCase())
+      .filter((token) => token.length >= 4);
+  const activeProjectCandidates = dedupeStrings([
+    strategyMetadata?.product,
+    strategyMetadata?.current_project,
+    ...(Array.isArray(strategyMetadata?.active_projects) ? strategyMetadata.active_projects : []),
+  ]);
+  const knownProjectCandidates = dedupeStrings([
+    ...activeProjectCandidates,
+    ...(Array.isArray(personaSignals?.projects) ? personaSignals.projects : []),
+    ...(Array.isArray(strategyMetadata?.historical_projects) ? strategyMetadata.historical_projects : []),
+    profileMetadata?.portfolio_title,
+    profileMetadata?.linkedin_experience,
+    profileMetadata?.portfolio_experience,
+  ]);
+  const activeProjectTokenSet = new Set(activeProjectCandidates.flatMap((value) => projectTokenize(value)));
+  const knownProjectTokenSet = new Set(knownProjectCandidates.flatMap((value) => projectTokenize(value)));
+  const inactiveProjectTokenSet = activeProjectTokenSet.size > 0
+    ? new Set([...knownProjectTokenSet].filter((token) => !activeProjectTokenSet.has(token)))
+    : new Set();
   const summaryThemes = Array.isArray(postSummary?.themes) ? postSummary.themes : [];
   const analysisTopics = [
     ...extractTopicsFromInsights(runAnalysis?.opportunities || [], 8),
     ...extractTopicsFromInsights(runAnalysis?.gaps || [], 8),
+    ...normalizeTopicList(
+      (Array.isArray(competitorInsights) ? competitorInsights : [])
+        .map((item) => item?.handle || item?.key_takeaway || ''),
+      8
+    ),
   ];
   let topTopics = normalizeTopicList(
     [...portfolioSignalTopics, ...summaryThemes, ...analysisTopics, ...strategyTopics, ...queueTopics],
@@ -1358,29 +1707,73 @@ const buildAnalysisData = ({
   ).filter((topic) => {
     if (isWeakTopicCandidate(topic)) return false;
     if (isOverlyGenericNicheValue(topic)) return false;
+    const topicTokens = String(topic || '').split(' ').map((token) => token.trim().toLowerCase()).filter(Boolean);
+    const hasInactiveProjectToken = topicTokens.some((token) => inactiveProjectTokenSet.has(token));
+    const hasActiveProjectToken = topicTokens.some((token) => activeProjectTokenSet.has(token));
+    const hasCoreTechToken = topicTokens.some((token) => coreTechTokenSet.has(token));
+    if (hasInactiveProjectToken && !hasActiveProjectToken && !hasCoreTechToken) return false;
     const tokenCount = String(topic || '').split(' ').filter(Boolean).length;
     return tokenCount <= 2;
   });
+  if (strategyAnchorTopicSet.size > 0) {
+    topTopics = topTopics.filter((topic) => {
+      const lower = String(topic || '').toLowerCase().trim();
+      if (!lower) return false;
+      if (strategyAnchorTopicSet.has(lower)) return true;
+
+      const tokens = lower.split(' ').map((token) => token.trim()).filter(Boolean);
+      if (tokens.length === 0) return false;
+
+      const overlapsAnchor = tokens.some((token) => strategyAnchorTokenSet.has(token));
+      if (overlapsAnchor) return true;
+
+      return tokens.some((token) => coreTechTokenSet.has(token));
+    });
+  }
   if (topTopics.length < 4) {
     const fallbackTopics = normalizeTopicList(
       [
         strategy?.niche,
         profileContext?.role_niche,
+        ...(Array.isArray(personaSignals?.niche_candidates) ? personaSignals.niche_candidates : []),
         strategy?.target_audience,
         profileContext?.target_audience,
+        ...(Array.isArray(personaSignals?.audience_candidates) ? personaSignals.audience_candidates : []),
         ...strategyTopics,
       ],
       10
     ).filter((topic) => {
       if (isWeakTopicCandidate(topic)) return false;
       if (isOverlyGenericNicheValue(topic)) return false;
+      const topicTokens = String(topic || '').split(' ').map((token) => token.trim().toLowerCase()).filter(Boolean);
+      const hasInactiveProjectToken = topicTokens.some((token) => inactiveProjectTokenSet.has(token));
+      const hasActiveProjectToken = topicTokens.some((token) => activeProjectTokenSet.has(token));
+      const hasCoreTechToken = topicTokens.some((token) => coreTechTokenSet.has(token));
+      if (hasInactiveProjectToken && !hasActiveProjectToken && !hasCoreTechToken) return false;
+      if (strategyAnchorTopicSet.size > 0) {
+        const lower = String(topic || '').toLowerCase().trim();
+        const tokens = lower.split(' ').map((token) => token.trim()).filter(Boolean);
+        const overlapsAnchor = tokens.some((token) => strategyAnchorTokenSet.has(token));
+        const hasCoreTech = tokens.some((token) => coreTechTokenSet.has(token));
+        if (!overlapsAnchor && !hasCoreTech) return false;
+      }
       const tokenCount = String(topic || '').split(' ').filter(Boolean).length;
       return tokenCount <= 2;
     });
     topTopics = dedupeStrings([...topTopics, ...fallbackTopics], 12);
   }
   if (topTopics.length === 0) {
-    topTopics = ['practical framework', 'audience pain point', 'industry insight'];
+    topTopics = normalizeTopicList(
+      [
+        ...(Array.isArray(strategy?.topics) ? strategy.topics : []),
+        strategy?.niche,
+        profileContext?.role_niche,
+      ],
+      4
+    ).filter((topic) => !isWeakTopicCandidate(topic) && !isOverlyGenericNicheValue(topic));
+  }
+  if (topTopics.length === 0) {
+    topTopics = ['web development', 'cloud computing', 'saas'];
   }
 
   const niche = deriveNicheValue({
@@ -1388,11 +1781,13 @@ const buildAnalysisData = ({
     strategy,
     accountSnapshot,
     topTopics,
+    personaSignals,
   });
   const audience = deriveAudienceValue({
     profileContext,
     strategy,
     topTopics,
+    personaSignals,
   });
 
   return {
@@ -1404,9 +1799,22 @@ const buildAnalysisData = ({
     posting_frequency: strategy?.posting_frequency || '3-5 times per week',
     best_days: ['Tuesday', 'Thursday'],
     best_hours: '9am-11am',
-    summary:
-      runAnalysis?.opportunities?.[0] ||
-      'Focus on practical, proof-backed posts to improve consistency and engagement.',
+    evidence: {
+      persona_proof_points: dedupeStrings(
+        Array.isArray(personaSignals?.proof_points) ? personaSignals.proof_points : [],
+        8
+      ),
+      persona_skills: dedupeStrings(
+        Array.isArray(personaSignals?.skills) ? personaSignals.skills : [],
+        10
+      ),
+      competitor_count: Array.isArray(competitorInsights) ? competitorInsights.length : 0,
+    },
+    summary: runAnalysis?.opportunities?.[0]
+      ? String(runAnalysis.opportunities[0])
+      : (Array.isArray(personaSignals?.proof_points) && personaSignals.proof_points[0])
+        ? `Use this proof signal in upcoming posts: ${personaSignals.proof_points[0]}`
+        : 'Focus on practical, proof-backed posts to improve consistency and engagement.',
   };
 };
 
@@ -1604,6 +2012,8 @@ const buildContentPlanContextPayload = ({ strategy = null, analysisRun = null } 
   const profileMetadata = parseJsonObject(profileContext.metadata, {});
   const postSummary = parseJsonObject(snapshot.postSummary, {});
   const analysisCache = parseJsonObject(strategyMetadata.analysis_cache, {});
+  const personaVault = parseJsonObject(strategyMetadata.persona_vault, {});
+  const personaSignals = parseJsonObject(personaVault.signals, {});
 
   const linkedInSkills = dedupeStrings(
     [
@@ -1621,6 +2031,11 @@ const buildContentPlanContextPayload = ({ strategy = null, analysisRun = null } 
     20
   );
   const topSkills = dedupeStrings([...linkedInSkills, ...portfolioSkills], 12);
+  const personaSkills = dedupeStrings(
+    Array.isArray(personaSignals.skills) ? personaSignals.skills : [],
+    12
+  );
+  const mergedTopSkills = dedupeStrings([...topSkills, ...personaSkills], 12);
 
   const aboutPreview = toShortText(
     pickReadableProfileText(
@@ -1631,6 +2046,7 @@ const buildContentPlanContextPayload = ({ strategy = null, analysisRun = null } 
         analysisRunMetadata.portfolio_about,
         profileMetadata.portfolio_about,
         strategyMetadata.portfolio_about,
+        personaSignals.about,
       ],
       500
     ),
@@ -1645,6 +2061,7 @@ const buildContentPlanContextPayload = ({ strategy = null, analysisRun = null } 
         analysisRunMetadata.portfolio_experience,
         profileMetadata.portfolio_experience,
         strategyMetadata.portfolio_experience,
+        personaSignals.experience,
       ],
       700
     ),
@@ -1675,9 +2092,15 @@ const buildContentPlanContextPayload = ({ strategy = null, analysisRun = null } 
       profileMetadata.linkedin_profile_pdf_extraction_source ||
       strategyMetadata.linkedin_profile_pdf_extraction_source
   );
+  const hasPersonaSignal = Boolean(
+    Array.isArray(personaSignals.skills) && personaSignals.skills.length > 0 ||
+    Array.isArray(personaSignals.proof_points) && personaSignals.proof_points.length > 0 ||
+    String(personaSignals.about || '').trim() ||
+    String(personaSignals.experience || '').trim()
+  );
 
   return {
-    niche: analysisData.niche || extractCompactNicheFromText(strategy?.niche || '') || 'LinkedIn Growth Strategy',
+    niche: analysisData.niche || extractCompactNicheFromText(strategy?.niche || '') || 'Professional Expertise',
     audience: toShortText(
       analysisData.audience ||
         strategy?.target_audience ||
@@ -1699,7 +2122,7 @@ const buildContentPlanContextPayload = ({ strategy = null, analysisRun = null } 
       10
     ),
     aboutPreview,
-    topSkills,
+    topSkills: mergedTopSkills,
     experiencePreview,
     confidence: String(analysisRunMetadata.confidence || analysisCache.confidence || 'low'),
     confidenceReason: toShortText(
@@ -1726,12 +2149,60 @@ const buildContentPlanContextPayload = ({ strategy = null, analysisRun = null } 
         count: hasPdfSignal ? 1 : 0,
       },
       {
+        key: 'persona',
+        label: 'Persona Vault',
+        active: hasPersonaSignal,
+        count: hasPersonaSignal ? 1 : 0,
+      },
+      {
         key: 'reference',
         label: 'Reference accounts',
         active: referenceCount > 0,
         count: referenceCount,
       },
     ],
+  };
+};
+
+const buildVaultSourceSummary = ({ strategyVault = null, personaVault = null } = {}) => {
+  const strategySnapshot = parseJsonObject(strategyVault?.snapshot, {});
+  const strategySources = parseJsonObject(strategySnapshot.sources, {});
+  const personaSourceHealth = parseJsonObject(personaVault?.sourceHealth, {});
+  const strategyRefreshedAt = strategyVault?.lastRefreshedAt || null;
+  const personaEnrichedAt = personaVault?.lastEnrichedAt || null;
+  const nowTs = Date.now();
+  const strategyFreshnessHours = strategyRefreshedAt
+    ? Number(((nowTs - new Date(strategyRefreshedAt).getTime()) / (1000 * 60 * 60)).toFixed(2))
+    : null;
+  const personaFreshnessHours = personaEnrichedAt
+    ? Number(((nowTs - new Date(personaEnrichedAt).getTime()) / (1000 * 60 * 60)).toFixed(2))
+    : null;
+
+  return {
+    strategy_vault: {
+      status: strategyVault?.status || 'missing',
+      last_refreshed_at: strategyRefreshedAt,
+      freshness_hours: strategyFreshnessHours,
+      sources: strategySources,
+    },
+    persona_vault: {
+      status: personaVault?.status || 'missing',
+      last_enriched_at: personaEnrichedAt,
+      freshness_hours: personaFreshnessHours,
+      source_health: personaSourceHealth,
+      evidence_summary: parseJsonObject(personaVault?.evidenceSummary, {}),
+      signals_preview: {
+        niche_candidates: Array.isArray(personaVault?.signals?.niche_candidates)
+          ? personaVault.signals.niche_candidates.slice(0, 8)
+          : [],
+        audience_candidates: Array.isArray(personaVault?.signals?.audience_candidates)
+          ? personaVault.signals.audience_candidates.slice(0, 8)
+          : [],
+        proof_points: Array.isArray(personaVault?.signals?.proof_points)
+          ? personaVault.signals.proof_points.slice(0, 8)
+          : [],
+      },
+    },
   };
 };
 
@@ -2291,6 +2762,9 @@ router.post('/upload-linkedin-profile-pdf', async (req, res) => {
 // POST /api/strategy/init-analysis - Tweet Genie parity flow for LinkedIn
 router.post('/init-analysis', async (req, res) => {
   let analysisCreditsDeducted = false;
+  let runContext = null;
+  let lockKey = '';
+  let lockOwnerRunId = '';
   try {
     const userId = req.user.id;
     const {
@@ -2300,12 +2774,11 @@ router.post('/init-analysis', async (req, res) => {
       account_id: accountId = null,
       account_type: accountType = null,
     } = req.body || {};
+    runContext = createRunContext(req, { strategyId });
     const normalizedPortfolioUrl = normalizePortfolioUrl(portfolioUrl);
     const normalizedUserContext = String(userContext || '').trim();
 
-    console.log('[Strategy] init-analysis request', {
-      userId,
-      strategyId,
+    logRunEvent('init_analysis.request', runContext, {
       accountId,
       accountType,
       hasPortfolioUrl: Boolean(normalizedPortfolioUrl),
@@ -2321,6 +2794,28 @@ router.post('/init-analysis', async (req, res) => {
       return res.status(404).json({ error: 'Strategy not found' });
     }
 
+    pruneExpiredInitAnalysisLocks();
+    lockKey = getInitAnalysisLockKey(userId, strategyId);
+    const existingLock = initAnalysisLocks.get(lockKey);
+    if (existingLock && existingLock.runId !== runContext.runId) {
+      return res.status(409).json({
+        error: 'Auto analysis is already running for this strategy. Please wait for it to finish.',
+        code: 'ANALYSIS_ALREADY_RUNNING',
+        runId: existingLock.runId || null,
+      });
+    }
+    lockOwnerRunId = runContext.runId;
+    initAnalysisLocks.set(lockKey, {
+      runId: lockOwnerRunId,
+      startedAt: Date.now(),
+    });
+
+    let stageMetadata = upsertStageStatus({}, 'analysis', {
+      status: 'running',
+      code: 'ANALYSIS_STARTED',
+      details: { runId: runContext.runId },
+    });
+
     const creditResult = await creditService.checkAndDeductCredits(userId, 'profile_analysis', 5);
     if (!creditResult.success) {
       return res.status(402).json({
@@ -2333,18 +2828,25 @@ router.post('/init-analysis', async (req, res) => {
 
     const currentMetadata = parseJsonObject(strategy.metadata, {});
     const derivedGoals = Array.isArray(strategy.content_goals) ? strategy.content_goals.join(', ') : '';
-    const [accountSnapshot, portfolioMetadata] = await Promise.all([
+    const [accountSnapshot, portfolioMetadata, personaVault] = await Promise.all([
       linkedinAutomationService.getLinkedinAccountSnapshot(userId, {
         accountId,
         accountType,
       }),
       normalizedPortfolioUrl ? fetchPortfolioMetadata(normalizedPortfolioUrl) : Promise.resolve(null),
+      personaVaultService.getByUser({ userId }),
     ]);
 
+    stageMetadata = upsertStageStatus(stageMetadata, 'analysis', {
+      status: 'running',
+      code: 'ANALYSIS_SIGNALS_FETCHED',
+      details: {
+        hasPersonaVault: Boolean(personaVault),
+      },
+    });
+
     if (normalizedPortfolioUrl) {
-      console.log('[Strategy] portfolio metadata fetch result', {
-        userId,
-        strategyId,
+      logRunEvent('init_analysis.portfolio_fetch', runContext, {
         portfolioUrl: normalizedPortfolioUrl,
         fetched: Boolean(portfolioMetadata?.fetched),
         status: portfolioMetadata?.status || null,
@@ -2353,7 +2855,15 @@ router.post('/init-analysis', async (req, res) => {
         hasAbout: Boolean(String(portfolioMetadata?.about || '').trim()),
         skillsCount: Array.isArray(portfolioMetadata?.skills) ? portfolioMetadata.skills.length : 0,
         hasExperience: Boolean(String(portfolioMetadata?.experience || '').trim()),
-        contentPreview: String(portfolioMetadata?.contentPreview || '').slice(0, 500),
+      });
+      stageMetadata = upsertStageStatus(stageMetadata, 'portfolio_analysis', {
+        status: portfolioMetadata?.fetched ? 'ready' : 'partial',
+        code: portfolioMetadata?.fetched ? 'PORTFOLIO_READY' : 'PORTFOLIO_PARTIAL',
+        message: portfolioMetadata?.error || '',
+        details: {
+          status: portfolioMetadata?.status || null,
+          url: normalizedPortfolioUrl,
+        },
       });
     }
 
@@ -2366,6 +2876,11 @@ router.post('/init-analysis', async (req, res) => {
     const portfolioExperience = String(
       portfolioMetadata?.experience || currentMetadata.portfolio_experience || ''
     ).trim();
+    const personaSignals = parseJsonObject(personaVault?.signals, {});
+    const personaSourceHealth = parseJsonObject(personaVault?.sourceHealth, {});
+    const personaAbout = String(personaSignals.about || '').trim();
+    const personaExperience = String(personaSignals.experience || '').trim();
+    const personaSkills = Array.isArray(personaSignals.skills) ? personaSignals.skills : [];
     const linkedinAbout = String(
       accountSnapshot?.about || currentMetadata.linkedin_about || ''
     ).trim();
@@ -2386,9 +2901,16 @@ router.post('/init-analysis', async (req, res) => {
       linkedinExperiencePreview: linkedinExperience.slice(0, 180) || null,
     });
 
-    const mergedAbout = dedupeStrings([linkedinAbout, portfolioAbout], 2).join(' ');
-    const mergedSkills = dedupeStrings([...(Array.isArray(linkedinSkills) ? linkedinSkills : []), ...(Array.isArray(portfolioSkills) ? portfolioSkills : [])], 20);
-    const mergedExperience = dedupeStrings([linkedinExperience, portfolioExperience], 2).join(' ');
+    const mergedAbout = dedupeStrings([linkedinAbout, portfolioAbout, personaAbout], 3).join(' ');
+    const mergedSkills = dedupeStrings(
+      [
+        ...(Array.isArray(linkedinSkills) ? linkedinSkills : []),
+        ...(Array.isArray(portfolioSkills) ? portfolioSkills : []),
+        ...personaSkills,
+      ],
+      24
+    );
+    const mergedExperience = dedupeStrings([linkedinExperience, portfolioExperience, personaExperience], 3).join(' ');
     const combinedContext = buildCombinedContext({
       userContext: normalizedUserContext,
       about: mergedAbout,
@@ -2429,6 +2951,7 @@ router.post('/init-analysis', async (req, res) => {
       portfolioAbout,
       portfolioExperience,
       portfolioSkills.join(' '),
+      ...(Array.isArray(personaSignals?.niche_candidates) ? personaSignals.niche_candidates : []),
       metadataNiche,
       strategyNiche,
     ]
@@ -2437,8 +2960,17 @@ router.post('/init-analysis', async (req, res) => {
       .filter((value) => !isJunkNicheCandidate(value, profileDisplayName))
       .filter((value) => !isOverlyGenericNicheValue(value));
     const seededRoleNiche = String(seededNicheCandidates[0] || '').trim();
-    const roleNicheForUpsert = seededRoleNiche || '';
-    const proofPointsForUpsert = proofPoints || undefined;
+    const personaNicheFallback = normalizeTopicCandidate(
+      Array.isArray(personaSignals?.niche_candidates) ? personaSignals.niche_candidates[0] : ''
+    );
+    const roleNicheForUpsert = seededRoleNiche || personaNicheFallback || '';
+    const proofPointsForUpsert = dedupeStrings(
+      [
+        proofPoints,
+        ...(Array.isArray(personaSignals?.proof_points) ? personaSignals.proof_points.slice(0, 3) : []),
+      ],
+      4
+    ).join(' | ') || undefined;
 
     await linkedinAutomationService.upsertProfileContext(userId, {
       role_niche: roleNicheForUpsert,
@@ -2467,6 +2999,17 @@ router.post('/init-analysis', async (req, res) => {
         extra_context: extraContext,
         profile_headline: profileHeadline || null,
         profile_display_name: accountSnapshot?.display_name || null,
+        persona_signals: {
+          niche_candidates: Array.isArray(personaSignals?.niche_candidates) ? personaSignals.niche_candidates.slice(0, 10) : [],
+          audience_candidates: Array.isArray(personaSignals?.audience_candidates) ? personaSignals.audience_candidates.slice(0, 10) : [],
+          proof_points: Array.isArray(personaSignals?.proof_points) ? personaSignals.proof_points.slice(0, 10) : [],
+          skills: Array.isArray(personaSignals?.skills) ? personaSignals.skills.slice(0, 16) : [],
+          projects: Array.isArray(personaSignals?.projects) ? personaSignals.projects.slice(0, 10) : [],
+          topic_signals: Array.isArray(personaSignals?.topic_signals) ? personaSignals.topic_signals.slice(0, 12) : [],
+          external_profiles: parseJsonObject(personaSignals?.external_profiles, {}),
+          source_health: personaSourceHealth,
+          last_synced_at: new Date().toISOString(),
+        },
         sourced_from: 'strategy_init_analysis',
       },
     });
@@ -2478,6 +3021,7 @@ router.post('/init-analysis', async (req, res) => {
       cookieHeader: buildCookieHeader(req),
       accountId,
       accountType,
+      strategyId,
     });
 
     const runRow = await getRunById(runResult.runId, userId);
@@ -2487,6 +3031,9 @@ router.post('/init-analysis', async (req, res) => {
     const runAnalysis = parseJsonObject(snapshot.analysis, {});
     const competitorConfig = parseJsonObject(snapshot.competitorConfig, {});
     const analysisAccountSnapshot = parseJsonObject(snapshot.accountSnapshot, {});
+    const competitorReferenceInsights = Array.isArray(competitorConfig?.competitor_profiles)
+      ? competitorConfig.competitor_profiles.map((profile) => ({ handle: profile }))
+      : [];
 
     const analysisData = sanitizeAnalysisData(buildAnalysisData({
       strategy,
@@ -2495,6 +3042,8 @@ router.post('/init-analysis', async (req, res) => {
       queue: runResult.queue,
       runAnalysis,
       postSummary,
+      personaVault,
+      competitorInsights: competitorReferenceInsights,
     }));
     console.log('[Strategy] niche derivation snapshot', {
       userId,
@@ -2515,14 +3064,23 @@ router.post('/init-analysis', async (req, res) => {
         ? profileContext.metadata.portfolio_skills.length
         : 0,
     });
+    const runTrendSignals = Array.isArray(runResult?.trendSignals)
+      ? runResult.trendSignals
+      : (Array.isArray(snapshot?.trendSignals) ? snapshot.trendSignals : []);
+    const trendTopicSeeds = normalizeTopicList(
+      runTrendSignals.map((item) => (typeof item === 'string' ? item : item?.topic)),
+      10
+    );
     const trendingTopics = sanitizeTrendingTopics(buildTrendingTopics(
       runResult.queue,
       [
+        ...trendTopicSeeds,
         ...(Array.isArray(postSummary?.themes) ? postSummary.themes : []),
         ...(Array.isArray(strategy?.topics) ? strategy.topics : []),
-        analysisData.niche,
+        ...(Array.isArray(analysisData?.top_topics) ? analysisData.top_topics : []),
       ],
-      analysisData.top_topics
+      [],
+      runTrendSignals
     ));
     const gapMap = sanitizeGapMap(buildGapMap({
       topTopics: analysisData.top_topics,
@@ -2530,28 +3088,70 @@ router.post('/init-analysis', async (req, res) => {
       postSummary,
       runAnalysis,
       competitorConfig,
+      personaSignals: parseJsonObject(personaVault?.signals, {}),
     }));
 
     const tweetsAnalysed = Number(postSummary.postCount || 0);
-    const confidence = tweetsAnalysed >= 20 ? 'high' : tweetsAnalysed >= 8 ? 'medium' : 'low';
+    const hasPersonaSignals = Boolean(
+      Array.isArray(personaSignals?.skills) && personaSignals.skills.length > 0 ||
+      Array.isArray(personaSignals?.proof_points) && personaSignals.proof_points.length > 0 ||
+      String(personaSignals?.about || '').trim() ||
+      String(personaSignals?.experience || '').trim()
+    );
+    const hasPortfolioSignals = Boolean(portfolioAbout || portfolioExperience || portfolioSkills.length > 0);
+    const hasResumeSignals = Boolean(
+      currentMetadata.linkedin_profile_pdf_uploaded_at ||
+      personaSourceHealth?.resume?.status === 'ready'
+    );
+    const hasLinkedinProfileSignals = Boolean(linkedinAbout || linkedinExperience || linkedinSkills.length > 0);
+
+    let confidenceScore = 0;
+    if (tweetsAnalysed >= 20) confidenceScore += 3;
+    else if (tweetsAnalysed >= 8) confidenceScore += 2;
+    else if (tweetsAnalysed > 0) confidenceScore += 1;
+    if (hasPortfolioSignals) confidenceScore += 1;
+    if (hasPersonaSignals) confidenceScore += 1;
+    if (hasLinkedinProfileSignals) confidenceScore += 1;
+
+    const confidence = confidenceScore >= 5 ? 'high' : confidenceScore >= 3 ? 'medium' : 'low';
     const confidenceReason =
-      tweetsAnalysed >= 20
-        ? 'Sufficient LinkedIn post history available for higher-confidence recommendations.'
-        : tweetsAnalysed >= 8
-          ? 'Moderate post history available. Recommendations are usable and improve as more posts are added.'
-          : 'Limited historical post data. Recommendations rely more on strategy context and heuristics.';
+      confidence === 'high'
+        ? 'Strong signal coverage across posts, profile context, and persona enrichment.'
+        : confidence === 'medium'
+          ? 'Usable signal coverage. Accuracy improves with more post history and competitor evidence.'
+          : 'Sparse signal coverage. Results rely on heuristics and should be reviewed manually.';
+    const sourceHealth = buildSourceHealthBreakdown({
+      postsCount: tweetsAnalysed,
+      hasPortfolio: hasPortfolioSignals,
+      hasResume: hasResumeSignals,
+      hasPersona: hasPersonaSignals,
+      competitorCount: Array.isArray(competitorConfig?.competitor_profiles) ? competitorConfig.competitor_profiles.length : 0,
+      personaSourceHealth,
+    });
 
     const existingMetadata = parseJsonObject(runRow?.metadata, {});
+    stageMetadata = upsertStageStatus(stageMetadata, 'analysis', {
+      status: 'ready',
+      code: 'ANALYSIS_COMPLETED',
+    });
+    stageMetadata = upsertStageStatus(stageMetadata, 'context_vault_refresh', {
+      status: 'pending',
+      code: 'CONTEXT_VAULT_REFRESH_PENDING',
+    });
     const nextMetadata = {
       ...existingMetadata,
+      ...stageMetadata,
+      run_id: runContext.runId,
       strategy_id: strategyId,
       analysis_data: analysisData,
       trending_topics: trendingTopics,
+      trend_signals: runTrendSignals,
       reference_accounts: [],
       gap_map: gapMap,
       tweets_analysed: tweetsAnalysed,
       confidence,
       confidence_reason: confidenceReason,
+      source_health: sourceHealth,
       portfolio_url: normalizedPortfolioUrl || currentMetadata.portfolio_url || '',
       portfolio_fetch_status: portfolioFetchStatus,
       portfolio_fetch_error: portfolioFetchError,
@@ -2562,20 +3162,30 @@ router.post('/init-analysis', async (req, res) => {
       linkedin_skills: linkedinSkills,
       linkedin_experience: linkedinExperience ? linkedinExperience.slice(0, 700) : null,
       user_context: normalizedUserContext || currentMetadata.user_context || '',
+      persona_signals: parseJsonObject(personaSignals, {}),
+      persona_evidence_summary: parseJsonObject(personaVault?.evidenceSummary, {}),
       queue_preview_count: Array.isArray(runResult.queue) ? runResult.queue.length : 0,
     };
     await updateRunMetadata(runResult.runId, nextMetadata);
     const refreshedStrategy = await strategyService.getStrategy(strategyId);
-    await refreshContextVaultSafe({
+    const refreshedVault = await refreshContextVaultSafe({
       userId,
       strategy: refreshedStrategy || strategy,
       reason: 'analysis_completed',
     });
+    const finalizedMetadata = upsertStageStatus(nextMetadata, 'context_vault_refresh', {
+      status: refreshedVault ? 'ready' : 'partial',
+      code: refreshedVault ? 'CONTEXT_VAULT_REFRESHED' : 'CONTEXT_VAULT_SKIPPED',
+      details: {
+        vaultId: refreshedVault?.id || null,
+      },
+    });
+    await updateRunMetadata(runResult.runId, finalizedMetadata);
 
-    console.log('[Strategy] init-analysis completed', {
-      userId,
-      strategyId,
+    logRunEvent('init_analysis.completed', {
+      ...runContext,
       analysisId: runResult.runId,
+    }, {
       accountId,
       accountType,
       tweetsAnalysed,
@@ -2585,16 +3195,13 @@ router.post('/init-analysis', async (req, res) => {
       queueItems: Array.isArray(runResult.queue) ? runResult.queue.length : 0,
       sourceScope: postSummary?.sourceScope || 'unknown',
       portfolioFetchStatus,
-      portfolioSkillsCount: portfolioSkills.length,
-      hasPortfolioAbout: Boolean(portfolioAbout),
-      hasPortfolioExperience: Boolean(portfolioExperience),
-      linkedinSkillsCount: linkedinSkills.length,
-      hasLinkedinAbout: Boolean(linkedinAbout),
-      hasLinkedinExperience: Boolean(linkedinExperience),
+      hasPersonaSignals,
+      stageStatus: finalizedMetadata.stage_status || {},
     });
 
     return res.json({
       success: true,
+      runId: runContext.runId,
       analysisId: runResult.runId,
       analysis: analysisData,
       trending: trendingTopics,
@@ -2603,6 +3210,8 @@ router.post('/init-analysis', async (req, res) => {
       tweetSource: 'linkedin_posts',
       confidence,
       confidenceReason: confidenceReason,
+      sourceHealth,
+      stageStatus: parseJsonObject(finalizedMetadata.stage_status, {}),
     });
   } catch (error) {
     console.error('[Strategy] init-analysis error:', error);
@@ -2614,6 +3223,13 @@ router.post('/init-analysis', async (req, res) => {
       }
     }
     return res.status(500).json({ error: error.message || 'Analysis failed' });
+  } finally {
+    if (lockKey) {
+      const activeLock = initAnalysisLocks.get(lockKey);
+      if (activeLock && activeLock.runId === lockOwnerRunId) {
+        initAnalysisLocks.delete(lockKey);
+      }
+    }
   }
 });
 
@@ -2638,11 +3254,17 @@ router.post('/apply-analysis', async (req, res) => {
     }
 
     const metadata = parseJsonObject(run.metadata, {});
+    const strategyId = String(metadata.strategy_id || '').trim() || null;
+    const runContext = createRunContext(req, {
+      strategyId,
+      analysisId,
+    });
     const analysisData = sanitizeAnalysisData(metadata.analysis_data);
     const snapshot = parseJsonObject(run.analysis_snapshot, {});
     const runAnalysis = parseJsonObject(snapshot.analysis, {});
     const postSummary = parseJsonObject(snapshot.postSummary, {});
     const competitorConfig = parseJsonObject(snapshot.competitorConfig, {});
+    const personaSignals = parseJsonObject(metadata.persona_signals, {});
 
     if (step === 'niche') {
       analysisData.niche = String(value || '').trim();
@@ -2668,7 +3290,6 @@ router.post('/apply-analysis', async (req, res) => {
         deeper_url: String(extra.deeper_url || '').trim(),
         deeper_context: String(extra.deeper_context || '').trim(),
       };
-      const strategyId = metadata.strategy_id;
       if (strategyId) {
         const strategy = await strategyService.getStrategy(strategyId);
         if (strategy && strategy.user_id === userId) {
@@ -2692,18 +3313,43 @@ router.post('/apply-analysis', async (req, res) => {
       postSummary,
       runAnalysis,
       competitorConfig,
+      personaSignals,
     }));
-    await updateRunMetadata(analysisId, metadata);
-    await refreshContextVaultSafe({
+    let nextMetadata = upsertStageStatus({
+      ...metadata,
+      run_id: runContext.runId,
+    }, 'analysis', {
+      status: 'ready',
+      code: 'ANALYSIS_STEP_APPLIED',
+      details: { step },
+    });
+    nextMetadata = upsertStageStatus(nextMetadata, 'context_vault_refresh', {
+      status: 'pending',
+      code: 'CONTEXT_VAULT_REFRESH_PENDING',
+    });
+    await updateRunMetadata(analysisId, nextMetadata);
+    const refreshedVault = await refreshContextVaultSafe({
       userId,
       strategyId,
       reason: 'analysis_prompt_pack_generated',
     });
+    nextMetadata = upsertStageStatus(nextMetadata, 'context_vault_refresh', {
+      status: refreshedVault ? 'ready' : 'partial',
+      code: refreshedVault ? 'CONTEXT_VAULT_REFRESHED' : 'CONTEXT_VAULT_SKIPPED',
+      details: { vaultId: refreshedVault?.id || null },
+    });
+    await updateRunMetadata(analysisId, nextMetadata);
+    logRunEvent('apply_analysis.completed', runContext, {
+      step,
+      hasVault: Boolean(refreshedVault),
+    });
 
     return res.json({
       success: true,
+      runId: runContext.runId,
       analysisData: sanitizedAnalysisData,
-      gapMap: metadata.gap_map,
+      gapMap: nextMetadata.gap_map,
+      stageStatus: parseJsonObject(nextMetadata.stage_status, {}),
     });
   } catch (error) {
     console.error('[Strategy] apply-analysis error:', error);
@@ -2715,10 +3361,17 @@ router.post('/apply-analysis', async (req, res) => {
 router.post('/reference-analysis', async (req, res) => {
   try {
     const userId = req.user.id;
-    const { analysisId, handles } = req.body || {};
+    const {
+      analysisId,
+      handles = [],
+      competitorTargets = [],
+      manualExamples = [],
+      winAngle = 'authority',
+      consentScrape = false,
+    } = req.body || {};
 
-    if (!analysisId || !Array.isArray(handles) || handles.length === 0) {
-      return res.status(400).json({ error: 'analysisId and handles array are required' });
+    if (!analysisId) {
+      return res.status(400).json({ error: 'analysisId is required' });
     }
 
     const run = await getRunById(analysisId, userId);
@@ -2726,51 +3379,108 @@ router.post('/reference-analysis', async (req, res) => {
       return res.status(404).json({ error: 'Analysis not found' });
     }
 
-    const cleanHandles = dedupeStrings(handles.map((handle) => normalizeHandle(handle)).filter(Boolean), 2);
-    if (cleanHandles.length === 0) {
-      return res.status(400).json({ error: 'No valid handles found' });
-    }
-
     const metadata = parseJsonObject(run.metadata, {});
+    const strategyId = String(metadata.strategy_id || '').trim() || null;
+    const runContext = createRunContext(req, {
+      strategyId,
+      analysisId,
+    });
     const analysisData = parseJsonObject(metadata.analysis_data, {});
     const snapshot = parseJsonObject(run.analysis_snapshot, {});
     const analysis = parseJsonObject(snapshot.analysis, {});
+    const personaSignals = parseJsonObject(metadata.persona_signals, {});
+    const legacyTargets = Array.isArray(handles) ? handles : [];
+    const directTargets = Array.isArray(competitorTargets) ? competitorTargets : [];
+    const mergedTargets = dedupeStrings(
+      [
+        ...directTargets.map((item) => (typeof item === 'string' ? item : (item?.url || item?.handle || ''))),
+        ...legacyTargets,
+      ].map((value) => normalizeCompetitorTarget(value)).filter(Boolean),
+      8
+    );
+    const cleanExamples = normalizeManualExamples(manualExamples, 12);
 
-    const referenceAccounts = cleanHandles.map((handle) => ({
-      handle: handle.startsWith('@') ? handle : `@${handle}`,
-      key_takeaway:
-        `This account leans into ${analysisData.niche || 'its niche'} with consistent positioning. ` +
-        'Use stronger hooks and proof points to stand out.',
-      content_angles: dedupeStrings(analysisData.top_topics || [], 3),
-      what_works: dedupeStrings(analysis.strengths || [], 3),
-      gaps_you_can_fill: dedupeStrings(analysis.gaps || analysis.opportunities || [], 3),
-    }));
+    if (mergedTargets.length === 0 && cleanExamples.length === 0) {
+      return res.status(400).json({
+        error: 'Provide competitorTargets/handles or manualExamples.',
+      });
+    }
 
-    metadata.reference_accounts = referenceAccounts;
+    const intelResult = await competitorIntelService.analyzeTargets({
+      competitorTargets: mergedTargets,
+      manualExamples: cleanExamples,
+      winAngle: String(winAngle || 'authority').trim() || 'authority',
+      consentScrape,
+    });
+    if (!intelResult.success && intelResult.code === 'NO_COMPETITOR_INPUT') {
+      return res.status(400).json({ error: 'No valid competitor input was provided.' });
+    }
+
+    const referenceAccounts = Array.isArray(intelResult.referenceAccounts)
+      ? intelResult.referenceAccounts
+      : [];
+
+    let nextMetadata = upsertStageStatus(metadata, 'reference_analysis', {
+      status: intelResult.scrapeReport?.partial ? 'partial' : 'ready',
+      code: intelResult.code || 'COMPETITOR_ANALYSIS_READY',
+      details: {
+        scrapeReport: intelResult.scrapeReport || {},
+      },
+    });
+    nextMetadata.reference_accounts = referenceAccounts;
+    nextMetadata.reference_analysis = sanitizeJsonSafeValue({
+      competitor_targets: mergedTargets,
+      competitor_profiles: Array.isArray(intelResult.competitorProfiles) ? intelResult.competitorProfiles : [],
+      competitor_examples: Array.isArray(intelResult.competitorExamples) ? intelResult.competitorExamples : [],
+      scrape_report: intelResult.scrapeReport || {},
+      win_angle: String(winAngle || 'authority').trim() || 'authority',
+    });
     const snapshotCompetitors = parseJsonObject(snapshot.competitorConfig, {});
-    metadata.gap_map = sanitizeGapMap(buildGapMap({
+    nextMetadata.gap_map = sanitizeGapMap(buildGapMap({
       topTopics: analysisData.top_topics,
       niche: analysisData.niche,
       postSummary: parseJsonObject(snapshot.postSummary, {}),
       runAnalysis: analysis,
       competitorConfig: {
         ...snapshotCompetitors,
-        competitor_profiles: cleanHandles,
+        competitor_profiles: Array.isArray(intelResult.competitorProfiles) ? intelResult.competitorProfiles : mergedTargets,
+        competitor_examples: Array.isArray(intelResult.competitorExamples) ? intelResult.competitorExamples : cleanExamples,
       },
+      personaSignals,
     }));
-    await updateRunMetadata(analysisId, metadata);
+    nextMetadata = {
+      ...nextMetadata,
+      run_id: runContext.runId,
+    };
+    await updateRunMetadata(analysisId, nextMetadata);
 
-    // Persist handles for future deep-dive runs
+    // Persist competitors for future deep-dive runs.
     await linkedinAutomationService.upsertCompetitors(userId, {
-      competitor_profiles: cleanHandles,
-      competitor_examples: [],
-      win_angle: 'authority',
+      competitor_profiles: Array.isArray(intelResult.competitorProfiles) ? intelResult.competitorProfiles : mergedTargets,
+      competitor_examples: Array.isArray(intelResult.competitorExamples) ? intelResult.competitorExamples : cleanExamples,
+      win_angle: String(winAngle || 'authority').trim() || 'authority',
+      metadata: {
+        scrape_report: intelResult.scrapeReport || {},
+        last_analysis_id: analysisId,
+        run_id: runContext.runId,
+      },
+    });
+    logRunEvent('reference_analysis.completed', runContext, {
+      totalTargets: mergedTargets.length,
+      successCount: Number(intelResult.scrapeReport?.successCount || 0),
+      failedCount: Number(intelResult.scrapeReport?.failedCount || 0),
+      partial: Boolean(intelResult.scrapeReport?.partial),
     });
 
     return res.json({
       success: true,
+      runId: runContext.runId,
+      partial: Boolean(intelResult.scrapeReport?.partial),
+      code: intelResult.code || 'COMPETITOR_ANALYSIS_READY',
       referenceAccounts,
-      gapMap: metadata.gap_map,
+      gapMap: nextMetadata.gap_map,
+      scrapeReport: intelResult.scrapeReport || {},
+      stageStatus: parseJsonObject(nextMetadata.stage_status, {}),
     });
   } catch (error) {
     console.error('[Strategy] reference-analysis error:', error);
@@ -2784,6 +3494,7 @@ router.post('/generate-analysis-prompts', async (req, res) => {
   try {
     const userId = req.user.id;
     const { analysisId, strategyId } = req.body || {};
+    const runContext = createRunContext(req, { strategyId, analysisId });
 
     if (!analysisId || !strategyId) {
       return res.status(400).json({ error: 'analysisId and strategyId are required' });
@@ -2810,6 +3521,22 @@ router.post('/generate-analysis-prompts', async (req, res) => {
     promptCreditsDeducted = true;
 
     const metadata = parseJsonObject(run.metadata, {});
+    let nextRunMetadata = upsertStageStatus({
+      ...metadata,
+      run_id: runContext.runId,
+    }, 'prompt_generation', {
+      status: 'running',
+      code: 'PROMPT_GENERATION_STARTED',
+    });
+    nextRunMetadata = upsertStageStatus(nextRunMetadata, 'content_plan_generation', {
+      status: 'pending',
+      code: 'CONTENT_PLAN_PENDING',
+    });
+    nextRunMetadata = upsertStageStatus(nextRunMetadata, 'context_vault_refresh', {
+      status: 'pending',
+      code: 'CONTEXT_VAULT_REFRESH_PENDING',
+    });
+    await updateRunMetadata(analysisId, nextRunMetadata);
     const analysisData = parseJsonObject(metadata.analysis_data, {});
     const runSnapshot = parseJsonObject(run.analysis_snapshot, {});
     const runAnalysis = parseJsonObject(runSnapshot.analysis, {});
@@ -2837,7 +3564,9 @@ router.post('/generate-analysis-prompts', async (req, res) => {
           tweets_analysed: metadata.tweets_analysed || 0,
           confidence: metadata.confidence || 'low',
           confidence_reason: metadata.confidence_reason || '',
+          source_health: parseJsonObject(metadata.source_health, {}),
           trending_topics: metadata.trending_topics || [],
+          trend_signals: metadata.trend_signals || [],
           gap_map: metadata.gap_map || [],
           strengths: Array.isArray(runAnalysis?.strengths) ? runAnalysis.strengths : [],
           gaps: Array.isArray(runAnalysis?.gaps) ? runAnalysis.gaps : [],
@@ -2849,6 +3578,11 @@ router.post('/generate-analysis-prompts', async (req, res) => {
 
     const result = await strategyService.generatePrompts(strategyId, userId);
     const promptGeneratedAt = new Date().toISOString();
+    nextRunMetadata = upsertStageStatus(nextRunMetadata, 'prompt_generation', {
+      status: 'ready',
+      code: 'PROMPT_GENERATION_READY',
+      details: { promptCount: Number(result?.count || 0) },
+    });
 
     let contentPlan = {
       runId: null,
@@ -2872,6 +3606,7 @@ router.post('/generate-analysis-prompts', async (req, res) => {
         queueTarget: CONTENT_PLAN_QUEUE_TARGET,
         userToken: getUserTokenFromRequest(req),
         cookieHeader: buildCookieHeader(req),
+        strategyId,
       });
 
       contentPlan = {
@@ -2886,6 +3621,14 @@ router.post('/generate-analysis-prompts', async (req, res) => {
         runId: contentPlan.runId,
         queueCount: contentPlan.queueCount || CONTENT_PLAN_QUEUE_TARGET,
       });
+      nextRunMetadata = upsertStageStatus(nextRunMetadata, 'content_plan_generation', {
+        status: 'ready',
+        code: 'CONTENT_PLAN_READY',
+        details: {
+          runId: contentPlan.runId,
+          queueCount: contentPlan.queueCount,
+        },
+      });
     } catch (contentPlanError) {
       contentPlanWarning = toShortText(
         contentPlanError?.message || 'Content plan generation failed.',
@@ -2896,6 +3639,11 @@ router.post('/generate-analysis-prompts', async (req, res) => {
         strategyId,
         analysisId,
         warning: contentPlanWarning,
+      });
+      nextRunMetadata = upsertStageStatus(nextRunMetadata, 'content_plan_generation', {
+        status: 'partial',
+        code: 'CONTENT_PLAN_PARTIAL',
+        message: contentPlanWarning,
       });
     }
 
@@ -2930,12 +3678,12 @@ router.post('/generate-analysis-prompts', async (req, res) => {
       metadata: nextStrategyMetadata,
     });
 
-    metadata.prompt_generation = {
+    nextRunMetadata.prompt_generation = {
       generated_at: promptGeneratedAt,
       count: result?.count || 0,
       success: true,
     };
-    metadata.content_plan = {
+    nextRunMetadata.content_plan = {
       run_id: contentPlan.runId,
       generated_at: contentPlan.runId
         ? promptGeneratedAt
@@ -2949,10 +3697,30 @@ router.post('/generate-analysis-prompts', async (req, res) => {
         ? nextStrategyMetadata.content_plan_prompt_ids
         : [],
     };
-    await updateRunMetadata(analysisId, metadata);
+    const refreshedStrategyForVault = await strategyService.getStrategy(strategyId);
+    const refreshedVault = await refreshContextVaultSafe({
+      userId,
+      strategy: refreshedStrategyForVault || strategy,
+      reason: 'analysis_prompt_pack_generated',
+    });
+    nextRunMetadata = upsertStageStatus(nextRunMetadata, 'context_vault_refresh', {
+      status: refreshedVault ? 'ready' : 'partial',
+      code: refreshedVault ? 'CONTEXT_VAULT_REFRESHED' : 'CONTEXT_VAULT_SKIPPED',
+      details: {
+        vaultId: refreshedVault?.id || null,
+      },
+    });
+    await updateRunMetadata(analysisId, nextRunMetadata);
+    logRunEvent('generate_analysis_prompts.completed', runContext, {
+      promptCount: Number(result?.count || 0),
+      contentPlanStatus: nextStrategyMetadata.content_plan_status || 'failed',
+      contentPlanRunId: contentPlan.runId || null,
+      hasVault: Boolean(refreshedVault),
+    });
 
     return res.json({
       success: true,
+      runId: runContext.runId,
       promptCount: result?.count || 0,
       prompts: result?.prompts || [],
       contentPlan: {
@@ -2966,9 +3734,27 @@ router.post('/generate-analysis-prompts', async (req, res) => {
           ? nextStrategyMetadata.content_plan_prompt_ids
           : [],
       },
+      stageStatus: parseJsonObject(nextRunMetadata.stage_status, {}),
     });
   } catch (error) {
     console.error('[Strategy] generate-analysis-prompts error:', error);
+    try {
+      const analysisId = String(req.body?.analysisId || '').trim();
+      if (analysisId) {
+        const failedRun = await getRunById(analysisId, req.user.id);
+        if (failedRun) {
+          const failedMetadata = parseJsonObject(failedRun.metadata, {});
+          const patched = upsertStageStatus(failedMetadata, 'prompt_generation', {
+            status: 'failed',
+            code: 'PROMPT_GENERATION_FAILED',
+            message: error?.message || 'Prompt generation failed.',
+          });
+          await updateRunMetadata(analysisId, patched);
+        }
+      }
+    } catch (stageError) {
+      console.warn('[Strategy] failed to persist prompt-generation stage failure', stageError?.message || stageError);
+    }
     if (promptCreditsDeducted) {
       try {
         await creditService.refund(req.user.id, 10, 'analysis_prompt_generation_failed', 'refund');
@@ -2977,6 +3763,118 @@ router.post('/generate-analysis-prompts', async (req, res) => {
       }
     }
     return res.status(500).json({ error: error.message || 'Failed to generate prompts from analysis' });
+  }
+});
+
+// POST /api/strategy/persona-enrichment/start - start async persona enrichment
+router.post('/persona-enrichment/start', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const {
+      strategyId = null,
+      websiteUrl = '',
+      resumeBase64 = '',
+      resumeFilename = 'resume.pdf',
+      consent = false,
+    } = req.body || {};
+
+    if (strategyId) {
+      const strategy = await strategyService.getStrategy(strategyId);
+      if (!strategy || strategy.user_id !== userId) {
+        return res.status(404).json({ error: 'Strategy not found' });
+      }
+    }
+
+    const runContext = createRunContext(req, {
+      strategyId,
+    });
+    const job = await personaCoreService.startEnrichmentJob({
+      userId,
+      strategyId,
+      websiteUrl,
+      resumeBase64,
+      resumeFilename,
+      consent,
+      runId: runContext.runId,
+    });
+
+    logRunEvent('persona_enrichment.started', {
+      ...runContext,
+      jobId: job?.id || null,
+    }, {
+      hasWebsite: Boolean(String(websiteUrl || '').trim()),
+      hasResume: Boolean(String(resumeBase64 || '').trim()),
+    });
+
+    return res.json({
+      success: true,
+      runId: runContext.runId,
+      job,
+    });
+  } catch (error) {
+    const message = String(error?.message || '').toUpperCase() === 'CONSENT_REQUIRED'
+      ? 'Explicit consent is required before persona enrichment.'
+      : (error.message || 'Failed to start persona enrichment');
+    const statusCode = String(error?.message || '').toUpperCase() === 'CONSENT_REQUIRED' ? 400 : 500;
+    return res.status(statusCode).json({ error: message });
+  }
+});
+
+// GET /api/strategy/persona-enrichment/:jobId/status - poll async enrichment status
+router.get('/persona-enrichment/:jobId/status', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const jobId = String(req.params.jobId || '').trim();
+    if (!jobId) {
+      return res.status(400).json({ error: 'jobId is required' });
+    }
+    const job = await personaCoreService.getJobStatus({ userId, jobId });
+    if (!job) {
+      return res.status(404).json({ error: 'Persona enrichment job not found' });
+    }
+    return res.json({
+      success: true,
+      job,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || 'Failed to fetch persona enrichment status' });
+  }
+});
+
+// GET /api/strategy/persona-signals - fetch normalized persona signals + recent snapshots
+router.get('/persona-signals', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const payload = await personaCoreService.getPersonaSignals({ userId });
+    return res.json({
+      success: true,
+      persona: payload || null,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || 'Failed to fetch persona signals' });
+  }
+});
+
+// POST /api/strategy/persona-enrichment/:jobId/attach - attach persona vault to strategy
+router.post('/persona-enrichment/:jobId/attach', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const jobId = String(req.params.jobId || '').trim();
+    const strategyId = String(req.body?.strategyId || '').trim() || null;
+    if (!jobId) {
+      return res.status(400).json({ error: 'jobId is required' });
+    }
+    const attached = await personaCoreService.attachJobToStrategy({
+      userId,
+      jobId,
+      strategyId,
+    });
+    return res.json({
+      success: true,
+      attached,
+    });
+  } catch (error) {
+    return res.status(400).json({ error: error.message || 'Failed to attach persona signals to strategy' });
   }
 });
 
@@ -2996,6 +3894,7 @@ router.get('/analysis-status/:analysisId', async (req, res) => {
     return res.json({
       id: run.id,
       status: run.status || 'completed',
+      runId: metadata.run_id || null,
       confidence: metadata.confidence || 'low',
       confidenceReason: metadata.confidence_reason || '',
       tweetsAnalysed: metadata.tweets_analysed || 0,
@@ -3003,6 +3902,9 @@ router.get('/analysis-status/:analysisId', async (req, res) => {
       trendingTopics: safeTrendingTopics,
       gapMap: safeGapMap,
       referenceAccounts: Array.isArray(metadata.reference_accounts) ? metadata.reference_accounts : [],
+      sourceHealth: parseJsonObject(metadata.source_health, {}),
+      stageStatus: parseJsonObject(metadata.stage_status, {}),
+      evidenceSummary: parseJsonObject(metadata.persona_evidence_summary, {}),
       error: null,
       createdAt: run.created_at,
     });
@@ -3040,6 +3942,7 @@ router.get('/latest-analysis', async (req, res) => {
     return res.json({
       id: run.id,
       status: run.status || 'completed',
+      runId: metadata.run_id || null,
       confidence: metadata.confidence || 'low',
       confidenceReason: metadata.confidence_reason || '',
       tweetsAnalysed: metadata.tweets_analysed || 0,
@@ -3047,6 +3950,9 @@ router.get('/latest-analysis', async (req, res) => {
       trendingTopics: safeTrendingTopics,
       gapMap: safeGapMap,
       referenceAccounts: Array.isArray(metadata.reference_accounts) ? metadata.reference_accounts : [],
+      sourceHealth: parseJsonObject(metadata.source_health, {}),
+      stageStatus: parseJsonObject(metadata.stage_status, {}),
+      evidenceSummary: parseJsonObject(metadata.persona_evidence_summary, {}),
       error: null,
       createdAt: run.created_at,
     });
@@ -3102,6 +4008,7 @@ router.post('/:id/content-plan/generate', async (req, res) => {
       queueTarget: CONTENT_PLAN_QUEUE_TARGET,
       userToken: getUserTokenFromRequest(req),
       cookieHeader: buildCookieHeader(req),
+      strategyId,
     });
 
     const generatedAt = new Date().toISOString();
@@ -3182,10 +4089,16 @@ router.get('/:id/context-vault', async (req, res) => {
         reason: shouldRefresh ? 'context_vault_manual_refresh' : 'context_vault_bootstrap',
       });
     }
+    const personaVault = await personaVaultService.getByUser({ userId });
 
     return res.json({
       success: true,
       vault: vault || null,
+      personaVault: personaVault || null,
+      sourceSummary: buildVaultSourceSummary({
+        strategyVault: vault,
+        personaVault,
+      }),
     });
   } catch (error) {
     console.error('[Strategy] context-vault fetch error:', error);
@@ -3210,10 +4123,16 @@ router.post('/:id/context-vault/refresh', async (req, res) => {
       strategy,
       reason: reasonInput || 'context_vault_manual_refresh',
     });
+    const personaVault = await personaVaultService.getByUser({ userId });
 
     return res.json({
       success: true,
       vault: vault || null,
+      personaVault: personaVault || null,
+      sourceSummary: buildVaultSourceSummary({
+        strategyVault: vault,
+        personaVault,
+      }),
     });
   } catch (error) {
     console.error('[Strategy] context-vault refresh error:', error);
@@ -3306,11 +4225,17 @@ router.post('/:id/context-vault/apply', async (req, res) => {
       strategy: updatedStrategy || strategy,
       reason: 'context_vault_apply',
     });
+    const personaVault = await personaVaultService.getByUser({ userId });
 
     return res.json({
       success: true,
       strategy: updatedStrategy,
       vault: refreshedVault || null,
+      personaVault: personaVault || null,
+      sourceSummary: buildVaultSourceSummary({
+        strategyVault: refreshedVault,
+        personaVault,
+      }),
       applied: {
         mode: mode === 'replace' ? 'replace' : 'merge',
         topicsAdded: pickedTopics,
@@ -3403,6 +4328,11 @@ router.get('/:id/content-plan', async (req, res) => {
         rejectionReason: item.rejection_reason || '',
         analysisSnapshot: parseJsonObject(item.analysis_snapshot, {}),
         reason: toShortText(itemMetadata.reason || '', 300),
+        evidenceRefs: dedupeStrings(
+          Array.isArray(itemMetadata.evidence_refs) ? itemMetadata.evidence_refs : [],
+          8
+        ),
+        groundingScore: Number(itemMetadata.grounding_score || 0),
         suggestedDayOffset: Number(itemMetadata.suggested_day_offset || 0),
         suggestedLocalTime: toShortText(itemMetadata.suggested_local_time || '', 12),
         metadata: itemMetadata,

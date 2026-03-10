@@ -129,7 +129,7 @@ export default function AutomationFlow({
     }));
   };
 
-  const handleQueueAction = async (item, action) => {
+  const handleQueueAction = async (item, action, actionPayload = {}) => {
     if (!item?.id) return;
 
     try {
@@ -147,6 +147,14 @@ export default function AutomationFlow({
           action,
           scheduled_time: scheduleState.scheduled_time,
           timezone: scheduleState.timezone,
+        });
+      } else if (action === 'update') {
+        await automationLinkedin.patchQueueItem(item.id, {
+          action,
+          title: actionPayload?.title || item?.title || '',
+          content: actionPayload?.content || item?.content || '',
+          hashtags: Array.isArray(actionPayload?.hashtags) ? actionPayload.hashtags : (item?.hashtags || []),
+          reason: actionPayload?.reason || item?.reason || '',
         });
       } else {
         await automationLinkedin.patchQueueItem(item.id, { action });
@@ -187,6 +195,9 @@ export default function AutomationFlow({
 
   const filteredQueue = useMemo(() => {
     if (!queueStatusFilter) return contentPlan.queue;
+    if (queueStatusFilter === 'done') {
+      return contentPlan.queue.filter((item) => ['scheduled', 'posted', 'completed'].includes(String(item?.status || '').toLowerCase()));
+    }
     return contentPlan.queue.filter((item) => item.status === queueStatusFilter);
   }, [contentPlan.queue, queueStatusFilter]);
 
@@ -199,6 +210,15 @@ export default function AutomationFlow({
       }, {}),
     [contentPlan.queue]
   );
+  const postedCount = Number(queueStatusCounts.posted || 0);
+  const doneCount =
+    postedCount +
+    Number(queueStatusCounts.scheduled || 0) +
+    Number(queueStatusCounts.completed || 0);
+  const pendingCount =
+    Number(queueStatusCounts.draft || 0) +
+    Number(queueStatusCounts.needs_approval || 0) +
+    Number(queueStatusCounts.approved || 0);
 
   const nextBestStep = useMemo(() => {
     const pendingCount = Number(queueStatusCounts.needs_approval || 0) + Number(queueStatusCounts.draft || 0);
@@ -206,6 +226,8 @@ export default function AutomationFlow({
     const rejectedCount = Number(queueStatusCounts.rejected || 0);
     const scheduledCount = Number(queueStatusCounts.scheduled || 0);
     const postedCount = Number(queueStatusCounts.posted || 0);
+    const completedCount = Number(queueStatusCounts.completed || 0);
+    const publishedDoneCount = postedCount + completedCount;
 
     if (!contentPlan.runId || Number(contentPlan.queueCount || contentPlan.queue.length || 0) <= 0) {
       return {
@@ -237,7 +259,7 @@ export default function AutomationFlow({
       };
     }
 
-    if (scheduledCount > 0 && postedCount === 0) {
+    if (scheduledCount > 0 && publishedDoneCount === 0) {
       return {
         label: 'Monitor scheduled posts',
         description: `${scheduledCount} item(s) are scheduled. Check publish outcomes in History/Analytics.`,
@@ -247,7 +269,7 @@ export default function AutomationFlow({
       };
     }
 
-    if (postedCount > 0 || rejectedCount > 0) {
+    if (publishedDoneCount > 0 || rejectedCount > 0) {
       return {
         label: 'Apply learning in Context Vault',
         description: 'Use review and analytics signals to improve your next prompt pack and content plan.',
@@ -357,6 +379,15 @@ export default function AutomationFlow({
           <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-white px-2.5 py-1">
             <Target className="h-3.5 w-3.5" />
             Queue items: {contentPlan.queueCount || contentPlan.queue.length || 0}
+          </span>
+          <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-white px-2.5 py-1">
+            Done: {doneCount}
+          </span>
+          <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-white px-2.5 py-1">
+            Posted: {postedCount}
+          </span>
+          <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-white px-2.5 py-1">
+            Pending: {pendingCount}
           </span>
         </div>
         {contentPlan.warning && (

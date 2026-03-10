@@ -204,8 +204,26 @@ export const profileAnalysis = {
   getStatus: (analysisId) => api.get(`/api/strategy/analysis-status/${analysisId}`),
   getLatest: (strategyId) => api.get('/api/strategy/latest-analysis', { params: { strategyId } }),
   confirmStep: (analysisId, step, value) => api.post('/api/strategy/apply-analysis', { analysisId, step, value }),
-  analyseReferenceAccounts: (analysisId, handles) =>
-    api.post('/api/strategy/reference-analysis', { analysisId, handles }),
+  analyseReferenceAccounts: (analysisId, payload = {}) => {
+    if (Array.isArray(payload)) {
+      return api.post('/api/strategy/reference-analysis', { analysisId, handles: payload });
+    }
+    if (payload && typeof payload === 'object') {
+      return api.post('/api/strategy/reference-analysis', {
+        analysisId,
+        ...payload,
+      });
+    }
+    return api.post('/api/strategy/reference-analysis', { analysisId, handles: [] });
+  },
+  startPersonaEnrichment: (payload = {}) =>
+    api.post('/api/strategy/persona-enrichment/start', payload, { timeout: 120000 }),
+  getPersonaEnrichmentStatus: (jobId) =>
+    api.get(`/api/strategy/persona-enrichment/${jobId}/status`),
+  getPersonaSignals: () =>
+    api.get('/api/strategy/persona-signals'),
+  attachPersonaEnrichment: (jobId, payload = {}) =>
+    api.post(`/api/strategy/persona-enrichment/${jobId}/attach`, payload),
   generatePrompts: (analysisId, strategyId) =>
     api.post('/api/strategy/generate-analysis-prompts', { analysisId, strategyId }, { timeout: 120000 }),
 };
@@ -219,6 +237,18 @@ export const automationLinkedin = {
   run: (payload) => api.post('/api/automation/linkedin/run', payload),
   getQueue: (params) => api.get('/api/automation/linkedin/queue', { params }),
   patchQueueItem: (id, payload) => api.patch(`/api/automation/linkedin/queue/${id}`, payload),
+  runAdaptiveVaultLoop: (payload = {}) =>
+    api.post('/api/automation/linkedin/adaptive-vault-loop/run', payload, { timeout: 120000 }),
+  getLatestAdaptiveVaultLoop: () =>
+    api.get('/api/automation/linkedin/adaptive-vault-loop/latest'),
+  getCommentReplyInbox: (params = {}) =>
+    api.get('/api/automation/linkedin/comment-reply/inbox', { params }),
+  generateCommentReply: (payload = {}) =>
+    api.post('/api/automation/linkedin/comment-reply/generate', payload, { timeout: 120000 }),
+  sendCommentReply: (payload = {}) =>
+    api.post('/api/automation/linkedin/comment-reply/send', payload, { timeout: 120000 }),
+  getCommentReplyHistory: (params = {}) =>
+    api.get('/api/automation/linkedin/comment-reply/history', { params }),
 };
 
 export default api;

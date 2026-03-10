@@ -11,6 +11,7 @@ const Dashboard = React.lazy(() => import('./pages/Dashboard'));
 const LinkedInPostComposer = React.lazy(() => import('./pages/LinkedInPostComposer'));
 const BulkGeneration = React.lazy(() => import('./pages/BulkGeneration'));
 const StrategyBuilder = React.lazy(() => import('./pages/StrategyBuilder'));
+const EngagementAssistant = React.lazy(() => import('./pages/EngagementAssistant'));
 const Scheduling = React.lazy(() => import('./pages/Scheduling'));
 const History = React.lazy(() => import('./pages/History'));
 const LinkedInAnalytics = React.lazy(() => import('./pages/LinkedInAnalytics'));
@@ -28,7 +29,7 @@ function App() {
   return (
     <AuthProvider>
       <AccountProvider>
-        <div className="min-h-screen bg-[#f3f6f8]"> {/* LinkedIn blue background tint */}
+        <div className="h-screen overflow-hidden bg-[#f3f6f8]"> {/* LinkedIn blue background tint */}
           <React.Suspense fallback={<PageFallback />}>
             <Routes>
               {/* Auth callback from LinkedIn */}
@@ -46,7 +47,8 @@ function App() {
                         <Route path="/dashboard" element={<Dashboard />} />
                         <Route path="/compose" element={<LinkedInPostComposer />} />
                         <Route path="/strategy" element={<StrategyBuilder />} />
-                        <Route path="/automation" element={<Navigate to="/strategy?tab=automation" replace />} />
+                        <Route path="/engagement" element={<EngagementAssistant />} />
+                        <Route path="/automation" element={<Navigate to="/engagement" replace />} />
                         <Route path="/strategy-builder" element={<Navigate to="/strategy" replace />} />
                         <Route path="/bulk-generation" element={<BulkGeneration />} />
                         <Route path="/scheduling" element={<Scheduling />} />

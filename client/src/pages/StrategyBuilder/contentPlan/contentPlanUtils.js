@@ -3,6 +3,7 @@ export const STATUS_STYLES = {
   needs_approval: 'bg-amber-100 text-amber-800',
   approved: 'bg-emerald-100 text-emerald-800',
   scheduled: 'bg-blue-100 text-blue-800',
+  completed: 'bg-green-100 text-green-800',
   posted: 'bg-green-100 text-green-800',
   rejected: 'bg-rose-100 text-rose-800',
 };
