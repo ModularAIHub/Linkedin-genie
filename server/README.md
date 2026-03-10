@@ -61,6 +61,7 @@ Behavior:
   - `content-plan/generate`
   - `upload-linkedin-profile-pdf`
   - `queue approve/reject/schedule` actions
+- All `/api/automation/linkedin/*` endpoints are Pro-protected at backend middleware level (not just UI-gated).
 
 Response fields:
 - `success`
@@ -81,6 +82,7 @@ Protected by `Authorization: Bearer <CRON_SECRET>`:
 - `POST /api/cron/daily-content-plan`
   - Generates daily content-plan queue items for eligible strategies.
   - Defaults: 1 strategy/user (latest active), `queueTarget=2`, skip if already generated today, skip if pending queue still >= target.
+  - Eligibility is server-filtered to Pro plans (`pro`, `enterprise`, plus aliases `premium`, `business`) from user/team plan metadata.
   - Triggers ready-post email notifier tick after generation.
   - Controlled by env flag `LINKEDIN_DAILY_CONTENT_CRON_ENABLED` (default `true`).
   - Optional query/body params: `force`, `notify`, `userLimit`, `queueTarget`, `tickId`.

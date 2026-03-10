@@ -9,6 +9,7 @@ const DEFAULT_DAILY_QUEUE_TARGET = 2;
 const DEFAULT_USER_LIMIT = 25;
 const MAX_USER_LIMIT = 200;
 const MAX_QUEUE_TARGET = 6;
+const PRO_PLAN_TYPES_SQL = ['pro', 'enterprise', 'premium', 'business'];
 
 const isDailyContentCronEnabled = () => {
   const raw = String(process.env.LINKEDIN_DAILY_CONTENT_CRON_ENABLED || 'true').trim().toLowerCase();
@@ -95,6 +96,7 @@ const getEligibleStrategies = async ({ userLimit }) => {
        SELECT
          s.id::text AS strategy_id,
          s.user_id::text AS user_id,
+         s.team_id::text AS team_id,
          s.status,
          s.posting_frequency,
          COALESCE(s.metadata, '{}'::jsonb) AS metadata,
@@ -113,15 +115,24 @@ const getEligibleStrategies = async ({ userLimit }) => {
      SELECT
        rs.strategy_id,
        rs.user_id,
+       rs.team_id,
        rs.status,
        rs.posting_frequency,
        rs.metadata,
        COALESCE(pc.consent_use_posts, false) AS consent_use_posts,
        COALESCE(pc.consent_store_profile, false) AS consent_store_profile
      FROM ranked_strategies rs
+     LEFT JOIN users u
+       ON u.id::text = rs.user_id
+     LEFT JOIN teams t
+       ON t.id::text = rs.team_id
      LEFT JOIN linkedin_automation_profile_context pc
        ON pc.user_id::text = rs.user_id
      WHERE rs.rn = 1
+       AND (
+         LOWER(COALESCE(u.plan_type, '')) = ANY($2::text[])
+         OR LOWER(COALESCE(t.plan_type, '')) = ANY($2::text[])
+       )
        AND EXISTS (
          SELECT 1
          FROM social_connected_accounts a
@@ -130,7 +141,7 @@ const getEligibleStrategies = async ({ userLimit }) => {
        )
      ORDER BY COALESCE(rs.updated_at, rs.created_at) DESC
      LIMIT $1`,
-    [userLimit]
+    [userLimit, PRO_PLAN_TYPES_SQL]
   );
   return Array.isArray(rows) ? rows : [];
 };

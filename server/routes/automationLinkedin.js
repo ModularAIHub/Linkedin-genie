@@ -14,8 +14,10 @@ import {
   sendCommentReplyAssist,
   getCommentReplyAssistHistory,
 } from '../controllers/automationController.js';
+import { requireProPlan } from '../middleware/planAccess.js';
 
 const router = express.Router();
+router.use(requireProPlan('LinkedIn Automation'));
 
 router.get('/profile-context', getProfileContext);
 router.post('/profile-context', saveProfileContext);
