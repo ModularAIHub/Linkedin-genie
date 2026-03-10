@@ -9,6 +9,7 @@ import {
   CreditCard,
   Edit3,
   Heart,
+  Lock,
   MessageCircle,
   Plus,
   Share2,
@@ -491,6 +492,120 @@ const Dashboard = () => {
         </div>
       </section>
 
+      <section className="rounded-2xl border border-indigo-200 bg-gradient-to-br from-white via-indigo-50/30 to-blue-50/40 p-5 shadow-sm">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">Pro Workspace</h2>
+            <p className="text-sm text-gray-600">Quick Actions + Workspace Snapshot for daily execution.</p>
+          </div>
+          <span className="inline-flex w-fit items-center gap-1 rounded-full border border-indigo-200 bg-indigo-100 px-3 py-1 text-xs font-semibold text-indigo-700">
+            <Sparkles className="h-3.5 w-3.5" />
+            Pro feature
+          </span>
+        </div>
+
+        {!hasProAccess ? (
+          <div className="mt-4 rounded-xl border border-dashed border-indigo-300 bg-white p-5 text-sm text-gray-700">
+            <div className="flex items-center gap-2 text-indigo-700 font-semibold">
+              <Lock className="h-4 w-4" />
+              Upgrade required
+            </div>
+            <p className="mt-2">
+              Unlock this Pro workspace to manage Strategy Builder, queue snapshots, and guided quick actions in one section.
+            </p>
+            <Link
+              to="/settings"
+              className="mt-3 inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-700"
+            >
+              View plan
+              <ArrowRight className="h-3.5 w-3.5" />
+            </Link>
+          </div>
+        ) : (
+          <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="rounded-2xl border border-gray-200 bg-white p-5">
+              <h3 className="text-lg font-semibold text-gray-900">Quick Actions</h3>
+              <p className="text-sm text-gray-600 mt-1">Jump directly into high-impact tasks.</p>
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {quickActions.map((action) => {
+                  const Icon = action.icon;
+                  return (
+                    <Link
+                      key={action.name}
+                      to={action.href}
+                      className="rounded-xl border border-gray-200 p-4 hover:border-blue-200 hover:bg-blue-50/40 transition-colors"
+                    >
+                      <div className={`inline-flex rounded-lg p-2 ${action.iconStyle}`}>
+                        <Icon className="h-4 w-4" />
+                      </div>
+                      <p className="mt-3 font-semibold text-gray-900">{action.name}</p>
+                      <p className="mt-1 text-sm text-gray-600">{action.description}</p>
+                    </Link>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4">
+              <h3 className="text-lg font-semibold text-gray-900">Workspace Snapshot</h3>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="rounded-xl bg-gradient-to-br from-blue-600 to-indigo-700 p-4 text-white">
+                  <div className="flex items-center justify-between">
+                    <CreditCard className="h-4 w-4 text-blue-100" />
+                    <Zap className="h-4 w-4 text-blue-200" />
+                  </div>
+                  <p className="mt-3 text-xs text-blue-100 uppercase tracking-wide">Credits</p>
+                  <p className="mt-1 text-2xl font-bold">
+                    {creditsLoading ? '--' : formatInt(balanceValue || 0)}
+                  </p>
+                </div>
+
+                <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                  <div className="flex items-center justify-between">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                    <Clock3 className="h-4 w-4 text-gray-500" />
+                  </div>
+                  <p className="mt-3 text-xs text-gray-500 uppercase tracking-wide">Queue Pending</p>
+                  <p className="mt-1 text-2xl font-bold text-gray-900">{formatInt(pendingQueueCount)}</p>
+                  <p className="mt-1 text-xs text-gray-600">
+                    Generated today: {generatedToday ? 'yes' : 'no'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-gray-200 p-4">
+                <p className="text-sm font-medium text-gray-700">API Mode</p>
+                <p className="mt-1 text-xl font-semibold text-gray-900">
+                  {byokLoading ? 'Loading...' : (apiKeyPreference?.mode || 'Platform')}
+                </p>
+                <Link to="/settings" className="mt-2 inline-flex items-center gap-1 text-sm font-medium text-blue-700 hover:text-blue-800">
+                  Manage settings
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </Link>
+              </div>
+
+              <div className="rounded-xl border border-gray-200 p-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-medium text-gray-700">Top Post (30d)</p>
+                  <TrendingUp className="h-4 w-4 text-emerald-600" />
+                </div>
+                {topPost ? (
+                  <>
+                    <p className="mt-2 text-sm text-gray-800">{truncateText(topPost.post_content, 180) || 'No content preview available.'}</p>
+                    <p className="mt-2 text-xs text-gray-600">
+                      Engagement: {formatInt(topPost.total_engagement || 0)} (likes {formatInt(topPost.likes || 0)}, comments {formatInt(topPost.comments || 0)}, shares {formatInt(topPost.shares || 0)})
+                    </p>
+                  </>
+                ) : (
+                  <p className="mt-2 text-sm text-gray-600">No posted content in the selected window yet.</p>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
       <section className="rounded-2xl border border-gray-200 bg-white p-5">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -561,88 +676,6 @@ const Dashboard = () => {
               </div>
             );
           })}
-      </section>
-
-      <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="rounded-2xl border border-gray-200 bg-white p-5">
-          <h3 className="text-lg font-semibold text-gray-900">Quick Actions</h3>
-          <p className="text-sm text-gray-600 mt-1">Jump directly into high-impact tasks.</p>
-          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {quickActions.map((action) => {
-              const Icon = action.icon;
-              return (
-                <Link
-                  key={action.name}
-                  to={action.href}
-                  className="rounded-xl border border-gray-200 p-4 hover:border-blue-200 hover:bg-blue-50/40 transition-colors"
-                >
-                  <div className={`inline-flex rounded-lg p-2 ${action.iconStyle}`}>
-                    <Icon className="h-4 w-4" />
-                  </div>
-                  <p className="mt-3 font-semibold text-gray-900">{action.name}</p>
-                  <p className="mt-1 text-sm text-gray-600">{action.description}</p>
-                </Link>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4">
-          <h3 className="text-lg font-semibold text-gray-900">Workspace Snapshot</h3>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div className="rounded-xl bg-gradient-to-br from-blue-600 to-indigo-700 p-4 text-white">
-              <div className="flex items-center justify-between">
-                <CreditCard className="h-4 w-4 text-blue-100" />
-                <Zap className="h-4 w-4 text-blue-200" />
-              </div>
-              <p className="mt-3 text-xs text-blue-100 uppercase tracking-wide">Credits</p>
-              <p className="mt-1 text-2xl font-bold">
-                {creditsLoading ? '--' : formatInt(balanceValue || 0)}
-              </p>
-            </div>
-
-            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-              <div className="flex items-center justify-between">
-                <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                <Clock3 className="h-4 w-4 text-gray-500" />
-              </div>
-              <p className="mt-3 text-xs text-gray-500 uppercase tracking-wide">Queue Pending</p>
-              <p className="mt-1 text-2xl font-bold text-gray-900">{formatInt(pendingQueueCount)}</p>
-              <p className="mt-1 text-xs text-gray-600">
-                Generated today: {generatedToday ? 'yes' : 'no'}
-              </p>
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-gray-200 p-4">
-            <p className="text-sm font-medium text-gray-700">API Mode</p>
-            <p className="mt-1 text-xl font-semibold text-gray-900">
-              {byokLoading ? 'Loading...' : (apiKeyPreference?.mode || 'Platform')}
-            </p>
-            <Link to="/settings" className="mt-2 inline-flex items-center gap-1 text-sm font-medium text-blue-700 hover:text-blue-800">
-              Manage settings
-              <ArrowRight className="h-3.5 w-3.5" />
-            </Link>
-          </div>
-
-          <div className="rounded-xl border border-gray-200 p-4">
-            <div className="flex items-center justify-between">
-              <p className="text-sm font-medium text-gray-700">Top Post (30d)</p>
-              <TrendingUp className="h-4 w-4 text-emerald-600" />
-            </div>
-            {topPost ? (
-              <>
-                <p className="mt-2 text-sm text-gray-800">{truncateText(topPost.post_content, 180) || 'No content preview available.'}</p>
-                <p className="mt-2 text-xs text-gray-600">
-                  Engagement: {formatInt(topPost.total_engagement || 0)} (likes {formatInt(topPost.likes || 0)}, comments {formatInt(topPost.comments || 0)}, shares {formatInt(topPost.shares || 0)})
-                </p>
-              </>
-            ) : (
-              <p className="mt-2 text-sm text-gray-600">No posted content in the selected window yet.</p>
-            )}
-          </div>
-        </div>
       </section>
 
       <section className="rounded-2xl border border-blue-100 bg-blue-50 p-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
