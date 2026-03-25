@@ -22,6 +22,8 @@ import {
   MessageCircle,
 } from 'lucide-react';
 
+const normalizePlanType = (value) => String(value || 'free').trim().toLowerCase();
+
 const Layout = ({ children }) => {
   const { user, logout } = useAuth();
   const { accounts, selectedAccount } = useAccount();
@@ -32,6 +34,7 @@ const Layout = ({ children }) => {
   const [loadingCredits, setLoadingCredits] = useState(true);
   const CREDITS_REFRESH_MS = 5 * 60 * 1000;
   const hasProAccess = hasProPlanAccess(user);
+  const isAgencyPlan = normalizePlanType(user?.planType || user?.plan_type) === 'agency';
 
   const navigation = [
     { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
@@ -148,7 +151,7 @@ const Layout = ({ children }) => {
                             }`}
                         >
                           {isProLocked && <Lock className="h-3 w-3" />}
-                          Pro
+                          {isAgencyPlan && !isProLocked ? 'Agency' : 'Pro'}
                         </span>
                       )}
                     </div>

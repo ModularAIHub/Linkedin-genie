@@ -539,6 +539,12 @@ async function claimDueScheduledPosts(limit) {
 }
 
 async function resolvePublishingContext(post) {
+  const metadata = parseJsonObject(post?.metadata, {});
+  const explicitPersonalTargetId =
+    metadata?.target_account_id !== undefined && metadata?.target_account_id !== null
+      ? String(metadata.target_account_id).trim() || null
+      : null;
+
   if (post.company_id) {
     const { rows: socialTeamRows } = await pool.query(
       `SELECT id, team_id, account_id, metadata, access_token, token_expires_at
@@ -582,6 +588,46 @@ async function resolvePublishingContext(post) {
         accessToken: teamRows[0].access_token,
         authorUrn: teamAuthorIdentity.authorUrn,
         linkedinUserId: teamAuthorIdentity.linkedinUserId
+      };
+    }
+  }
+
+  if (explicitPersonalTargetId) {
+    const { rows: socialTargetRows } = await pool.query(
+      `SELECT access_token, account_id, metadata
+       FROM social_connected_accounts
+       WHERE id::text = $1::text
+         AND user_id::text = $2::text
+         AND team_id IS NULL
+         AND platform = 'linkedin'
+         AND is_active = true
+       LIMIT 1`,
+      [explicitPersonalTargetId, String(post.user_id)]
+    );
+
+    const socialTargetLinkedinUserId = resolveSocialLinkedinUserId(socialTargetRows[0] || {});
+    if (socialTargetRows[0]?.access_token && socialTargetLinkedinUserId) {
+      return {
+        accessToken: socialTargetRows[0].access_token,
+        authorUrn: `urn:li:person:${socialTargetLinkedinUserId}`,
+        linkedinUserId: socialTargetLinkedinUserId
+      };
+    }
+
+    const { rows: legacyTargetRows } = await pool.query(
+      `SELECT access_token, linkedin_user_id
+       FROM linkedin_auth
+       WHERE id::text = $1::text
+         AND user_id::text = $2::text
+       LIMIT 1`,
+      [explicitPersonalTargetId, String(post.user_id)]
+    );
+
+    if (legacyTargetRows[0]?.access_token && legacyTargetRows[0]?.linkedin_user_id) {
+      return {
+        accessToken: legacyTargetRows[0].access_token,
+        authorUrn: `urn:li:person:${legacyTargetRows[0].linkedin_user_id}`,
+        linkedinUserId: legacyTargetRows[0].linkedin_user_id
       };
     }
   }

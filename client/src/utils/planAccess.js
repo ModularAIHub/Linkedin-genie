@@ -1,4 +1,4 @@
-const PRO_ELIGIBLE_PLANS = new Set(['pro', 'enterprise']);
+const PRO_ELIGIBLE_PLANS = new Set(['pro', 'agency', 'enterprise']);
 const PLAN_ALIASES = new Map([
   ['premium', 'pro'],
   ['business', 'pro'],

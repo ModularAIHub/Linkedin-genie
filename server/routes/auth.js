@@ -67,7 +67,11 @@ router.get('/validate', requirePlatformLogin, async (req, res) => {
 
   res.json({
     success: true,
-    user: normalizedUser
+    user: {
+      ...normalizedUser,
+      agencyWorkspace: req.agencyWorkspace || null,
+    },
+    agencyWorkspace: req.agencyWorkspace || null,
   });
 });
 

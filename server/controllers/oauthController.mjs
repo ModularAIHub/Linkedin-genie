@@ -25,8 +25,11 @@ const stateStore = new Map();
 const SELECTION_STATE_TTL_MS = 10 * 60 * 1000;
 let oauthStateStoreEnsured = false;
 
-// UPDATED SCOPES - includes analytics scopes
-const LINKEDIN_SCOPES = 'openid profile email w_member_social r_member_social r_organization_social r_organization_admin w_organization_social';
+// Request only scopes the current app actually needs for connection + posting.
+// `r_member_social` is excluded because LinkedIn is rejecting it for this app.
+const LINKEDIN_SCOPES =
+  process.env.LINKEDIN_OAUTH_SCOPES ||
+  'openid profile email w_member_social r_organization_social r_organization_admin w_organization_social';
 const LINKEDIN_PLATFORM = 'linkedin';
 
 async function fetchAndStoreLinkedInPosts(userId, linkedinUserId, accessToken) {
@@ -69,6 +72,7 @@ async function fetchAndStoreLinkedInPosts(userId, linkedinUserId, accessToken) {
 }
 
 const getSelectionStateKey = (selectionId) => `selection_${selectionId}`;
+const getOauthStateKey = (state) => `oauth_${state}`;
 
 async function ensureOauthStateStoreTable() {
   if (oauthStateStoreEnsured) return;
@@ -116,6 +120,33 @@ async function persistSelectionState(selectionId, payload, ttlMs = SELECTION_STA
   return record;
 }
 
+async function persistOauthState(state, payload, ttlMs = SELECTION_STATE_TTL_MS) {
+  await ensureOauthStateStoreTable();
+  const key = getOauthStateKey(state);
+  const expiresAt = payload?.expiresAt || (Date.now() + ttlMs);
+  const record = {
+    ...(payload && typeof payload === 'object' ? payload : {}),
+    expiresAt,
+  };
+
+  stateStore.set(state, record);
+
+  try {
+    await pool.query(
+      `INSERT INTO oauth_state_store (state, payload, expires_at)
+       VALUES ($1, $2::jsonb, $3)
+       ON CONFLICT (state) DO UPDATE SET
+         payload = EXCLUDED.payload,
+         expires_at = EXCLUDED.expires_at`,
+      [key, JSON.stringify(record), new Date(expiresAt).toISOString()]
+    );
+  } catch (error) {
+    console.warn('[OAuth State] Failed to persist oauth state to database:', error?.message || error);
+  }
+
+  return record;
+}
+
 async function loadSelectionState(selectionId) {
   await ensureOauthStateStoreTable();
   const key = getSelectionStateKey(selectionId);
@@ -149,6 +180,39 @@ async function loadSelectionState(selectionId) {
   }
 }
 
+async function loadOauthState(state) {
+  await ensureOauthStateStoreTable();
+  if (!state) return null;
+
+  const inMemory = stateStore.get(state);
+  if (inMemory) {
+    if (!inMemory.expiresAt || Date.now() <= Number(inMemory.expiresAt)) {
+      return inMemory;
+    }
+    stateStore.delete(state);
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT payload
+       FROM oauth_state_store
+       WHERE state = $1
+         AND expires_at > NOW()
+       LIMIT 1`,
+      [getOauthStateKey(state)]
+    );
+
+    const payload = rows[0]?.payload || null;
+    if (!payload) return null;
+
+    stateStore.set(state, payload);
+    return payload;
+  } catch (error) {
+    console.warn('[OAuth State] Failed to load oauth state from database:', error?.message || error);
+    return null;
+  }
+}
+
 async function clearSelectionState(selectionId) {
   await ensureOauthStateStoreTable();
   const key = getSelectionStateKey(selectionId);
@@ -158,6 +222,19 @@ async function clearSelectionState(selectionId) {
     await pool.query(`DELETE FROM oauth_state_store WHERE state = $1`, [key]);
   } catch (error) {
     console.warn('[OAuth Selection] Failed to clear selection state from database:', error?.message || error);
+  }
+}
+
+async function clearOauthState(state) {
+  await ensureOauthStateStoreTable();
+  if (!state) return;
+
+  stateStore.delete(state);
+
+  try {
+    await pool.query(`DELETE FROM oauth_state_store WHERE state = $1`, [getOauthStateKey(state)]);
+  } catch (error) {
+    console.warn('[OAuth State] Failed to clear oauth state from database:', error?.message || error);
   }
 }
 
@@ -171,18 +248,48 @@ const normalizeString = (value, maxLen = null) => {
   return stringValue;
 };
 
+const isAllowedTeamReturnOrigin = (origin) => {
+  if (!origin) return false;
+
+  try {
+    const { hostname, protocol } = new URL(String(origin));
+    if (!['http:', 'https:'].includes(protocol)) return false;
+
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      return true;
+    }
+
+    if (hostname === 'suitegenie.in' || hostname.endsWith('.suitegenie.in')) {
+      return true;
+    }
+
+    if (hostname === 'suitgenie.in' || hostname.endsWith('.suitgenie.in')) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+};
+
 const resolveTeamReturnUrl = (returnUrl) => {
   const fallbackBase = String(
     process.env.PLATFORM_URL ||
     process.env.CLIENT_URL ||
     'http://localhost:5173'
   ).replace(/\/+$/, '');
+  const fallbackUrl = `${fallbackBase}/team`;
 
   try {
     const parsed = new URL(String(returnUrl));
-    return `${parsed.origin}/team`;
+    const origin = `${parsed.protocol}//${parsed.host}`;
+    if (!isAllowedTeamReturnOrigin(origin)) {
+      return fallbackUrl;
+    }
+    return parsed.toString();
   } catch {
-    return `${fallbackBase}/team`;
+    return fallbackUrl;
   }
 };
 
@@ -431,16 +538,41 @@ export function startOAuth(req, res) {
 
 // Handle LinkedIn OAuth callback: exchange code for access token
 export async function handleOAuthCallback(req, res) {
-  const { code, state } = req.query;
+  const { code, state, error: oauthError, error_description: oauthErrorDescription } = req.query;
 
   // Check if this is a team connection (state starts with 'team_')
   const isTeamConnection = state && state.startsWith('team_');
-  const stateData = state ? stateStore.get(state) : null;
+  const stateData = isTeamConnection
+    ? await loadOauthState(state)
+    : (state ? stateStore.get(state) : null);
   const isPersonalState = typeof state === 'string' && state.startsWith('personal_');
   // Be resilient if in-memory state expires/restarts before callback lands.
   // For personal OAuth we can still safely serve popup HTML; when there is no opener,
   // fallback redirect continues the full-page flow.
   const isPopupFlow = !isTeamConnection && (Boolean(stateData?.popup) || isPersonalState);
+
+  if (oauthError) {
+    const reason = String(oauthErrorDescription || oauthError || 'oauth_failed').trim();
+    if (!isTeamConnection) {
+      if (isPopupFlow) {
+        return sendPopupResult(
+          res,
+          'linkedin_auth_error',
+          { reason },
+          'LinkedIn connection was cancelled.',
+          getClientCallbackUrl({ status: 'error', reason })
+        );
+      }
+      return res.redirect(getClientCallbackUrl({ status: 'error', reason }));
+    }
+
+    if (stateData?.returnUrl) {
+      await clearOauthState(state);
+      return res.redirect(`${stateData.returnUrl}?error=${encodeURIComponent(reason)}`);
+    }
+
+    return res.status(400).send(`OAuth failed: ${reason}`);
+  }
 
   if (!code) {
     if (!isTeamConnection) {
@@ -456,6 +588,7 @@ export async function handleOAuthCallback(req, res) {
       return res.redirect(getClientCallbackUrl({ status: 'error', reason: 'missing_code' }));
     }
     if (isTeamConnection && stateData?.returnUrl) {
+      await clearOauthState(state);
       return res.redirect(`${stateData.returnUrl}?error=missing_code`);
     }
     return res.status(400).send('Missing code');
@@ -569,7 +702,7 @@ export async function handleOAuthCallback(req, res) {
     // ─── TEAM CONNECTION FLOW ───────────────────────────────────────────────
     if (isTeamConnection && stateData) {
       const { teamId, userId, returnUrl } = stateData;
-      stateStore.delete(state);
+      await clearOauthState(state);
 
       if (userInfo && userInfo.sub) {
         const linkedinUserId = userInfo.sub;
@@ -1079,7 +1212,7 @@ export async function handleOAuthCallback(req, res) {
 }
 
 // Start Team LinkedIn OAuth
-export function startTeamOAuth(req, res) {
+export async function startTeamOAuth(req, res) {
   try {
     const { teamId, userId, returnUrl } = req.query;
 
@@ -1093,15 +1226,11 @@ export function startTeamOAuth(req, res) {
 
     const state = `team_${teamId}_${userId}_${Math.random().toString(36).substring(2, 15)}`;
 
-    stateStore.set(state, {
+    await persistOauthState(state, {
       teamId,
       userId,
       returnUrl,
-      timestamp: Date.now()
-    });
-
-    setTimeout(() => {
-      stateStore.delete(state);
+      timestamp: Date.now(),
     }, 5 * 60 * 1000);
 
     const params = new URLSearchParams({

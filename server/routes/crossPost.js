@@ -1,8 +1,10 @@
 import express from 'express';
 import { pool } from '../config/database.js';
+import aiService from '../services/aiService.js';
 import { createLinkedInPost, refreshLinkedInAccessToken, uploadImageToLinkedIn } from '../services/linkedinService.js';
 import { logger } from '../utils/logger.js';
 import { resolveLinkedInAuthorIdentity } from '../utils/linkedinAuthorIdentity.js';
+import { create as createScheduledLinkedInPost } from '../models/scheduledPostModel.js';
 
 const router = express.Router();
 const TEAM_ADMIN_ROLES = new Set(['owner', 'admin']);
@@ -771,6 +773,9 @@ router.post('/workspace/snapshot', async (req, res) => {
 
   const platformUserId = String(req.headers['x-platform-user-id'] || '').trim();
   const platformTeamId = String(req.headers['x-platform-team-id'] || '').trim() || null;
+  const targetAccountIds = Array.isArray(req.body?.targetAccountIds)
+    ? [...new Set(req.body.targetAccountIds.map((item) => String(item || '').trim()).filter(Boolean))]
+    : [];
   const limit = Math.max(1, Math.min(100, Number(req.body?.limit || 50) || 50));
   const queueLimit = Math.max(1, Math.min(100, Number(req.body?.queueLimit || 50) || 50));
 
@@ -820,6 +825,7 @@ router.post('/workspace/snapshot', async (req, res) => {
            slp.media_urls,
            slp.post_type,
            slp.company_id,
+           slp.metadata,
            slp.scheduled_time,
            slp.status,
            slp.error_message,
@@ -832,7 +838,16 @@ router.post('/workspace/snapshot', async (req, res) => {
          LIMIT $${scheduleParams.length}`,
         scheduleParams
       );
-      scheduleRows = scheduleResult.rows || [];
+      scheduleRows = (scheduleResult.rows || []).filter((row) => {
+        if (targetAccountIds.length === 0) return true;
+        const companyId = row?.company_id !== undefined && row?.company_id !== null ? String(row.company_id).trim() : '';
+        const metadata = row?.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+        const metadataTargetId =
+          metadata?.target_account_id !== undefined && metadata?.target_account_id !== null
+            ? String(metadata.target_account_id).trim()
+            : '';
+        return targetAccountIds.includes(companyId) || (metadataTargetId && targetAccountIds.includes(metadataTargetId));
+      });
     } catch (error) {
       if (!isMissingRelation(error)) throw error;
     }
@@ -900,6 +915,353 @@ router.post('/workspace/snapshot', async (req, res) => {
     return res.status(500).json({
       error: 'Failed to fetch LinkedIn workspace snapshot',
       code: 'LINKEDIN_WORKSPACE_SNAPSHOT_FAILED',
+    });
+  }
+});
+
+router.post('/analytics/summary', async (req, res) => {
+  if (!req.isInternal) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const platformUserId = String(req.headers['x-platform-user-id'] || '').trim();
+  const targetAccountIds = Array.isArray(req.body?.targetAccountIds)
+    ? [...new Set(req.body.targetAccountIds.map((item) => String(item || '').trim()).filter(Boolean))]
+    : [];
+  const days = Math.max(1, Math.min(365, Number(req.body?.days || 30) || 30));
+
+  if (!platformUserId) {
+    return res.status(400).json({
+      error: 'x-platform-user-id is required',
+      code: 'PLATFORM_USER_ID_REQUIRED',
+    });
+  }
+
+  try {
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - days);
+
+    const postParams = [platformUserId, startDate];
+    const postFilters = [
+      'user_id = $1',
+      'COALESCE(posted_at, created_at) >= $2',
+      "status = 'posted'",
+    ];
+
+    if (targetAccountIds.length > 0) {
+      postParams.push(targetAccountIds);
+      const index = postParams.length;
+      postFilters.push(`(
+        COALESCE(account_id::text, '') = ANY($${index}::text[])
+        OR COALESCE(company_id::text, '') = ANY($${index}::text[])
+        OR COALESCE(linkedin_user_id::text, '') = ANY($${index}::text[])
+      )`);
+    }
+
+    const postsResult = await pool.query(
+      `SELECT
+         COUNT(*)::int AS total_posts,
+         COALESCE(SUM(views), 0)::bigint AS total_views,
+         COALESCE(SUM(likes), 0)::bigint AS total_likes,
+         COALESCE(SUM(comments), 0)::bigint AS total_comments,
+         COALESCE(SUM(shares), 0)::bigint AS total_shares,
+         COALESCE(SUM(likes + comments + shares), 0)::bigint AS total_engagement
+       FROM linkedin_posts
+       WHERE ${postFilters.join(' AND ')}`,
+      postParams
+    );
+
+    const queueResult = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'needs_approval')::int AS pending_approvals,
+         COUNT(*) FILTER (WHERE status = 'draft')::int AS draft_queue,
+         COUNT(*) FILTER (WHERE status = 'approved')::int AS approved_queue,
+         COUNT(*) FILTER (WHERE status = 'posted')::int AS posted_queue
+       FROM linkedin_automation_queue
+       WHERE user_id = $1`,
+      [platformUserId]
+    ).catch((error) => (isMissingRelation(error) ? { rows: [{}] } : Promise.reject(error)));
+
+    return res.json({
+      success: true,
+      platform: 'linkedin',
+      totalPosts: Number(postsResult.rows[0]?.total_posts || 0),
+      totalViews: Number(postsResult.rows[0]?.total_views || 0),
+      totalLikes: Number(postsResult.rows[0]?.total_likes || 0),
+      totalComments: Number(postsResult.rows[0]?.total_comments || 0),
+      totalShares: Number(postsResult.rows[0]?.total_shares || 0),
+      totalEngagement: Number(postsResult.rows[0]?.total_engagement || 0),
+      pendingApprovals: Number(queueResult.rows[0]?.pending_approvals || 0),
+      draftQueue: Number(queueResult.rows[0]?.draft_queue || 0),
+      approvedQueue: Number(queueResult.rows[0]?.approved_queue || 0),
+      postedQueue: Number(queueResult.rows[0]?.posted_queue || 0),
+    });
+  } catch (error) {
+    logger.error('[cross-post] Failed to build LinkedIn analytics summary', {
+      user: platformUserId,
+      error: error?.message || String(error),
+    });
+    return res.status(500).json({
+      error: 'Failed to fetch LinkedIn analytics summary',
+      code: 'LINKEDIN_ANALYTICS_SUMMARY_FAILED',
+    });
+  }
+});
+
+router.post('/engagement/summary', async (req, res) => {
+  if (!req.isInternal) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const platformUserId = String(req.headers['x-platform-user-id'] || '').trim();
+  const days = Math.max(1, Math.min(365, Number(req.body?.days || 30) || 30));
+
+  if (!platformUserId) {
+    return res.status(400).json({
+      error: 'x-platform-user-id is required',
+      code: 'PLATFORM_USER_ID_REQUIRED',
+    });
+  }
+
+  try {
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - days);
+
+    const assistResult = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'ready')::int AS ready_reply_drafts,
+         COUNT(*) FILTER (WHERE status = 'sent')::int AS sent_replies
+       FROM linkedin_comment_reply_assist
+       WHERE user_id = $1
+         AND created_at >= $2`,
+      [platformUserId, startDate]
+    ).catch((error) => (isMissingRelation(error) ? { rows: [{}] } : Promise.reject(error)));
+
+    const postsWithCommentsResult = await pool.query(
+      `SELECT COUNT(*)::int AS posts_with_comments
+       FROM linkedin_posts
+       WHERE user_id = $1
+         AND COALESCE(posted_at, created_at) >= $2
+         AND COALESCE(comments, 0) > 0`,
+      [platformUserId, startDate]
+    ).catch((error) => (isMissingRelation(error) ? { rows: [{}] } : Promise.reject(error)));
+
+    return res.json({
+      success: true,
+      platform: 'linkedin',
+      readyReplyDrafts: Number(assistResult.rows[0]?.ready_reply_drafts || 0),
+      sentReplies: Number(assistResult.rows[0]?.sent_replies || 0),
+      postsWithComments: Number(postsWithCommentsResult.rows[0]?.posts_with_comments || 0),
+    });
+  } catch (error) {
+    logger.error('[cross-post] Failed to build LinkedIn engagement summary', {
+      user: platformUserId,
+      error: error?.message || String(error),
+    });
+    return res.status(500).json({
+      error: 'Failed to fetch LinkedIn engagement summary',
+      code: 'LINKEDIN_ENGAGEMENT_SUMMARY_FAILED',
+    });
+  }
+});
+
+router.post('/generate', async (req, res) => {
+  const platformUserId = parseNonEmptyString(req.headers['x-platform-user-id'], 128);
+  const { prompt, style = 'professional', workspaceName = '', brandName = '' } = req.body || {};
+
+  if (!platformUserId) {
+    return res.status(400).json({
+      error: 'Platform user ID is required',
+      code: 'PLATFORM_USER_ID_REQUIRED',
+    });
+  }
+
+  const normalizedPrompt = parseNonEmptyString(prompt, 4000);
+  if (!normalizedPrompt || normalizedPrompt.length < 5) {
+    return res.status(400).json({
+      error: 'Prompt must be at least 5 characters long',
+      code: 'LINKEDIN_GENERATE_PROMPT_REQUIRED',
+    });
+  }
+
+  try {
+    const fullPrompt = [
+      brandName ? `Brand: ${brandName}` : null,
+      workspaceName ? `Workspace: ${workspaceName}` : null,
+      normalizedPrompt,
+    ].filter(Boolean).join('\n');
+
+    const result = await aiService.generateContent(
+      fullPrompt,
+      parseNonEmptyString(style, 40) || 'professional',
+      2,
+      null,
+      platformUserId,
+      null
+    );
+
+    return res.json({
+      success: true,
+      content: result?.content || '',
+      provider: result?.provider || null,
+      keyType: result?.keyType || null,
+      mode: 'single',
+    });
+  } catch (error) {
+    logger.error('[cross-post/generate] Failed to generate LinkedIn workspace draft', {
+      user: platformUserId,
+      error: error?.message || String(error),
+    });
+    return res.status(500).json({
+      error: 'Failed to generate LinkedIn draft',
+      code: 'LINKEDIN_GENERATE_FAILED',
+    });
+  }
+});
+
+router.post('/schedule', async (req, res) => {
+  if (!req.isInternal) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const platformUserId = parseNonEmptyString(req.headers['x-platform-user-id'], 128);
+  const platformTeamId = parseNonEmptyString(req.headers['x-platform-team-id'], 128);
+  const {
+    content = '',
+    media = [],
+    mediaUrls = [],
+    scheduledFor = null,
+    timezone = 'UTC',
+    targetLinkedinTeamAccountId = null,
+    targetAccountId = null,
+    metadata = {},
+  } = req.body || {};
+
+  if (!platformUserId || !parseNonEmptyString(content, 5000) || !scheduledFor) {
+    return res.status(400).json({
+      error: 'content, scheduledFor, and x-platform-user-id are required',
+      code: 'LINKEDIN_SCHEDULE_REQUIRED_FIELDS',
+    });
+  }
+
+  let scheduledTimeUtc;
+  try {
+    scheduledTimeUtc = parseNonEmptyString(timezone, 100)
+      ? new Date(new Date(scheduledFor).toLocaleString('en-US', { timeZone: String(timezone) }))
+      : new Date(scheduledFor);
+  } catch {
+    scheduledTimeUtc = new Date(scheduledFor);
+  }
+
+  if (Number.isNaN(new Date(scheduledFor).getTime())) {
+    return res.status(400).json({
+      error: 'Invalid scheduledFor value',
+      code: 'LINKEDIN_SCHEDULE_INVALID_TIME',
+    });
+  }
+
+  if (new Date(scheduledFor).getTime() <= Date.now()) {
+    return res.status(400).json({
+      error: 'scheduledFor must be in the future',
+      code: 'LINKEDIN_SCHEDULE_INVALID_TIME',
+    });
+  }
+
+  try {
+    let isTeamTarget = false;
+    let resolvedCompanyId = null;
+    let resolvedPersonalTargetId = null;
+
+    if (targetLinkedinTeamAccountId) {
+      if (!platformTeamId) {
+        return res.status(400).json({
+          error: 'x-platform-team-id is required when targetLinkedinTeamAccountId is provided',
+          code: 'LINKEDIN_TEAM_CONTEXT_REQUIRED',
+        });
+      }
+
+      const targetResolution = await resolveExplicitTeamLinkedInTarget({
+        teamId: platformTeamId,
+        platformUserId,
+        targetLinkedinTeamAccountId,
+      });
+
+      if (targetResolution.error) {
+        return res.status(targetResolution.error.status).json({
+          error: targetResolution.error.message,
+          code: targetResolution.error.code,
+        });
+      }
+
+      isTeamTarget = true;
+      resolvedCompanyId = String(targetResolution.targetRow?.social_id || targetResolution.targetRow?.id || platformTeamId);
+    } else if (platformTeamId) {
+      const { targets } = await listEligibleTeamLinkedInTargets({
+        teamId: platformTeamId,
+        platformUserId,
+      });
+
+      if (Array.isArray(targets) && targets.length > 0) {
+        isTeamTarget = true;
+        resolvedCompanyId = String(targets[0].id);
+      } else {
+        resolvedCompanyId = String(platformTeamId);
+      }
+    } else if (targetAccountId) {
+      const targetResolution = await resolveExplicitPersonalLinkedInTarget({
+        platformUserId,
+        targetAccountId,
+      });
+
+      if (targetResolution.error) {
+        return res.status(targetResolution.error.status).json({
+          error: targetResolution.error.message,
+          code: targetResolution.error.code,
+        });
+      }
+
+      resolvedPersonalTargetId = String(targetAccountId).trim();
+    }
+
+    const normalizedMedia = normalizeCrossPostMediaInputs(
+      Array.isArray(media) && media.length > 0 ? media : mediaUrls
+    );
+    const scheduledPost = await createScheduledLinkedInPost({
+      user_id: platformUserId,
+      post_content: parseNonEmptyString(content, 5000),
+      media_urls: normalizedMedia,
+      post_type: 'single_post',
+      company_id: isTeamTarget ? resolvedCompanyId : null,
+      scheduled_time: new Date(scheduledFor).toISOString(),
+      timezone: parseNonEmptyString(timezone, 100),
+      metadata: {
+        ...(metadata && typeof metadata === 'object' ? metadata : {}),
+        agency_workspace: {
+          source: 'agency_workspace',
+          scheduledAt: new Date().toISOString(),
+        },
+        ...(resolvedPersonalTargetId ? { target_account_id: resolvedPersonalTargetId } : {}),
+      },
+      status: 'scheduled',
+    });
+
+    return res.json({
+      success: true,
+      status: 'scheduled',
+      scheduledPostId: scheduledPost?.id || null,
+      scheduledTime: scheduledPost?.scheduled_time || new Date(scheduledFor).toISOString(),
+      companyId: isTeamTarget ? resolvedCompanyId : null,
+      targetAccountId: resolvedPersonalTargetId,
+    });
+  } catch (error) {
+    logger.error('[cross-post/schedule] Failed to schedule LinkedIn workspace post', {
+      user: platformUserId,
+      teamId: platformTeamId,
+      error: error?.message || String(error),
+    });
+    return res.status(500).json({
+      error: error?.message || 'Failed to schedule LinkedIn post',
+      code: 'LINKEDIN_SCHEDULE_FAILED',
     });
   }
 });

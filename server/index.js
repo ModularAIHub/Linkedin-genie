@@ -15,6 +15,7 @@ import crossPostRoutes from './routes/crossPost.js';
 
 // Middleware imports
 import { requirePlatformLogin } from './middleware/requirePlatformLogin.js';
+import { applyAgencyWorkspaceContext } from './middleware/agencyWorkspace.js';
 import errorHandler from './middleware/errorHandler.js';
 import { logger } from './utils/logger.js';
 import internalAuth from './middleware/internalAuth.js';
@@ -228,7 +229,15 @@ app.use(cors({
     'X-Selected-Account-Id',
     'x-selected-account-id',
     'X-Team-Id',
-    'x-team-id'
+    'x-team-id',
+    'X-Agency-Token',
+    'x-agency-token',
+    'X-Agency-Workspace-Id',
+    'x-agency-workspace-id',
+    'X-Agency-Tool',
+    'x-agency-tool',
+    'X-Agency-Target',
+    'x-agency-target'
   ],
   exposedHeaders: ['Set-Cookie']
 }));
@@ -237,6 +246,7 @@ app.set('trust proxy', 1);
 app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(applyAgencyWorkspaceContext);
 
 // Handle malformed JSON payloads early (before Honeybadger error middleware)
 app.use((err, req, res, next) => {

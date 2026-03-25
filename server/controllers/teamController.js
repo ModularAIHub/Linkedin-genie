@@ -25,6 +25,25 @@ const normalizeString = (value, maxLen = null) => {
   return stringValue;
 };
 
+const filterAgencyWorkspaceAccounts = (accounts = [], agencyWorkspace = null) => {
+  const allowed = Array.isArray(agencyWorkspace?.allowedAccountIds)
+    ? agencyWorkspace.allowedAccountIds.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
+
+  if (allowed.length === 0) return accounts;
+
+  return accounts.filter((account) => {
+    const candidates = [
+      normalizeString(account?.id, 255),
+      normalizeString(account?.account_id, 255),
+      normalizeString(account?.linkedin_user_id, 255),
+      normalizeString(account?.organization_id, 255),
+    ].filter(Boolean);
+
+    return candidates.some((candidate) => allowed.includes(candidate));
+  });
+};
+
 async function getUserSelectedAccountPreference(userId) {
   const normalizedUserId = normalizeString(userId, 255);
   if (!normalizedUserId) return null;
@@ -294,7 +313,10 @@ export async function getAccounts(req, res) {
           };
         }));
 
-        const payload = await buildAccountsResponsePayload(userId, teamAccounts);
+        const payload = await buildAccountsResponsePayload(
+          userId,
+          filterAgencyWorkspaceAccounts(teamAccounts, req.agencyWorkspace)
+        );
         return res.json(payload);
       }
 
@@ -368,7 +390,10 @@ export async function getAccounts(req, res) {
         };
       }));
 
-      const payload = await buildAccountsResponsePayload(userId, legacyAccounts);
+      const payload = await buildAccountsResponsePayload(
+        userId,
+        filterAgencyWorkspaceAccounts(legacyAccounts, req.agencyWorkspace)
+      );
       return res.json(payload);
     }
 
@@ -423,7 +448,10 @@ export async function getAccounts(req, res) {
       };
     });
 
-    const payload = await buildAccountsResponsePayload(userId, accounts);
+    const payload = await buildAccountsResponsePayload(
+      userId,
+      filterAgencyWorkspaceAccounts(accounts, req.agencyWorkspace)
+    );
     res.json(payload);
   } catch (error) {
     console.error('[getAccounts] ❌ Error fetching LinkedIn accounts:', error);
