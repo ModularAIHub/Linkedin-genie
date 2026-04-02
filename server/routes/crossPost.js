@@ -5,6 +5,8 @@ import { createLinkedInPost, refreshLinkedInAccessToken, uploadImageToLinkedIn }
 import { logger } from '../utils/logger.js';
 import { resolveLinkedInAuthorIdentity } from '../utils/linkedinAuthorIdentity.js';
 import { create as createScheduledLinkedInPost } from '../models/scheduledPostModel.js';
+import linkedinAutomationService from '../services/linkedinAutomationService.js';
+import competitorIntelService from '../services/competitorIntelService.js';
 
 const router = express.Router();
 const TEAM_ADMIN_ROLES = new Set(['owner', 'admin']);
@@ -32,6 +34,11 @@ const normalizeOptionalString = (value, maxLength = 255) => {
 };
 const isMissingRelation = (error) =>
   error?.code === '42P01' || String(error?.message || '').toLowerCase().includes('does not exist');
+const INTERNAL_ANALYSIS_STOP_WORDS = new Set([
+  'the', 'and', 'for', 'with', 'this', 'that', 'your', 'from', 'into', 'about', 'have', 'just',
+  'they', 'them', 'their', 'there', 'what', 'when', 'where', 'which', 'would', 'could', 'should',
+  'linkedin', 'post', 'posts', 'content', 'build', 'building', 'audience', 'strategy',
+]);
 
 const normalizeLinkedInActorId = (value) => {
   const normalized = normalizeOptionalString(value, 255);
@@ -40,6 +47,90 @@ const normalizeLinkedInActorId = (value) => {
   if (normalized.startsWith('urn:li:organization:')) return normalized.slice('urn:li:organization:'.length) || null;
   if (normalized.startsWith('urn:li:person:')) return normalized.slice('urn:li:person:'.length) || null;
   return normalized;
+};
+
+const normalizeAnalysisToken = (value) =>
+  String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9+#@-]/g, '')
+    .trim();
+
+const extractTopAnalysisTopics = (values = [], limit = 8) => {
+  const scores = new Map();
+  const addToken = (rawToken, weight = 1) => {
+    const token = normalizeAnalysisToken(rawToken).replace(/^#/, '');
+    if (!token) return;
+    if (INTERNAL_ANALYSIS_STOP_WORDS.has(token)) return;
+    if (token.length < 4 && !['ai', 'ux', 'ui', 'api', 'seo', 'saas', 'b2b', 'b2c'].includes(token)) return;
+    scores.set(token, (scores.get(token) || 0) + weight);
+  };
+
+  for (const rawValue of Array.isArray(values) ? values : []) {
+    const text = String(rawValue || '').trim();
+    if (!text) continue;
+    for (const match of text.matchAll(/#[a-z0-9_]+/gi)) {
+      addToken(match[0], 3);
+    }
+    text
+      .replace(/https?:\/\/\S+/gi, ' ')
+      .split(/[^a-zA-Z0-9+#@-]+/)
+      .forEach((token) => addToken(token, 1));
+  }
+
+  return [...scores.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, limit)
+    .map(([token]) => token);
+};
+
+const dedupeStringsSimple = (items = [], limit = 12) => {
+  const seen = new Set();
+  const out = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    const value = normalizeOptionalString(item, 240);
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+    if (out.length >= limit) break;
+  }
+  return out;
+};
+
+const extractCompetitorTargetsFromLinkedInPosts = (posts = [], accountSnapshot = {}) => {
+  const ownTokens = new Set(
+    [
+      accountSnapshot?.display_name,
+      accountSnapshot?.username,
+    ]
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const counts = new Map();
+  const addCandidate = (rawValue, weight = 1) => {
+    const value = String(rawValue || '').trim();
+    if (!value) return;
+    const key = value.toLowerCase();
+    if (ownTokens.has(key)) return;
+    counts.set(value, (counts.get(value) || 0) + weight);
+  };
+
+  for (const post of Array.isArray(posts) ? posts : []) {
+    const snippet = String(post?.snippet || post?.content || '');
+
+    for (const match of snippet.matchAll(/(^|[\s(])@([a-z0-9_.-]{2,60})\b/gi)) {
+      addCandidate(`@${String(match[2] || '').toLowerCase()}`, 2);
+    }
+    for (const match of snippet.matchAll(/linkedin\.com\/(?:company|in)\/([a-z0-9-]{2,80})/gi)) {
+      addCandidate(`linkedin.com/${String(match[1] || '').toLowerCase()}`, 2);
+    }
+  }
+
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 5)
+    .map(([value]) => value);
 };
 
 const normalizeCrossPostMediaInputs = (value) => {
@@ -1061,6 +1152,140 @@ router.post('/engagement/summary', async (req, res) => {
     return res.status(500).json({
       error: 'Failed to fetch LinkedIn engagement summary',
       code: 'LINKEDIN_ENGAGEMENT_SUMMARY_FAILED',
+    });
+  }
+});
+
+router.post('/analysis-context', async (req, res) => {
+  if (!req.isInternal) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const platformUserId = String(req.headers['x-platform-user-id'] || '').trim();
+  const platformTeamId = String(req.headers['x-platform-team-id'] || '').trim() || null;
+  const targetAccountId = parseNonEmptyString(req.body?.targetAccountId, 128);
+
+  if (!platformUserId) {
+    return res.status(400).json({
+      error: 'x-platform-user-id is required',
+      code: 'PLATFORM_USER_ID_REQUIRED',
+    });
+  }
+
+  try {
+    const resolvedAccountType = platformTeamId ? 'team' : null;
+    const [profileRow, competitorRow, accountSnapshot, postSummary] = await Promise.all([
+      linkedinAutomationService.getProfileContextRow(platformUserId),
+      linkedinAutomationService.getCompetitorRow(platformUserId),
+      linkedinAutomationService.getLinkedinAccountSnapshot(platformUserId, {
+        accountId: targetAccountId,
+        accountType: resolvedAccountType,
+      }),
+      linkedinAutomationService.getPostSummary(platformUserId, {
+        limit: 20,
+        accountId: targetAccountId,
+        accountType: resolvedAccountType,
+      }),
+    ]);
+
+    const profileContext = linkedinAutomationService.mapProfileContext(profileRow);
+    const savedCompetitorConfig = linkedinAutomationService.mapCompetitors(competitorRow);
+    const postTexts = [
+      ...(Array.isArray(postSummary?.recentPosts) ? postSummary.recentPosts.map((item) => item?.snippet || item?.content || '') : []),
+      ...(Array.isArray(postSummary?.topPosts) ? postSummary.topPosts.map((item) => item?.snippet || item?.content || '') : []),
+      accountSnapshot?.headline || '',
+      accountSnapshot?.about || '',
+    ].filter(Boolean);
+    const autoCompetitorTargets = extractCompetitorTargetsFromLinkedInPosts([
+      ...(Array.isArray(postSummary?.recentPosts) ? postSummary.recentPosts : []),
+      ...(Array.isArray(postSummary?.topPosts) ? postSummary.topPosts : []),
+    ], accountSnapshot || {});
+
+    let autoCompetitorIntel = {
+      referenceAccounts: [],
+      competitorProfiles: autoCompetitorTargets,
+      competitorExamples: [],
+      scrapeReport: { warnings: [] },
+    };
+    if (autoCompetitorTargets.length > 0) {
+      autoCompetitorIntel = await competitorIntelService.analyzeTargets({
+        competitorTargets: autoCompetitorTargets,
+        manualExamples: [],
+        winAngle: savedCompetitorConfig?.win_angle || 'authority',
+        consentScrape: false,
+      });
+    }
+
+    const mergedCompetitorConfig = {
+      ...savedCompetitorConfig,
+      competitor_profiles: dedupeStringsSimple([
+        ...(Array.isArray(savedCompetitorConfig?.competitor_profiles) ? savedCompetitorConfig.competitor_profiles : []),
+        ...(Array.isArray(autoCompetitorIntel?.competitorProfiles) ? autoCompetitorIntel.competitorProfiles : []),
+      ], 5),
+    };
+    const heuristicAnalysis = linkedinAutomationService.buildHeuristicAnalysis({
+      profileContext,
+      competitorConfig: mergedCompetitorConfig,
+      postSummary,
+      accountSnapshot,
+    });
+    const topTopics = dedupeStringsSimple([
+      ...(Array.isArray(postSummary?.themes) ? postSummary.themes : []),
+      ...extractTopAnalysisTopics(postTexts, 8),
+    ], 8);
+    const niche = normalizeOptionalString(
+      profileContext?.role_niche ||
+      (topTopics.length > 0 ? topTopics.slice(0, Math.min(3, topTopics.length)).join(' / ') : null) ||
+      accountSnapshot?.headline,
+      180
+    );
+    const audience = normalizeOptionalString(
+      profileContext?.target_audience ||
+      (topTopics.length > 0 ? `LinkedIn peers interested in ${topTopics.slice(0, 2).join(' and ')}` : null),
+      180
+    );
+
+    return res.json({
+      success: true,
+      platform: 'linkedin',
+      scope: platformTeamId ? 'team' : 'personal',
+      profile: accountSnapshot,
+      analysis: {
+        niche,
+        audience,
+        tone: profileContext?.tone_style || 'Professional and insight-led',
+        top_topics: topTopics,
+        confidence: postSummary?.postCount >= 8 ? 'high' : postSummary?.postCount >= 3 ? 'medium' : 'low',
+        confidence_reason: postSummary?.postCount > 0
+          ? `Based on ${postSummary.postCount} recent LinkedIn post(s) and connected profile context`
+          : 'Based on connected LinkedIn profile context',
+      },
+      discoveries: {
+        postCount: Number(postSummary?.postCount || 0),
+        themes: Array.isArray(postSummary?.themes) ? postSummary.themes.slice(0, 8) : [],
+        strengths: Array.isArray(heuristicAnalysis?.strengths) ? heuristicAnalysis.strengths : [],
+        gaps: Array.isArray(heuristicAnalysis?.gaps) ? heuristicAnalysis.gaps : [],
+        opportunities: Array.isArray(heuristicAnalysis?.opportunities) ? heuristicAnalysis.opportunities : [],
+        nextAngles: Array.isArray(heuristicAnalysis?.nextAngles) ? heuristicAnalysis.nextAngles : [],
+        competitorCandidates: autoCompetitorTargets,
+        competitorReferences: Array.isArray(autoCompetitorIntel?.referenceAccounts)
+          ? autoCompetitorIntel.referenceAccounts.slice(0, 5)
+          : [],
+      },
+      warnings: Array.isArray(autoCompetitorIntel?.scrapeReport?.warnings)
+        ? autoCompetitorIntel.scrapeReport.warnings.slice(0, 5)
+        : [],
+    });
+  } catch (error) {
+    logger.error('[cross-post] Failed to build LinkedIn analysis context', {
+      user: platformUserId,
+      teamId: platformTeamId,
+      targetAccountId,
+      error: error?.message || String(error),
+    });
+    return res.status(500).json({
+      error: 'Failed to build LinkedIn analysis context',
+      code: 'LINKEDIN_ANALYSIS_CONTEXT_FAILED',
     });
   }
 });
