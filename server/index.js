@@ -16,6 +16,7 @@ import crossPostRoutes from './routes/crossPost.js';
 // Middleware imports
 import { requirePlatformLogin } from './middleware/requirePlatformLogin.js';
 import { applyAgencyWorkspaceContext } from './middleware/agencyWorkspace.js';
+import { captureRequestContext } from './utils/requestContext.js';
 import errorHandler from './middleware/errorHandler.js';
 import { logger } from './utils/logger.js';
 import internalAuth from './middleware/internalAuth.js';
@@ -247,6 +248,7 @@ app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(applyAgencyWorkspaceContext);
+app.use(captureRequestContext);
 
 // Handle malformed JSON payloads early (before Honeybadger error middleware)
 app.use((err, req, res, next) => {

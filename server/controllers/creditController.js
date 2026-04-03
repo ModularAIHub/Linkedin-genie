@@ -8,7 +8,13 @@ export async function getBalance(req, res) {
       return res.status(401).json({ error: 'Not authenticated (no userId)' });
     }
     const balance = await creditService.getBalance(userId);
-    res.json({ balance, creditsRemaining: balance });
+    res.json({
+      balance,
+      creditsRemaining: balance,
+      source: creditService.getContextScope?.() === 'agency' ? 'agency' : 'personal',
+      scope: creditService.getContextScope?.() === 'agency' ? 'agency' : 'personal',
+      agencyWorkspaceId: creditService.getContextScope?.() === 'agency' ? (req.agencyWorkspace?.workspaceId || null) : null,
+    });
   } catch (error) {
     console.error('Error in getBalance:', error);
     res.status(500).json({ error: 'Failed to fetch credit balance' });
@@ -20,7 +26,11 @@ export async function getHistory(req, res) {
     const userId = req.user.id;
     const { page = 1, limit = 20, type } = req.query;
     const history = await creditService.getUsageHistory(userId, { page: parseInt(page), limit: parseInt(limit), type });
-    res.json(history);
+    res.json({
+      ...history,
+      source: creditService.getContextScope?.() === 'agency' ? 'agency' : 'personal',
+      scope: creditService.getContextScope?.() === 'agency' ? 'agency' : 'personal',
+    });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch credit history' });
   }

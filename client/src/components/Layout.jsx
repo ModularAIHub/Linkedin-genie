@@ -31,6 +31,7 @@ const Layout = ({ children }) => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [creditBalance, setCreditBalance] = useState(null);
+  const [creditSource, setCreditSource] = useState('personal');
   const [loadingCredits, setLoadingCredits] = useState(true);
   const CREDITS_REFRESH_MS = 5 * 60 * 1000;
   const hasProAccess = hasProPlanAccess(user);
@@ -57,8 +58,16 @@ const Layout = ({ children }) => {
         setLoadingCredits(true);
         const response = await credits.getBalance();
         setCreditBalance(response.data.balance);
+        setCreditSource(
+          response.data?.source === 'agency'
+            ? 'agency'
+            : response.data?.source === 'team'
+              ? 'team'
+              : 'personal'
+        );
       } catch (error) {
         setCreditBalance(0);
+        setCreditSource('personal');
       } finally {
         setLoadingCredits(false);
       }
@@ -77,6 +86,13 @@ const Layout = ({ children }) => {
       try {
         const response = await credits.getBalance();
         setCreditBalance(response.data.balance);
+        setCreditSource(
+          response.data?.source === 'agency'
+            ? 'agency'
+            : response.data?.source === 'team'
+              ? 'team'
+              : 'personal'
+        );
       } catch (error) { }
     };
 
@@ -93,6 +109,13 @@ const Layout = ({ children }) => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [user]);
+
+  const creditScopeLabel =
+    creditSource === 'agency'
+      ? 'Available agency credits'
+      : creditSource === 'team'
+        ? 'Available team credits'
+        : 'Available credits';
 
   return (
     <div className="h-screen overflow-hidden bg-[#f3f6f8] flex">
@@ -175,7 +198,7 @@ const Layout = ({ children }) => {
                 creditBalance !== null ? creditBalance.toFixed(1) : '--'
               )}
             </div>
-            <p className="text-xs text-blue-500">Available credits</p>
+            <p className="text-xs text-blue-500">{creditScopeLabel}</p>
           </div>
         </div>
       </div>
